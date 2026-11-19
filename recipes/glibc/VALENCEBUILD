@@ -1,5 +1,6 @@
 pkgname=glibc
 pkgver=2.44
+pkgrel=1
 pkgdesc="The GNU C library"
 depends=(valence-layout)
 license=LGPL-2.1-or-later
@@ -28,7 +29,7 @@ build(){
 }
 package(){
   _env make -C build install_root=$pkgdir install
-  rm -rf $pkgdir/var/db $pkgdir/usr/share/info
+  rm -rf $pkgdir/var/db
   # name lookups: local files, then DNS for host names. The C.UTF-8 locale is built in; others are made with
   # localedef from glibc-locales.
   install -Dm644 $startdir/nsswitch.conf $pkgdir/etc/nsswitch.conf

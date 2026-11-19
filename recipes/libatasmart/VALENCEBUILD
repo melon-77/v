@@ -1,6 +1,6 @@
 pkgname=libatasmart
 pkgver=0.19
-pkgrel=0
+pkgrel=1
 pkgdesc="ATA S.M.A.R.T. disk health library (libblockdev's SMART plugin) and skdump"
 license=LGPL-2.1-or-later
 url=https://git.0pointer.net/libatasmart.git
@@ -11,4 +11,4 @@ subpackages=(libatasmart-dev)
 # its 2012 config.sub predates musl targets: use the build host's current one
 build(){ cp /usr/share/misc/config.sub /usr/share/misc/config.guess build-aux/
   ./configure $conf_flags --disable-static CC_FOR_BUILD=gcc; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/{doc,vala}; }
+package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/vala; }

@@ -1,5 +1,6 @@
 pkgname=elfutils
 pkgver=0.194
+pkgrel=1
 pkgdesc="ELF object file access library (libelf) and tools"
 license="GPL-3.0-or-later AND (GPL-2.0-or-later OR LGPL-3.0-or-later)"
 url=https://sourceware.org/elfutils
@@ -11,6 +12,6 @@ pkgdesc_libelf="libelf, libdw and libasm"
 build(){ CFLAGS="$CFLAGS -D_GNU_SOURCE -Wno-error -Wno-null-dereference" ./configure $conf_flags --disable-werror --program-prefix=eu- \
    --enable-deterministic-archives --disable-nls --disable-debuginfod --disable-libdebuginfod --with-zstd --without-bzlib --without-lzma
   make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/man; }
+package(){ make DESTDIR=$pkgdir install; }
 pkg_libelf(){ amove 'usr/lib/libelf*.so*' 'usr/lib/libdw*.so*' 'usr/lib/libasm*.so*'; amove usr/lib/libelf.so usr/lib/libdw.so usr/lib/libasm.so; }
 pkg_dev(){ default_dev; }

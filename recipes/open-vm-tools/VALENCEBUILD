@@ -1,6 +1,6 @@
 pkgname=open-vm-tools
 pkgver=13.0.10
-pkgrel=2
+pkgrel=3
 pkgdesc="VMware guest tools: screen auto-resize (resolutionKMS), time sync, clean shutdown, shared folders (vmhgfs-fuse)"
 license=LGPL-2.1-or-later
 url=https://github.com/vmware/open-vm-tools
@@ -26,7 +26,7 @@ build(){
   make -j$JOBS; }
 package(){
   make -C open-vm-tools DESTDIR=$pkgdir install
-  rm -rf $pkgdir/usr/share/doc $pkgdir/etc/pam.d $pkgdir/usr/lib/systemd
+  rm -rf $pkgdir/etc/pam.d $pkgdir/usr/lib/systemd
   local conf=$pkgdir/etc/vmware-tools share=$pkgdir/usr/share/open-vm-tools
   [ -f $conf/tools.conf.example ] && mv $conf/tools.conf.example $conf/tools.conf
   mkdir -p $share

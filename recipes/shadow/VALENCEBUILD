@@ -1,11 +1,12 @@
 pkgname=shadow
 pkgver=4.20.3
+pkgrel=1
 pkgdesc="Login and account tools: login, su, passwd, useradd, usermod and the rest"
 license=BSD-3-Clause
 url=https://github.com/shadow-maint/shadow
 source=(shadow-4.20.3.tar.xz)
 makedepends=(libxcrypt-dev acl-dev)
-subpackages=(shadow-dev shadow-doc)
+subpackages=(shadow-dev)
 # passwd, su, newgrp and a few more are setuid root. valence-build's own strip pass is skipped ('!strip') and
 # `make install-strip` strips while it installs, before the install hook sets those modes.
 options=('!strip')

@@ -1,5 +1,6 @@
 pkgname=libnl3
 pkgver=3.12.0
+pkgrel=1
 pkgdesc="Netlink socket library"
 license=LGPL-2.1-only
 url=https://github.com/thom311/libnl

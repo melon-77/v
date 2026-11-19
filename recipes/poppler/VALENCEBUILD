@@ -1,6 +1,6 @@
 pkgname=poppler
 pkgver=26.01.0
-pkgrel=0
+pkgrel=1
 pkgdesc="Poppler: PDF rendering library (C++ API) and the pdftops/pdftoppm tools, for printing"
 license=GPL-2.0-or-later
 url=https://poppler.freedesktop.org/
@@ -13,4 +13,4 @@ build(){ cmake_setup -B build -DENABLE_UNSTABLE_API_ABI_HEADERS=OFF -DBUILD_GTK_
            -DENABLE_GOBJECT_INTROSPECTION=OFF -DENABLE_QT5=OFF -DENABLE_QT6=OFF -DENABLE_LIBCURL=OFF -DENABLE_LIBTIFF=OFF -DENABLE_NSS3=OFF \
            -DENABLE_GPGME=OFF -DENABLE_LIBOPENJPEG=none -DENABLE_LCMS=ON -DENABLE_DCTDECODER=libjpeg -DRUN_GPERF_IF_PRESENT=OFF \
            -DCMAKE_DISABLE_FIND_PACKAGE_Cairo=ON; ninja -C build -j$JOBS; }
-package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/man; }
+package(){ DESTDIR=$pkgdir ninja -C build install; }

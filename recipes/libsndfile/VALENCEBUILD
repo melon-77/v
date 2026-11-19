@@ -1,6 +1,6 @@
 pkgname=libsndfile
 pkgver=1.2.2
-pkgrel=1
+pkgrel=2
 pkgdesc="Library for reading and writing sound files (WAV, FLAC, Ogg Vorbis, ...)"
 license=LGPL-2.1-or-later
 url=https://libsndfile.github.io/libsndfile/
@@ -11,4 +11,4 @@ subpackages=(libsndfile-dev)
 build(){ cmake_setup -B build -DBUILD_SHARED_LIBS=ON -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
   -DENABLE_EXTERNAL_LIBS=ON -DENABLE_MPEG=OFF \
   -DCMAKE_DISABLE_FIND_PACKAGE_ALSA=ON -DCMAKE_DISABLE_FIND_PACKAGE_Sqlite3=ON -DINSTALL_MANPAGES=OFF; ninja -C build; }
-package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc; }
+package(){ DESTDIR=$pkgdir ninja -C build install; }

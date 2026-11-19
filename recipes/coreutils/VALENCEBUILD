@@ -1,11 +1,11 @@
 pkgname=coreutils
 pkgver=9.12
+pkgrel=1
 pkgdesc="The GNU core utilities: ls, cp, mv, cat, sort and about a hundred more"
 license=GPL-3.0-or-later
 url=https://www.gnu.org/software/coreutils/
 source=(coreutils-9.12.tar.xz)
 makedepends=(acl-dev attr-dev openssl-dev)
-subpackages=(coreutils-doc)
 # The GNU tools take over BusyBox's command names: each ships a real file in /usr/bin where BusyBox only had a link
 # (BusyBox's trigger puts its link back when the package goes). kill and uptime are procps-ng's and hostname stays
 # BusyBox's: coreutils has its own of each and installs none of them unless asked.
@@ -15,4 +15,4 @@ build(){
     --with-openssl
   make -j$JOBS
 }
-package(){ make DESTDIR=$pkgdir install; rm -f $pkgdir/usr/share/info/dir; }
+package(){ make DESTDIR=$pkgdir install; }

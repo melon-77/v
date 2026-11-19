@@ -1,6 +1,6 @@
 pkgname=cmake
 pkgver=4.4.3
-pkgrel=0
+pkgrel=1
 pkgdesc="CMake: generates build files (ccmake included)"
 license=BSD-3-Clause
 url=https://cmake.org
@@ -17,4 +17,4 @@ build(){
     -DCMAKE_DOC_DIR=share/doc/cmake -DCMAKE_DATA_DIR=share/cmake
   ninja -C build -j$JOBS
 }
-package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc; }
+package(){ DESTDIR=$pkgdir ninja -C build install; }

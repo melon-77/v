@@ -90,6 +90,9 @@ for n, extra in PLASMA:
     ORDER.append((n, n, KDE + extra, 'kde'))
 
 # pkgrel for recipes whose build changed without a version change (rule 6/31 in AGENTS.md).
+# REBUILD is added to every one: 1 = docs and translations are no longer deleted, the builder puts them in
+# <pkg>-doc and <pkg>-lang (ROADMAP phase 3)
+REBUILD = 1
 # 1: Qt gained its xcb platform (Plasma 6 needs KDE's X11 integration headers even in a Wayland session)
 PKGREL = {n: 1 for n in ('qt6-qtbase kf6-kwindowsystem kf6-kguiaddons kf6-kdbusaddons kf6-kcrash kf6-kglobalaccel '
                          'kf6-kjobwidgets kf6-kidletime kf6-kstatusnotifieritem kf6-kio kf6-qqc2-desktop-style kf6-kdesu '
@@ -152,11 +155,11 @@ def write(name, deb, args, kind):
     if not os.path.lexists(lp): os.symlink(f'deb/{s["file"]}', lp)
     top = s['top']
     bdir = '$srcdir' if top == '.' else f'$srcdir/{top}'
-    lines = [f'pkgname={name}', f'pkgver={s["ver"].split("+")[0]}', f'pkgrel={PKGREL.get(name, 0)}', f'pkgdesc="{name}"',
+    lines = [f'pkgname={name}', f'pkgver={s["ver"].split("+")[0]}', f'pkgrel={PKGREL.get(name, 0) + REBUILD}', f'pkgdesc="{name}"',
              'license="LGPL-2.1-or-later OR GPL-2.0-or-later (see sources)"', f'source=({link})', f'builddir={bdir}']
     if kind != 'noarch-kde': lines.append(f'subpackages=({name}-dev)')
     lines.append(f'build(){{ {PRE.get(name, "")}cmake_setup -B build {args}; ninja -C build -j$JOBS; }}')
-    lines.append('package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc $pkgdir/usr/share/man;' + POST.get(name, '') + ' }')
+    lines.append('package(){ DESTDIR=$pkgdir ninja -C build install;' + POST.get(name, '') + ' }')
     if kind == 'qt':
         lines.append('pkg_dev(){ default_dev; amove usr/lib/qt6/mkspecs usr/lib/qt6/metatypes usr/lib/qt6/modules usr/lib/qt6/sbom; }')
     d = f'{M}/recipes/{name}'; os.makedirs(d, exist_ok=True)

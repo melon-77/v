@@ -1,13 +1,13 @@
 pkgname=gettext
 pkgver=0.23.2
-pkgrel=0
+pkgrel=1
 pkgdesc="GNU gettext: tools for translating programs (msgfmt, xgettext, envsubst, ...)"
 license="GPL-3.0-or-later AND LGPL-2.1-or-later"
 url=https://www.gnu.org/software/gettext/
 source=(gettext-0.23.2.tar.xz)
 builddir=$srcdir/gettext-0.23.2
 makedepends=(ncurses-dev libxml2-dev acl-dev)
-subpackages=(gettext-dev gettext-doc)
+subpackages=(gettext-dev)
 
 # musl has gettext() in libc and its own libintl.h, but configure only trusts a libc with glibc's internal symbols,
 # so it would build GNU libintl and install a second libintl.h over musl's. The cache answers make it use libc's

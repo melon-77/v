@@ -1,6 +1,6 @@
 pkgname=mesa
 pkgver=26.0.8
-pkgrel=4
+pkgrel=5
 pkgdesc="OpenGL, EGL, GBM and Vulkan drivers (AMD, Intel, NVIDIA nouveau, virtual, software)"
 # with LLVM: llvmpipe (fast software rendering for VMs and GPUs without a driver) and radeonsi's LLVM paths;
 # VALENCE_MESA_LLVM=disabled builds without it (radeonsi then uses only ACO)
@@ -40,7 +40,7 @@ build(){
     -Dzstd=enabled -Dintel-rt=disabled -Dgallium-rusticl=false -Dmicrosoft-clc=disabled build
   PATH=$M/hosttools/bin:$PATH ninja -C build -j$JOBS
 }
-package(){ PATH=$M/hosttools/bin:$PATH DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc; }
+package(){ PATH=$M/hosttools/bin:$PATH DESTDIR=$pkgdir ninja -C build install; }
 pkg_dri(){ amove usr/lib/dri 'usr/lib/libgallium-*.so' usr/share/drirc.d; }
 pkg_vulkan(){ amove 'usr/lib/libvulkan_*.so' usr/share/vulkan 'usr/lib/libVkLayer_*.so'; }
 pkg_va(){ amove 'usr/lib/dri/*_drv_video.so'; }

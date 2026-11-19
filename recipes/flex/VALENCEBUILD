@@ -1,6 +1,6 @@
 pkgname=flex
 pkgver=2.6.4
-pkgrel=0
+pkgrel=1
 pkgdesc="flex: generates lexical scanners"
 license=BSD-2-Clause
 url=https://github.com/westes/flex
@@ -12,4 +12,4 @@ build(){
     ./configure $conf_flags --disable-nls --disable-static
   make -j$JOBS
 }
-package(){ make DESTDIR=$pkgdir install; ln -s flex $pkgdir/usr/bin/lex; rm -rf $pkgdir/usr/share/{doc,info}; }
+package(){ make DESTDIR=$pkgdir install; ln -s flex $pkgdir/usr/bin/lex; }

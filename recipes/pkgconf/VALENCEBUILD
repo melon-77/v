@@ -1,6 +1,6 @@
 pkgname=pkgconf
 pkgver=2.5.1
-pkgrel=0
+pkgrel=1
 pkgdesc="pkgconf: finds libraries' compiler and linker flags (also answers to pkg-config)"
 license=ISC
 url=http://pkgconf.org
@@ -11,5 +11,5 @@ package(){
   make DESTDIR=$pkgdir install
   ln -s pkgconf $pkgdir/usr/bin/pkg-config
   # libpkgconf's headers and pkg-config file are for building other tools on it; nobody on Valence needs them
-  rm -rf $pkgdir/usr/share/{doc,info} $pkgdir/usr/include $pkgdir/usr/lib/pkgconfig $pkgdir/usr/lib/libpkgconf.so
+  rm -rf $pkgdir/usr/include $pkgdir/usr/lib/pkgconfig $pkgdir/usr/lib/libpkgconf.so
 }

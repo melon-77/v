@@ -1,6 +1,6 @@
 pkgname=cups
 pkgver=2.4.16
-pkgrel=4
+pkgrel=5
 pkgdesc="CUPS: the print server (cupsd), its backends and tools, and libcups"
 license=Apache-2.0
 url=https://openprinting.github.io/cups/
@@ -17,7 +17,7 @@ build(){ ./configure $conf_flags --with-tls=openssl --disable-static --disable-g
   --with-cups-user=lp --with-cups-group=lp --with-system-groups="lpadmin wheel root"
   make -j$JOBS; }
 # cups-config's static LIBS carries the sysroot -L paths pkg-config gave for Avahi and OpenSSL (rule 32)
-package(){ make BUILDROOT=$pkgdir install; rm -rf $pkgdir/usr/share/{doc,man,locale}; sed -i "s| -L$SYSROOT/usr/lib||g" $pkgdir/usr/bin/cups-config
+package(){ make BUILDROOT=$pkgdir install; sed -i "s| -L$SYSROOT/usr/lib||g" $pkgdir/usr/bin/cups-config
   # IdleExitTimeout only means something to an on-demand (systemd/launchd) cupsd; ours logs it as an error
   sed -i "/^IdleExitTimeout/d" $pkgdir/etc/cups/cupsd.conf $pkgdir/etc/cups/cupsd.conf.default
   cp -a $startdir/files/. $pkgdir/; chmod 755 $pkgdir/etc/sv/cupsd/run $pkgdir/etc/sv/cupsd/log/run; mkdir -p $pkgdir/var/log/cupsd; }

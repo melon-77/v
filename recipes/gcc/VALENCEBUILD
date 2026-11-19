@@ -1,6 +1,6 @@
 pkgname=gcc
 pkgver=15.2.0
-pkgrel=0
+pkgrel=1
 pkgdesc="GNU C compiler for building on Valence (C; C++ is the g++ package)"
 license="GPL-3.0-or-later WITH GCC-exception-3.1"
 url=https://gcc.gnu.org
@@ -36,7 +36,7 @@ package(){
   # the runtime libraries and C++ headers belong to gcc-runtime's packages
   rm -f $pkgdir/usr/lib/lib{gcc_s,stdc++,stdc++fs,supc++,atomic,gomp,itm,ssp}*.so* $pkgdir/usr/lib/lib{stdc++,stdc++fs,supc++}*.a \
     $pkgdir/usr/lib/*.py $pkgdir/usr/lib/*.la
-  rm -rf $pkgdir/usr/include/c++ $pkgdir/usr/share/{doc,info,gcc-15.2.0} $pkgdir/usr/lib/gcc/$CHOST/15.2.0/include-fixed/README
+  rm -rf $pkgdir/usr/include/c++ $pkgdir/usr/share/gcc-15.2.0 $pkgdir/usr/lib/gcc/$CHOST/15.2.0/include-fixed/README
   # plain names (gcc, cc) next to the target-prefixed ones
   ln -sf gcc $pkgdir/usr/bin/cc
 }

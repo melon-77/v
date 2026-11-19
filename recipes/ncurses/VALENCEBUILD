@@ -1,6 +1,6 @@
 pkgname=ncurses
 pkgver=6.6
-pkgrel=1
+pkgrel=2
 pkgdesc="Console display library"
 license=MIT
 url=https://invisible-island.net/ncurses/
@@ -28,7 +28,6 @@ package(){
     [ -f $pkgdir/usr/lib/pkgconfig/${l}w.pc ] && ln -sf ${l}w.pc $pkgdir/usr/lib/pkgconfig/$l.pc
   done
   ln -sf libncursesw.so $pkgdir/usr/lib/libcurses.so; ln -sf libncursesw.so $pkgdir/usr/lib/libtinfo.so; ln -sf libncursesw.so $pkgdir/usr/lib/libtinfow.so; ln -sf ncursesw.pc $pkgdir/usr/lib/pkgconfig/tinfo.pc
-  rm -rf $pkgdir/usr/share/man
 }
 pkg_terminfo_base(){ local t; for t in ansi console dumb linux rxvt rxvt-unicode screen screen-256color sun tmux tmux-256color vt100 vt102 vt200 vt220 vt52 xterm xterm-256color xterm-color xterm-xfree86 alacritty foot kitty xterm-kitty konsole konsole-256color putty st st-256color; do
   for f in $pkgdir/usr/share/terminfo/*/$t; do [ -e "$f" ] && amove "${f#$pkgdir/}"; done; done; amove usr/share/tabset; }

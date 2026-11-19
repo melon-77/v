@@ -1,6 +1,6 @@
 pkgname=lcms2
 pkgver=2.17
-pkgrel=0
+pkgrel=1
 pkgdesc="lcms2 (graphics stack)"
 license=custom
 source=(lcms2-2.17.tar.gz)
@@ -8,4 +8,4 @@ builddir=$srcdir/lcms2-2.17
 makedepends=(libjpeg-turbo-dev)
 subpackages=(lcms2-dev)
 build(){ meson_setup -Dtests=disabled -Dutils=false -Dsamples=false build; ninja -C build; }
-package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc $pkgdir/usr/share/man; }
+package(){ DESTDIR=$pkgdir ninja -C build install; }

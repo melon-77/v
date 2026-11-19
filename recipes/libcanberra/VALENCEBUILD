@@ -1,6 +1,6 @@
 pkgname=libcanberra
 pkgver=0.30
-pkgrel=0
+pkgrel=1
 pkgdesc="Event sound library (XDG sound theme spec), used by KWin and KNotifications"
 license=LGPL-2.1-or-later
 url=https://0pointer.de/lennart/projects/libcanberra/
@@ -13,4 +13,4 @@ depends=(sound-theme-freedesktop)
 build(){ cp /usr/share/misc/config.sub /usr/share/misc/config.guess build-aux/
   ./configure $conf_flags --disable-static --enable-alsa --disable-oss --disable-pulse --disable-gstreamer \
   --disable-gtk --disable-gtk3 --disable-tdb --disable-lynx --with-builtin=dso; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/{doc,gtk-doc,vala}; }
+package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/vala; }

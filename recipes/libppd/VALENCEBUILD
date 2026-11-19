@@ -1,6 +1,6 @@
 pkgname=libppd
 pkgver=2.1.1
-pkgrel=0
+pkgrel=1
 pkgdesc="OpenPrinting PPD library (classic printer drivers and the driverless PPD generator)"
 license=Apache-2.0
 url=https://github.com/OpenPrinting/libppd
@@ -11,4 +11,4 @@ subpackages=(libppd-dev)
 build(){ ./configure $conf_flags --disable-static --disable-nls --disable-ghostscript --disable-mutool --disable-acroread \
            --disable-pdftocairo --with-pdftops=pdftops --with-pdftops-path=/usr/bin/pdftops --disable-testppdfile --disable-ppdc-utils \
            --with-cups-config=$SYSROOT/usr/bin/cups-config; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/doc; }
+package(){ make DESTDIR=$pkgdir install; }

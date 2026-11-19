@@ -1,6 +1,6 @@
 pkgname=libbytesize
 pkgver=2.12
-pkgrel=0
+pkgrel=1
 pkgdesc="Library for working with sizes in bytes (used by libblockdev)"
 license=LGPL-2.1-or-later
 url=https://github.com/storaged-project/libbytesize
@@ -10,4 +10,4 @@ subpackages=(libbytesize-dev)
 # a git snapshot: no generated configure
 prepare(){ autoreconf -fi; }
 build(){ ./configure $conf_flags --disable-static --without-python3 --without-gtk-doc --without-tools --disable-nls; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/{doc,man,locale,gtk-doc}; }
+package(){ make DESTDIR=$pkgdir install; }

@@ -1,6 +1,6 @@
 pkgname=grub
 pkgver=2.14
-pkgrel=4
+pkgrel=5
 pkgdesc="GNU GRUB bootloader (BIOS and UEFI)"
 license=GPL-3.0-or-later
 url=https://www.gnu.org/software/grub/
@@ -20,7 +20,6 @@ build(){
 }
 package(){
   for p in pc efi; do make -C b-$p DESTDIR=$pkgdir install; done
-  rm -rf $pkgdir/usr/share/info $pkgdir/usr/share/man
   # build leftovers nothing reads on a running system: grub-install copies only the .mod/.lst/.img/.efi files and
   # grub-mkimage reads .mod and kernel.img (a core.img built with and without them is byte-identical). They were about
   # 36 MB, 11 MB of it in the compressed images.

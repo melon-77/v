@@ -120,6 +120,9 @@ ROWS = [
 ]
 
 # pkgrel for recipes whose build changed without a version change (rule 6 in AGENTS.md)
+# REBUILD is added to every one: 1 = docs and translations are no longer deleted, the builder puts them in
+# <pkg>-doc and <pkg>-lang (ROADMAP phase 3)
+REBUILD = 1
 PKGREL = {'sqlite': 1, 'npth': 1, 'libjpeg-turbo': 1, 'networkmanager': 2, 'power-profiles-daemon': 1, 'libxkbcommon': 1, 'fuse3': 1, 'ostree': 1, 'pipewire': 2,
           'shared-mime-info': 1}
 # extra VALENCEBUILD lines (the scripts they name live next to the generated VALENCEBUILD)
@@ -135,22 +138,22 @@ def recipe(r):
     link = f'{name}-{ver}.' + ('tar.xz' if tb.endswith('.xz') else 'tar.bz2' if tb.endswith('.bz2') else 'tar.gz')
     src = f'{M}/sources/{link}'
     if not os.path.lexists(src): os.symlink(tb[3:] if tb.startswith('../') else f'deb/{tb}', src)
-    lines = [f'pkgname={name}', f'pkgver={ver}', f'pkgrel={PKGREL.get(name, 0)}', f'pkgdesc="{name} (graphics stack)"', 'license=custom', f'source=({link})',
+    lines = [f'pkgname={name}', f'pkgver={ver}', f'pkgrel={PKGREL.get(name, 0) + REBUILD}', f'pkgdesc="{name} (graphics stack)"', 'license=custom', f'source=({link})',
              f'builddir=$srcdir/{top}']
     if mdeps: lines.append(f'makedepends=({mdeps})')
     if 'noarch' not in extra: lines.append(f'subpackages=({name}-dev)')
     if system == 'meson':
         lines.append(f'build(){{ meson_setup {opts} build; ninja -C build; }}')
-        lines.append('package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc $pkgdir/usr/share/man; }')
+        lines.append('package(){ DESTDIR=$pkgdir ninja -C build install; }')
     elif system == 'cmake':
         lines.append(f'build(){{ cmake_setup -B build {opts}; ninja -C build; }}')
-        lines.append('package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc $pkgdir/usr/share/man; }')
+        lines.append('package(){ DESTDIR=$pkgdir ninja -C build install; }')
     else:
         pre = ''
         if extra == 'xcb':
             pre = 'export XCBPROTO_XCBINCLUDEDIR=$SYSROOT/usr/share/xcb XCBPROTO_XCBPYTHONDIR=$(ls -d $SYSROOT/usr/lib/python3*/site-packages | head -1); '
         lines.append(f'build(){{ {pre}[ -x configure ] || autoreconf -fi; ./configure $conf_flags {opts}; make -j$JOBS; }}')
-        lines.append('package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/doc $pkgdir/usr/share/man $pkgdir/usr/share/info; }')
+        lines.append('package(){ make DESTDIR=$pkgdir install; }')
     if 'noarch' in extra: lines.append("options=('!strip')")
     lines += EXTRA.get(name, [])
     d = f'{M}/recipes/{name}'; os.makedirs(d, exist_ok=True)

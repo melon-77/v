@@ -1,11 +1,10 @@
 pkgname=git
 pkgver=2.56.0
-pkgrel=0
+pkgrel=1
 pkgdesc="Git: distributed version control"
 license=GPL-2.0-only
 url=https://git-scm.com
 source=(git-2.56.0.tar.xz git-manpages-2.56.0.tar.xz)   # the manual pages come prebuilt from the same release
-subpackages=(git-doc)
 makedepends=(curl-dev expat-dev openssl-dev pcre2-dev zlib-dev)
 # musl: its regex has no REG_STARTEND (git's own regex instead), its iconv writes no BOM.
 # curl-config would be the build machine's, so the curl flags are given directly.

@@ -1,6 +1,6 @@
 pkgname=udisks2
 pkgver=2.10.91
-pkgrel=0
+pkgrel=1
 pkgdesc="UDisks2: disk and removable media service (Plasma's Disks & Devices, Dolphin's USB drives)"
 license="GPL-2.0-or-later AND LGPL-2.0-or-later"
 url=https://github.com/storaged-project/udisks
@@ -14,4 +14,4 @@ build(){ ./configure $conf_flags --disable-static --disable-man --disable-gtk-do
            --enable-daemon --enable-acl --enable-smart --disable-lvm2 --disable-iscsi --disable-btrfs --disable-lsm \
            --with-udevdir=/usr/lib/udev --with-systemdsystemunitdir=no --with-tmpfilesdir=no \
            --with-modloaddir=/usr/lib/modules-load.d --with-modprobedir=/usr/lib/modprobe.d; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/{doc,man,locale,gtk-doc}; }
+package(){ make DESTDIR=$pkgdir install; }

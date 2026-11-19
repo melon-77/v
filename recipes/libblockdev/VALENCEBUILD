@@ -1,6 +1,6 @@
 pkgname=libblockdev
 pkgver=3.4.0
-pkgrel=2
+pkgrel=3
 pkgdesc="Block device library with the plugins UDisks2 needs (crypto, fs, loop, mdraid, nvme, part, smart, swap)"
 license=LGPL-2.1-or-later
 url=https://github.com/storaged-project/libblockdev
@@ -16,4 +16,4 @@ build(){ ./configure $conf_flags --disable-static --disable-tests --disable-intr
            --without-btrfs --without-dm --without-lvm --without-lvm_dbus --without-mpath --without-nvdimm --without-s390 \
            --without-tools --without-escrow --without-smartmontools \
            --with-crypto --with-fs --with-loop --with-mdraid --with-nvme --with-part --with-smart --with-swap; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/{doc,gtk-doc}; }
+package(){ make DESTDIR=$pkgdir install; }

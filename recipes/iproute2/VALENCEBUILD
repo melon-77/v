@@ -1,11 +1,11 @@
 pkgname=iproute2
 pkgver=7.3.0
+pkgrel=1
 pkgdesc="Network configuration tools: ip, ss, bridge, tc"
 license=GPL-2.0-or-later
 url=https://wiki.linuxfoundation.org/networking/iproute2
 source=(iproute2-7.3.0.tar.xz)
 makedepends=(libmnl-dev)
-subpackages=(iproute2-doc)
 # Its configure is its own script, not autoconf: it asks pkg-config and the compiler what is there and writes
 # config.mk. HOSTCC builds the one helper that runs during the build (netem's table maker).
 build(){

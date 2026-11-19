@@ -1,6 +1,6 @@
 pkgname=cups-filters
 pkgver=2.0.1
-pkgrel=1
+pkgrel=2
 pkgdesc="OpenPrinting CUPS filters: turn documents into what printers take (PDF, PWG/Apple raster, PostScript)"
 license=Apache-2.0
 url=https://github.com/OpenPrinting/cups-filters
@@ -10,4 +10,4 @@ makedepends=(cups-dev libcupsfilters-dev libppd-dev)
 # and without either set of rules CUPS finds no way from a document to the printer)
 build(){ ./configure $conf_flags --disable-static --disable-nls --enable-poppler --disable-ghostscript --disable-mutool --disable-foomatic \
            --enable-individual-cups-filters --disable-universal-cups-filter --enable-driverless --with-cups-config=$SYSROOT/usr/bin/cups-config; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/{doc,man}; }
+package(){ make DESTDIR=$pkgdir install; }

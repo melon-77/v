@@ -1,5 +1,6 @@
 pkgname=python3
 pkgver=3.14.4
+pkgrel=1
 pkgdesc="The Python 3 interpreter and standard library"
 license=PSF-2.0
 url=https://www.python.org
@@ -16,7 +17,7 @@ build(){
 package(){ make DESTDIR=$pkgdir install
   local l=$pkgdir/usr/lib/python3.14
   # the parts nobody uses at runtime on Valence (tests, IDLE, Tk demos, pip bootstrap)
-  rm -rf $l/test $l/idlelib $l/tkinter $l/turtledemo $l/ensurepip $l/turtle.py $l/pydoc_data $pkgdir/usr/share/man
+  rm -rf $l/test $l/idlelib $l/tkinter $l/turtledemo $l/ensurepip $l/turtle.py $l/pydoc_data
   find $pkgdir/usr/lib/python3.14 -name '__pycache__' -prune -exec rm -rf {} +
   ln -sf python3.14 $pkgdir/usr/bin/python3; ln -sf python3 $pkgdir/usr/bin/python; }
 pkg_dev(){ default_dev; amove usr/lib/python3.14/config-3.14-* usr/bin/python3*-config; }

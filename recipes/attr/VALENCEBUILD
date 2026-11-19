@@ -1,6 +1,6 @@
 pkgname=attr
 pkgver=2.5.2
-pkgrel=0
+pkgrel=1
 pkgdesc="Extended attribute tools and library (libattr)"
 license="LGPL-2.1-or-later AND GPL-2.0-or-later"
 url=https://savannah.nongnu.org/projects/attr
@@ -9,5 +9,5 @@ subpackages=(attr-dev libattr)
 depends=(libattr)
 pkgdesc_libattr="Extended attribute library"
 build(){ ./configure $conf_flags --disable-static --disable-nls; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/{doc,man,locale}; }
+package(){ make DESTDIR=$pkgdir install; }
 pkg_libattr(){ amove 'usr/lib/libattr.so.*'; }

@@ -1,6 +1,6 @@
 pkgname=json-glib
 pkgver=1.10.8
-pkgrel=0
+pkgrel=1
 pkgdesc="json-glib (graphics stack)"
 license=custom
 source=(json-glib-1.10.8.tar.xz)
@@ -8,4 +8,4 @@ builddir=$srcdir/json-glib-1.10.8
 makedepends=(glib-dev)
 subpackages=(json-glib-dev)
 build(){ meson_setup -Dintrospection=disabled -Dgtk_doc=disabled -Dman=false -Dtests=false -Dnls=disabled build; ninja -C build; }
-package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc $pkgdir/usr/share/man; }
+package(){ DESTDIR=$pkgdir ninja -C build install; }

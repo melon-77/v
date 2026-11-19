@@ -1,9 +1,9 @@
 pkgname=gzip
 pkgver=1.15
+pkgrel=1
 pkgdesc="GNU gzip, with zcat, zgrep, zless and friends"
 license=GPL-3.0-or-later
 url=https://www.gnu.org/software/gzip/
 source=(gzip-1.15.tar.xz)
-subpackages=(gzip-doc)
 build(){ ./configure $conf_flags; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -f $pkgdir/usr/share/info/dir; }
+package(){ make DESTDIR=$pkgdir install; }

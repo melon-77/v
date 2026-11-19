@@ -1,6 +1,6 @@
 pkgname=tcl
 pkgver=8.6.17
-pkgrel=0
+pkgrel=1
 pkgdesc="Tcl: the scripting language (sqlite's build and tests run tclsh)"
 license=TCL
 url=https://www.tcl-lang.org
@@ -18,6 +18,5 @@ package(){
   ln -s tclsh8.6 $pkgdir/usr/bin/tclsh
   # tclConfig.sh records the build tree; programs built on Valence need the installed paths
   sed -i -e "s|$srcdir/tcl8.6.17/unix|/usr/lib|g" -e "s|$srcdir/tcl8.6.17|/usr/include|g" $pkgdir/usr/lib/tclConfig.sh
-  rm -rf $pkgdir/usr/share/man/mann
 }
 pkg_dev(){ default_dev; amove usr/lib/tclConfig.sh usr/lib/tclooConfig.sh 'usr/lib/libtclstub*'; }

@@ -1,6 +1,6 @@
 pkgname=clang
 pkgver=21.1.8
-pkgrel=1
+pkgrel=2
 pkgdesc="Clang: the C, C++ and OpenCL C compiler on LLVM (Mesa's OpenCL C shader compiler needs it)"
 license="Apache-2.0 WITH LLVM-exception"
 url=https://clang.llvm.org
@@ -24,6 +24,6 @@ build(){
     -DLLVM_PARALLEL_LINK_JOBS=2
   ninja -C build -j$JOBS
 }
-package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/man $pkgdir/usr/share/doc; }
+package(){ DESTDIR=$pkgdir ninja -C build install; }
 pkg_libs(){ amove 'usr/lib/libclang-cpp.so.*' 'usr/lib/libclang.so.*'; }
 pkg_dev(){ default_dev; amove usr/lib/cmake; }

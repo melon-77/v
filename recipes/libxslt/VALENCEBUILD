@@ -1,6 +1,6 @@
 pkgname=libxslt
 pkgver=1.1.45
-pkgrel=0
+pkgrel=1
 pkgdesc="libxslt (graphics stack)"
 license=custom
 source=(libxslt-1.1.45.tar.xz)
@@ -8,4 +8,4 @@ builddir=$srcdir/libxslt-1.1.45
 makedepends=(libxml2-dev)
 subpackages=(libxslt-dev)
 build(){ [ -x configure ] || autoreconf -fi; ./configure $conf_flags --disable-static --without-python --without-crypto --without-debugger; make -j$JOBS; }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/doc $pkgdir/usr/share/man $pkgdir/usr/share/info; }
+package(){ make DESTDIR=$pkgdir install; }

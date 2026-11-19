@@ -1,6 +1,6 @@
 pkgname=pulseaudio
 pkgver=17.0
-pkgrel=0
+pkgrel=1
 pkgdesc="PulseAudio client library (libpulse); the sound server itself is PipeWire (pipewire-pulse)"
 license=LGPL-2.1-or-later
 url=https://www.freedesktop.org/wiki/Software/PulseAudio/
@@ -16,5 +16,5 @@ build(){ meson_setup -Ddaemon=false -Dclient=true -Ddoxygen=false -Dman=false -D
   -Dsamplerate=disabled -Dsoxr=disabled -Dspeex=disabled -Dsystemd=disabled -Dtcpwrap=disabled -Dudev=disabled \
   -Dvalgrind=disabled -Dx11=disabled -Dwebrtc-aec=disabled -Dbashcompletiondir=no -Dzshcompletiondir=no build
   ninja -C build; }
-package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/{man,locale}; }
+package(){ DESTDIR=$pkgdir ninja -C build install; }
 pkg_libpulse(){ amove 'usr/lib/libpulse*.so.*' 'usr/lib/pulseaudio/libpulsecommon-*.so'; }

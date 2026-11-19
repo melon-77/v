@@ -1,12 +1,11 @@
 pkgname=ripgrep
 pkgver=15.2.0
-pkgrel=0
+pkgrel=1
 pkgdesc="rg: recursively search directories for a regex pattern, fast"
 license="Unlicense OR MIT"
 url=https://github.com/BurntSushi/ripgrep
 source=(ripgrep-15.2.0.tar.gz)
 makedepends=(pcre2-dev)
-subpackages=(ripgrep-doc)
 # written in Rust (rule 46)
 options=(rust)
 

@@ -1,6 +1,6 @@
 pkgname=bash
 pkgver=5.3
-pkgrel=11
+pkgrel=12
 pkgdesc="The GNU Bourne Again shell"
 license=GPL-3.0-or-later
 url=https://www.gnu.org/software/bash/
@@ -15,7 +15,7 @@ build(){
      --with-installed-readline=no
   make -j$JOBS
 }
-package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/{man,info,doc,locale} $pkgdir/usr/lib/bash $pkgdir/usr/include; rm -f $pkgdir/usr/bin/bashbug;
+package(){ make DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/lib/bash $pkgdir/usr/include; rm -f $pkgdir/usr/bin/bashbug;
   mkdir -p $pkgdir/etc/bash
   cat > $pkgdir/etc/bash/bashrc <<'RC'
 # Valence system-wide bashrc

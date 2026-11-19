@@ -1,6 +1,6 @@
 pkgname=icu
 pkgver=78.2
-pkgrel=0
+pkgrel=1
 pkgdesc="International Components for Unicode (text boundaries, collation, conversion); Konsole needs it"
 license=Unicode-3.0
 url=https://icu.unicode.org
@@ -21,5 +21,5 @@ build(){
   ../source/configure $conf_flags --with-cross-build=$srcdir/icu/host --disable-static --disable-tests --disable-samples
   env -u TARGET make -j$JOBS
 }
-package(){ env -u TARGET make -C target DESTDIR=$pkgdir install; rm -rf $pkgdir/usr/share/man; }
+package(){ env -u TARGET make -C target DESTDIR=$pkgdir install; }
 pkg_libs(){ amove 'usr/lib/libicu*.so.*'; }

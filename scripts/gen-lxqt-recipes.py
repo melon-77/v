@@ -50,13 +50,14 @@ ORDER = [
  ('lximage-qt', '2.4.0', '', False, 'LXImage-Qt, the LXQt image viewer and screenshot tool'),
 ]
 
+# pkgrel 1: docs and translations are no longer deleted, the builder puts them in <pkg>-doc and <pkg>-lang (ROADMAP phase 3)
 def write(name, ver, extra, dev, desc):
-    lines = [f'pkgname={name}', f'pkgver={ver}', 'pkgrel=0', f'pkgdesc="{desc}"',
+    lines = [f'pkgname={name}', f'pkgver={ver}', 'pkgrel=1', f'pkgdesc="{desc}"',
              'license="LGPL-2.1-or-later (see sources)"', 'url=https://lxqt-project.org',
              f'source=({name}-{ver}.tar.xz)']
     if dev: lines.append(f'subpackages=({name}-dev)')
     lines.append(f'build(){{ cmake_setup -B build {QT}{extra}; ninja -C build -j$JOBS; }}')
-    lines.append('package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc $pkgdir/usr/share/man; }')
+    lines.append('package(){ DESTDIR=$pkgdir ninja -C build install; }')
     d = f'{M}/recipes/{name}'; os.makedirs(d, exist_ok=True)
     open(f'{d}/VALENCEBUILD', 'w').write('\n'.join(lines) + '\n')
 
