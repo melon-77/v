@@ -87,6 +87,11 @@ On the installed system apk gives way to a package manager written for Valence: 
 watch, and built around one idea from GoboLinux, that every program lives in a folder of its own. The builder,
 the recipes and the signed packages stay as they are. Phase 9 has the design.
 
+**8. The system can be described in one file.**
+A proposal (19 November 2026). The packages, the services, the users and the settings of a system are written in
+one file, and one command makes the system match it, as NixOS does with `configuration.nix`. It stands on the
+snapshots of point 4, not on a store like Nix's. Phase 10 has the design.
+
 ## Roadmap
 
 There are no dates. A phase is finished when its "done when" is true, and the next one starts after that.
@@ -171,6 +176,27 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   Open: its name. Whether `-dev`, `-doc` and `-lang` parts get folders of their own or live inside the program's
   folder. And when: before the desktop, the desktop is fitted to the layout once.
 
+- [ ] **10. A system described in one file.**
+  A proposal, put here on 19 November 2026; the design below is a starting point. One file says what the system
+  is: its packages, the services that run, the users and their groups, the host name and time zone, kernel
+  options. One command makes the system match the file, the way `nixos-rebuild` does with `configuration.nix`.
+  It stands on phase 5 and needs nothing later. The command makes a writable copy of the system, as the boot menu's
+  snapshot entries do; applies the file inside the copy (apk for the packages, whose list `/etc/apk/world` already
+  is; links in `/var/service` for the services; shadow's tools for the users); and swaps the copy in as the system
+  that starts by default, from the next start on, as a rollback does. If a step fails, the copy is thrown away and
+  the running system was never touched. Each apply is one more entry in the boot menu, so going back is what phase
+  5 already does.
+  What it is not: Nix. The repository is rolling, so the same file gives newer packages next month unless it also
+  pins the repository to a date. What was done by hand stays (an edit in `/etc`, a package added with apk), outside
+  the things the file manages. The format is a plain list of settings, not a language. Several versions of a
+  program side by side, and environments per user, need a store: the folders of phase 9 are where those could come
+  from, and that package manager could take the same file as its input.
+  In stages: packages and services first; then users, the host name and the rest; then the installers write the
+  file for a new system, so that every install starts with one.
+  *Done when:* a QEMU test installs a system, changes the file (a package and a service added, another package
+  removed), applies it, restarts into a system that matches the file, and gets the earlier one back from the boot
+  menu; and an apply that is made to fail leaves the running system and the default as they were.
+
 ## Not decided yet
 
 These are open on purpose. Each gets settled before the phase that needs it.
@@ -191,6 +217,9 @@ These are open on purpose. Each gets settled before the phase that needs it.
   alternative is man-db with groff, about 15 MB, which is what Arch and Debian use.
 - **Documentation on the ISO.** The ISO's own package repository carries only a few extras, so `apk add docs` needs
   the online repository. All 38 `-doc` packages of the base and mandoc together are about 5 MB.
+- **The system file (phase 10).** Its name and the command's, the format, how much it manages beyond packages and
+  services, and whether changes made by hand in what it manages are undone or only reported. And when: it needs
+  only phase 5, so it could be built before the desktop.
 - **Website**, and the font for the wordmark (the current one is a stand-in).
 
 ## Decided
