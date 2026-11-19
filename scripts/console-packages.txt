@@ -2,6 +2,7 @@
 # "scripts/valence-build --edition console" builds (with everything these packages need).
 valence-base linux-valence linux-firmware
 # network, disks, boot
-wpa_supplicant xfsprogs grub cryptsetup efibootmgr kmod
+# (btrfs-progs comes with valence-base: the root is Btrfs)
+wpa_supplicant grub cryptsetup efibootmgr kmod
 # small tools
 zstd openssl ca-certificates ncurses-terminfo alsa-utils

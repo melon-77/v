@@ -4,7 +4,8 @@
 # Layout on an erased disk (GPT, boots on both BIOS and UEFI; the 32-bit edition uses MBR):
 #   1  1 MiB   BIOS boot (GRUB core for legacy BIOS)
 #   2  1 GiB   FAT32  -> /boot   (kernel, GRUB, EFI/BOOT/BOOTX64.EFI or BOOTIA32.EFI)
-#   3  rest    XFS    -> /
+#   3  rest    Btrfs  -> /   subvolumes: @ (the system), @home, @log (/var/log), @snapshots (/.snapshots), @swap.
+#                           apk takes a snapshot of @ before every change; valence-snapshot rolls back to one.
 # On UEFI, a disk with an EFI system partition and at least 20 GiB unallocated can take Valence alongside what is on it.
 #
 # Unattended use (for testing): set VALENCE_DISK, VALENCE_HOSTNAME, VALENCE_ROOTPW, VALENCE_USER,
@@ -146,7 +147,7 @@ if [ $MODE = erase ]; then
   BOOTP=$PP$BOOTN ROOTP=$PP$ROOTN
 fi
 
-say "Creating filesystems (FAT32 /boot, XFS /)"
+say "Creating filesystems (FAT32 /boot, Btrfs /)"
 mkfs.vfat -F 32 -n VALENCEBOOT "$BOOTP" >/dev/null
 ROOTDEV=$ROOTP
 if [ $ENCRYPT = y ]; then
@@ -156,11 +157,24 @@ if [ $ENCRYPT = y ]; then
   printf '%s' "$VALENCE_LUKSPW" | cryptsetup open --key-file - "$ROOTP" valenceroot
   ROOTDEV=/dev/mapper/valenceroot
 fi
-mkfs.xfs -q -f -L valence "$ROOTDEV"
+mkfs.btrfs -q -f -L valence "$ROOTDEV"
 
 say "Mounting"
-mkdir -p $TARGET; mount -t xfs "$ROOTDEV" $TARGET
-mkdir -p $TARGET/boot; mount -t vfat -o umask=0077 "$BOOTP" $TARGET/boot
+# Subvolumes. @ is the system: what a snapshot holds and a rollback replaces. /home and /var/log are their own, so a
+# rollback touches neither your files nor the logs of what went wrong. @snapshots holds the snapshots, @swap the swap
+# file (a subvolume with an active swap file cannot be snapshotted).
+BTRFSOPT=noatime,compress=zstd:1
+mkdir -p $TARGET; mount -t btrfs "$ROOTDEV" $TARGET
+for s in @ @home @log @snapshots @swap; do btrfs subvolume create $TARGET/$s >/dev/null; done
+chmod 750 $TARGET/@snapshots; chmod 700 $TARGET/@swap
+umount $TARGET
+mount -t btrfs -o subvol=@,$BTRFSOPT "$ROOTDEV" $TARGET
+mkdir -p $TARGET/home $TARGET/var/log $TARGET/swap $TARGET/boot; mkdir -m 750 $TARGET/.snapshots
+mount -t btrfs -o subvol=@home,$BTRFSOPT "$ROOTDEV" $TARGET/home
+mount -t btrfs -o subvol=@log,$BTRFSOPT "$ROOTDEV" $TARGET/var/log
+mount -t btrfs -o subvol=@swap,$BTRFSOPT "$ROOTDEV" $TARGET/swap
+# (@snapshots is not mounted here: without /.snapshots, apk's snapshot hook does nothing while the system is put together)
+mount -t vfat -o umask=0077 "$BOOTP" $TARGET/boot
 [ $MODE = alongside ] && { mkdir -p $TARGET/boot/efi; mount -t vfat -o umask=0077 "$ESP" $TARGET/boot/efi; }
 say "Copying the Valence system"
 mkdir -p /run/valence-src; mount -t squashfs -o loop,ro "$SYSIMG" /run/valence-src
@@ -197,7 +211,11 @@ sed -i "s/^127.0.1.1.*/127.0.1.1\t$VALENCE_HOSTNAME/" $TARGET/etc/hosts
 ROOT_UUID=$(blkid -s UUID -o value "$ROOTDEV"); BOOT_UUID=$(blkid -s UUID -o value "$BOOTP")
 cat > $TARGET/etc/fstab <<EOF
 # <device>                                 <mountpoint> <type> <options>                 <dump> <pass>
-UUID=$ROOT_UUID  /            xfs    defaults,noatime          0      1
+UUID=$ROOT_UUID  /            btrfs  subvol=@,$BTRFSOPT           0  0
+UUID=$ROOT_UUID  /home        btrfs  subvol=@home,$BTRFSOPT       0  0
+UUID=$ROOT_UUID  /var/log     btrfs  subvol=@log,$BTRFSOPT        0  0
+UUID=$ROOT_UUID  /.snapshots  btrfs  subvol=@snapshots,$BTRFSOPT  0  0
+UUID=$ROOT_UUID  /swap        btrfs  subvol=@swap,$BTRFSOPT       0  0
 UUID=$BOOT_UUID                             /boot        vfat   defaults,umask=0077       0      2
 $([ $MODE = alongside ] && echo "UUID=$(blkid -s UUID -o value "$ESP")                             /boot/efi    vfat   defaults,umask=0077       0      2")
 tmpfs                                      /tmp         tmpfs  nosuid,nodev,mode=1777    0      0
@@ -208,9 +226,9 @@ swapm=$(( memk / 1024 )); [ $swapm -gt 8192 ] && swapm=8192
 [ $(( freek / 1024 / 8 )) -lt $swapm ] && swapm=$(( freek / 1024 / 8 ))
 if [ $swapm -ge 256 ]; then
   say "Creating a ${swapm} MiB swap file"
-  fallocate -l ${swapm}M $TARGET/swapfile 2>/dev/null || dd if=/dev/zero of=$TARGET/swapfile bs=1M count=$swapm 2>/dev/null
-  chmod 600 $TARGET/swapfile; mkswap $TARGET/swapfile >/dev/null
-  echo "/swapfile                                  none         swap   defaults,pri=10           0      0" >> $TARGET/etc/fstab
+  # (a swap file on Btrfs must not be copy-on-write or compressed: mkswapfile sees to both)
+  btrfs filesystem mkswapfile --size ${swapm}m --uuid clear $TARGET/swap/swapfile >/dev/null
+  echo "/swap/swapfile                             none         swap   defaults,pri=10           0      0" >> $TARGET/etc/fstab
 fi
 # shadow's tools; the hash method is ENCRYPT_METHOD in the target's /etc/login.defs (yescrypt)
 echo "root:$VALENCE_ROOTPW" | chroot $TARGET chpasswd
@@ -294,7 +312,7 @@ say "Finishing"
 sync
 for d in dev proc sys; do umount $TARGET/$d; done
 [ $MODE = alongside ] && umount $TARGET/boot/efi
-umount $TARGET/boot; umount $TARGET
+umount $TARGET/boot; umount $TARGET/swap $TARGET/var/log $TARGET/home; umount $TARGET
 [ $ENCRYPT = y ] && cryptsetup close valenceroot
 cat <<EOF
 

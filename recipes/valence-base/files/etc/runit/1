@@ -21,9 +21,11 @@ ln -sf /proc/self/fd /dev/fd; ln -sf fd/0 /dev/stdin; ln -sf fd/1 /dev/stdout; l
 wait_fstab_devices(){
   waited=0
   [ -r /etc/fstab ] || return 0
+  rootspec=$(awk '$1 !~ /^#/ && $2 == "/" {print $1; exit}' /etc/fstab)
   while read -r dev mp _ opts _; do
     case $dev in ''|'#'*) continue ;; esac
     [ "$mp" = / ] && continue        # already mounted (by the initramfs or the live init)
+    [ "$dev" = "$rootspec" ] && continue   # another Btrfs subvolume of the filesystem / is on: its device is there
     case ,$opts, in *,noauto,*|*,nofail,*) continue ;; esac
     case $dev in
       UUID=*)      node=/dev/disk/by-uuid/${dev#UUID=} ;;
@@ -77,6 +79,9 @@ msg "Mounting filesystems"
 mount -o remount,rw / 2>/dev/null
 mount -a -t nosysfs,nonfs,noproc 2>/dev/null   # includes the /tmp tmpfs from fstab
 swapon -a 2>/dev/null
+# what a rollback replaced while it was running, or a copy of a snapshot the boot menu started and nobody kept, is
+# deleted now that the system no longer runs from it (valence-snapshot)
+[ -e /.snapshots/.cleanup ] && ( valence-snapshot cleanup >/dev/null 2>&1 & )
 # socket directories for X11 clients under Xwayland (KWin and Qt expect them to exist, world-writable, sticky)
 mkdir -p -m 1777 /tmp/.X11-unix /tmp/.ICE-unix; chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix
 
