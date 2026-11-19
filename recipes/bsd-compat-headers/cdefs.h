@@ -1,4 +1,4 @@
-/* melon: minimal sys/cdefs.h for software that expects glibc/BSD headers */
+/* Valence: minimal sys/cdefs.h for software that expects glibc/BSD headers */
 #ifndef _SYS_CDEFS_H
 #define _SYS_CDEFS_H
 #ifdef __cplusplus

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate MELONBUILD recipes for simple libraries from one table.
+"""Generate VALENCEBUILD recipes for simple libraries from one table.
 
 Each row: recipe name, version, tarball in sources/deb, top directory, build system, makedepends,
 extra configure/meson/cmake options, and flags. Recipes that need special handling are written by hand.
@@ -122,7 +122,7 @@ ROWS = [
 # pkgrel for recipes whose build changed without a version change (rule 6 in AGENTS.md)
 PKGREL = {'sqlite': 1, 'npth': 1, 'libjpeg-turbo': 1, 'networkmanager': 2, 'power-profiles-daemon': 1, 'libxkbcommon': 1, 'fuse3': 1, 'ostree': 1, 'pipewire': 2,
           'shared-mime-info': 1}
-# extra MELONBUILD lines (the scripts they name live next to the generated MELONBUILD)
+# extra VALENCEBUILD lines (the scripts they name live next to the generated VALENCEBUILD)
 EXTRA = {
     # rebuild the MIME cache whenever a package adds definitions (shared-mime-info.trigger); without it
     # Qt/KDE don't know common types like text/html
@@ -154,7 +154,7 @@ def recipe(r):
     if 'noarch' in extra: lines.append("options=('!strip')")
     lines += EXTRA.get(name, [])
     d = f'{M}/recipes/{name}'; os.makedirs(d, exist_ok=True)
-    open(f'{d}/MELONBUILD', 'w').write('\n'.join(lines) + '\n')
+    open(f'{d}/VALENCEBUILD', 'w').write('\n'.join(lines) + '\n')
     return name
 
 names = [recipe(r) for r in ROWS]

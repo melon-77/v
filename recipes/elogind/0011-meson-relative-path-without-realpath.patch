@@ -1,6 +1,6 @@
 Compute the relative source path with Python instead of `realpath --relative-to`
 
-BusyBox realpath (a melon build machine) has no options; meson already needs Python.
+BusyBox realpath (a Valence build machine) has no options; meson already needs Python.
 
 --- a/meson.build	2026-10-06 18:12:50.505506246 +0000
 +++ b/meson.build	2026-10-06 18:12:50.544090284 +0000

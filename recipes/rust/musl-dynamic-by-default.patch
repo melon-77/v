@@ -6,7 +6,7 @@
      base.supports_xray = true;
 -    // FIXME(compiler-team#422): musl targets should be dynamically linked by default.
 -    base.crt_static_default = true;
-+    // melon: dynamic linking by default, like Alpine and Void (compiler-team#422): programs share the system musl
++    // Valence: dynamic linking by default, like Alpine and Void (compiler-team#422): programs share the system musl
 +    base.crt_static_default = false;
  
      Target {

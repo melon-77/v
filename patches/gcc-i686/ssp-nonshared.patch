@@ -6,7 +6,7 @@
  #ifdef TARGET_LIBC_PROVIDES_SSP
 -#define LINK_SSP_SPEC "%{fstack-protector|fstack-protector-all" \
 -		       "|fstack-protector-strong|fstack-protector-explicit:}"
-+/* melon (i686, as Alpine): PIC code calls the hidden __stack_chk_fail_local, which comes from musl's static
++/* Valence (i686, as Alpine): PIC code calls the hidden __stack_chk_fail_local, which comes from musl's static
 +   libssp_nonshared.a in every program and library; --enable-default-ssp means no -fstack-protector on the line */
 +#define LINK_SSP_SPEC "%{!fno-stack-protector:%{!nostdlib:%{!nodefaultlibs:%{!ffreestanding:-lssp_nonshared}}}}"
  #else

@@ -1,6 +1,6 @@
-# Building melon on your own machine
+# Building Valence on your own machine
 
-Everything melon ships is built by the scripts in this repo, so any x86_64 machine with Ubuntu 24.04
+Everything Valence ships is built by the scripts in this repo, so any x86_64 machine with Ubuntu 24.04
 can build it. On an 8-core/16-thread CPU a full build (toolchain, base system, Plasma desktop, ISOs)
 takes roughly 8–12 hours; on 2 cores it takes days.
 
@@ -45,7 +45,7 @@ build 19041 or newer.
 
    Also keep scripts that you write on Windows with LF line endings (Windows tools write CRLF, and `bash` then fails on the last line).
 
-5. Build inside the Linux file system (`~/melon`), not under `/mnt/c`: it is many times faster, and keep the helper scripts there too. Start long builds detached (`setsid nohup script >log 2>&1 < /dev/null &`) and keep one
+5. Build inside the Linux file system (`~/valence`), not under `/mnt/c`: it is many times faster, and keep the helper scripts there too. Start long builds detached (`setsid nohup script >log 2>&1 < /dev/null &`) and keep one
    `wsl.exe -d Ubuntu-24.04 -- sleep infinity` open, so WSL keeps its VM while no terminal is attached.
 
 6. **Do not let Windows sleep.** Modern/connected standby freezes the WSL2 VM: after it wakes, every new `wsl` command hangs
@@ -61,40 +61,40 @@ build 19041 or newer.
    the Plasma desktop tests were not usable on that laptop.
 
 8. A USB stick (or any drive Windows doesn't auto-mount in WSL) needs a mount: `D: /mnt/d drvfs defaults,nofail 0 0` in `/etc/fstab`.
-   The signing key can stay on it and be used in place (`MELON_SIGN_KEY`, "The signing key" below). Keep the offline **backup** key
+   The signing key can stay on it and be used in place (`VALENCE_SIGN_KEY`, "The signing key" below). Keep the offline **backup** key
    (AGENTS.md, "Signing keys and rotation") off any drive that is plugged into the build machine.
 
 9. **Two sessions on one machine: one checkout each.** A checkout's `tools/` and `sysroot/` are tied to its path, and a
    second session switching branches under a running build breaks both. Give each its own worktree:
 
-       git -C ~/melon worktree add ~/melon-r2 <branch>
-       cd ~/melon-r2
-       for e in ~/melon/sources/*; do [ "${e##*/}" = MANIFEST.tsv ] || ln -sfn "$e" sources/; done   # shared downloads
-       ln -sfn ~/melon/hosttools hosttools                                                            # shared host tools
-       git --git-dir=$HOME/melon/.git archive origin/packages x86_64 | tar -x -C repo                 # its own copy of the online repo
-       echo ~/melon-r2/sysroot/usr/lib >> /etc/ld-musl-x86_64.path                                    # rule 18: the loader must find this tree's libraries
-       /root/melon-r2/scripts/toolchain.sh      # its own cross toolchain (about 15 minutes with 12 jobs); absolute path
+       git -C ~/valence worktree add ~/valence-r2 <branch>
+       cd ~/valence-r2
+       for e in ~/valence/sources/*; do [ "${e##*/}" = MANIFEST.tsv ] || ln -sfn "$e" sources/; done   # shared downloads
+       ln -sfn ~/valence/hosttools hosttools                                                            # shared host tools
+       git --git-dir=$HOME/valence/.git archive origin/packages x86_64 | tar -x -C repo                 # its own copy of the online repo
+       echo ~/valence-r2/sysroot/usr/lib >> /etc/ld-musl-x86_64.path                                    # rule 18: the loader must find this tree's libraries
+       /root/valence-r2/scripts/toolchain.sh      # its own cross toolchain (about 15 minutes with 12 jobs); absolute path
 
-   Then `melon-build` the recipes you changed: it installs their `makedepends` from `repo/x86_64`, but a dev package's
+   Then `valence-build` the recipes you changed: it installs their `makedepends` from `repo/x86_64`, but a dev package's
    private requires (kmod-dev needs zlib, zstd, xz, openssl) are not apk dependencies, so first `apk add` the base and
    plumbing packages of `build-everything.sh` and their `-dev` packages into `sysroot/` (see `BASE` and `PLUMBING` there).
    A KDE recipe (`breeze`) has no `makedepends` at all: the full build relies on every earlier package being in the sysroot.
    So `apk add` (with `--root sysroot --keys-dir keys/trusted --repository repo/x86_64/Packages.adb`) the Qt and KDE packages
    that `python3 scripts/gen-kde-recipes.py` lists before it, their `-dev` packages, and the X11 and XCB client libraries
    (`libx*`, `xcb*`; KF6 WindowSystem's CMake config needs X11). The packages in the online repository were built on a
-   machine whose checkout was `/home/hi/melon`, and some of their CMake files name that path (`KF6::WindowSystem` includes
-   `/home/hi/melon/sysroot/usr/include`: "includes non-existent path"). Until you have rebuilt those packages yourself, let the
-   path resolve: `mkdir -p /home/hi/melon && ln -s ~/melon-r2/sysroot /home/hi/melon/sysroot && ln -s ~/melon/hosttools /home/hi/melon/hosttools`.
+   machine whose checkout was `/home/hi/valence`, and some of their CMake files name that path (`KF6::WindowSystem` includes
+   `/home/hi/valence/sysroot/usr/include`: "includes non-existent path"). Until you have rebuilt those packages yourself, let the
+   path resolve: `mkdir -p /home/hi/valence && ln -s ~/valence-r2/sysroot /home/hi/valence/sysroot && ln -s ~/valence/hosttools /home/hi/valence/hosttools`.
 
-   A worktree that only rebuilds packages with nothing to compile (`melon-base`, `melon-desktop`) and installs the rest from
+   A worktree that only rebuilds packages with nothing to compile (`valence-base`, `valence-desktop`) and installs the rest from
    `repo/` can skip the toolchain (the 0.4 ISOs were made that way, with the round-2 packages copied in from the worktree that
    built them). Then nothing creates the sysroot's merged `/usr`: make `sysroot/usr/lib` and `sysroot/usr/bin` and the `lib`, `bin`
    and `sbin` links to them **before** `apk --initdb`, or apk makes `lib/` a real directory for its database and the first install
-   fails with `melon-layout-1.0-r0: failed to commit lib: Is a directory`. WSL also keeps Windows' time zone; `mkiso.sh` dates
+   fails with `valence-layout-1.0-r0: failed to commit lib: Is a directory`. WSL also keeps Windows' time zone; `mkiso.sh` dates
    the ISOs in UTC so they aren't named after the day before.
 
 Measured on that laptop (12 jobs): `host-setup.sh` about 35 minutes for apt and the 2 GB of sources, a few minutes for GRUB, Python and Rust,
-then 50 minutes for the host Qt; cross toolchain 14 to 21 minutes; `linux-melon` 22 minutes; `grub` 3 minutes; small recipes seconds;
+then 50 minutes for the host Qt; cross toolchain 14 to 21 minutes; `linux-valence` 22 minutes; `grub` 3 minutes; small recipes seconds;
 the console ISO 14 seconds and the desktop ISO about a minute (they install the published packages from `repo/`).
 
 Sources that failed here and what worked: `ftp.gnu.org` did not answer at all (`https://mirrors.kernel.org/gnu/<project>/<file>` did;
@@ -104,8 +104,8 @@ pool (`ovmf-generic_2025.11-3ubuntu7.2_all.deb`) was still on `https://launchpad
 
 ## Steps (Ubuntu 24.04 or WSL2)
 
-    git clone https://github.com/melon-77/melon-os ~/melon
-    cd ~/melon
+    git clone https://github.com/melon-77/valence ~/valence
+    cd ~/valence
     sudo scripts/host-setup.sh        # build tools, sources (~2 GB), host tools; about an hour
     # put the signing key in place (below)
     sudo JOBS=16 scripts/build-everything.sh
@@ -121,67 +121,67 @@ because an Ubuntu host needs `/lib/ld-musl-x86_64.so.1` (see AGENTS.md, rule 18)
 
 The Ubuntu steps above work on Debian 13 and Devuan 6 too (not yet tried on a real install). `host-setup.sh` takes
 Ubuntu's path there: it installs the same packages with apt, adds Ubuntu's archive key (`ubuntu-keyring`) because
-older melon sources still come from Ubuntu's source archive, and lists any package name your archive doesn't have
+older Valence sources still come from Ubuntu's source archive, and lists any package name your archive doesn't have
 instead of stopping (paste that warning line if you get one). Without `sudo`, run the commands as root (`su -`).
 
-**Moving from another build machine (melon, Ubuntu, WSL):** copy `keys/`, `sources/`, `repo/` and `sysroot/` into the
-new checkout, but not `tools/`, `hosttools/` or `work/`: they hold programs built for the old machine (melon's are linked
+**Moving from another build machine (Valence, Ubuntu, WSL):** copy `keys/`, `sources/`, `repo/` and `sysroot/` into the
+new checkout, but not `tools/`, `hosttools/` or `work/`: they hold programs built for the old machine (Valence's are linked
 against musl, Ubuntu's against another glibc). `host-setup.sh` rebuilds the host tools and `build-everything.sh` the
 cross toolchain before it carries on with the packages; finished packages in `repo/` are not built again.
 
-## melon as the build machine
+## Valence as the build machine
 
-melon builds itself. On a melon install (desktop or console profile), starting with no checkout:
+Valence builds itself. On a Valence install (desktop or console profile), starting with no checkout:
 
 1. `doas apk upgrade`, then `doas apk add git` (git is in the online repository, not on the ISOs).
-2. `git clone -b testing https://github.com/melon-77/melon-os ~/melon`, then `cd ~/melon`.
-3. If you are moving from an old build machine, copy its `keys/`, `sources/`, `repo/` and `sysroot/` into `~/melon`
+2. `git clone -b testing https://github.com/melon-77/valence ~/valence`, then `cd ~/valence`.
+3. If you are moving from an old build machine, copy its `keys/`, `sources/`, `repo/` and `sysroot/` into `~/valence`
    (not `tools/` or `hosttools/`, see below). Otherwise put the signing key in `keys/` ("The signing key" below).
-4. `doas scripts/host-setup.sh` (it lists any build tool melon's repository doesn't have; if a step fails, it prints
+4. `doas scripts/host-setup.sh` (it lists any build tool Valence's repository doesn't have; if a step fails, it prints
    the end of `logs/host-setup.log`, where the full output of its builds goes)
 5. `doas scripts/build-everything.sh` (it uses every core; for fewer, `doas env JOBS=10 scripts/build-everything.sh`:
    doas doesn't take `NAME=value` before the command the way sudo does)
 
 What's different from an Ubuntu build machine:
 
-- `host-setup.sh` installs the build tools from melon's own package repository instead of Ubuntu's (it lists any name
-  it can't find), adds a small `dpkg-deb -x` replacement for the recipes that unpack `.deb` files, uses melon's
+- `host-setup.sh` installs the build tools from Valence's own package repository instead of Ubuntu's (it lists any name
+  it can't find), adds a small `dpkg-deb -x` replacement for the recipes that unpack `.deb` files, uses Valence's
   own `apk` and `wayland-scanner`, and builds `rpcgen` into `/usr/local/bin` while the repository has no `rpcsvc-proto`
   (Python's Jinja2 and pyparsing likewise come from their source tarballs until their packages are published).
 - A package that failed is unpacked fresh on the next run when its recipe changed since (after a `git pull` with a fix);
   otherwise `build-everything.sh` carries on where it stopped.
 - **Moving from an Ubuntu or WSL build machine:** keep `keys/`, `sources/`, `repo/` and `sysroot/`, but delete
   `tools/` and `hosttools/` (except `hosttools/bin/apk`, which `host-setup.sh` replaces anyway): they hold programs
-  built against Ubuntu's glibc, which melon doesn't have. `host-setup.sh` rebuilds the host tools, and
+  built against Ubuntu's glibc, which Valence doesn't have. `host-setup.sh` rebuilds the host tools, and
   `build-everything.sh` rebuilds the cross toolchain (about an hour or two) before carrying on with the packages,
   skipping every package already in `repo/`.
-- The loader is melon's own: `/lib/ld-musl-x86_64.so.1` is never pointed at the sysroot (AGENTS.md, rule 18).
+- The loader is Valence's own: `/lib/ld-musl-x86_64.so.1` is never pointed at the sysroot (AGENTS.md, rule 18).
   `/etc/ld-musl-x86_64.path` lists the system's library directories first and the sysroot's last.
 - Keep the build machine's own packages up to date from the online repository, and don't upgrade it from packages it
   just built until they pass the QEMU tests: a broken gcc or musl on the build machine stops it from fixing itself.
-  Keep a melon live USB around for that case.
+  Keep a Valence live USB around for that case.
 
 ## The 32-bit (i686) edition
 
 The same checkout builds the 32-bit edition next to the 64-bit one; its files go to `tools-x86/`, `sysroot-x86/`,
 `work-x86/` and `repo/x86/`, so the two never mix:
 
-    sudo MELON_ARCH=x86 JOBS=16 scripts/build-everything.sh
+    sudo VALENCE_ARCH=x86 JOBS=16 scripts/build-everything.sh
 
-(on melon: `doas env MELON_ARCH=x86 scripts/build-everything.sh`). It builds the i686 cross toolchain, the base
-system, Qt and the LXQt desktop (not Plasma, Flatpak or the NVIDIA drivers), then `out/melon-*-i686.iso` and
-`out/melon-desktop-*-i686.iso`. Logs carry `-x86` in their names (`logs/everything-x86-1.log`). Test with
+(on Valence: `doas env VALENCE_ARCH=x86 scripts/build-everything.sh`). It builds the i686 cross toolchain, the base
+system, Qt and the LXQt desktop (not Plasma, Flatpak or the NVIDIA drivers), then `out/valence-*-i686.iso` and
+`out/valence-desktop-*-i686.iso`. Logs carry `-x86` in their names (`logs/everything-x86-1.log`). Test with
 `scripts/qemu-test.py ... --i686`: it runs `qemu-system-i386` with an Atom N270 CPU. The build machine runs i686
 programs from the sysroot during the build, so its kernel needs 32-bit support (`CONFIG_IA32_EMULATION`, on in
-Ubuntu, Debian, Devuan and melon); `host-setup.sh` points `/lib/ld-musl-i386.so.1` at `sysroot-x86`. Disk: the
+Ubuntu, Debian, Devuan and Valence); `host-setup.sh` points `/lib/ld-musl-i386.so.1` at `sysroot-x86`. Disk: the
 finished 32-bit tree takes about 6 GB (toolchain, sysroot, packages, work), more while LLVM and Qt build; keep
 20 GB free.
 
 ## The signing key
 
-Packages and the repository index are signed with `keys/melon-signing.rsa`. It is deliberately not in
+Packages and the repository index are signed with `keys/valence-signing.rsa`. It is deliberately not in
 git. Copy it into `keys/` on the build machine and keep it private: whoever has it can publish packages
-that every melon system trusts. Losing it means installed systems need a new public key before they
+that every Valence system trusts. Losing it means installed systems need a new public key before they
 accept new packages.
 
 ## Sources

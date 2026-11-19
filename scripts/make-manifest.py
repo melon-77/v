@@ -92,7 +92,7 @@ URL = {  # upstream downloads (Ubuntu 26.04 has NetHack 3.6.7 and Cataclysm: DDA
     'itstool-2.0.7.tar.gz': 'https://github.com/itstool/itstool/archive/2.0.7/itstool-2.0.7.tar.gz',
     'mako-1.4.3.tar.gz': 'https://files.pythonhosted.org/packages/5a/09/e07c4b5579a79f4b16f8d4f29f6c54514ac787c4ad506b8c4f28a0e6b0bf/mako-1.4.3.tar.gz',
     'markupsafe-3.0.3.tar.gz': 'https://files.pythonhosted.org/packages/7e/99/7690b6d4034fffd95959cbe0c02de8deb3098cc577c67bb6a24fe5d7caa7/markupsafe-3.0.3.tar.gz',
-    # LXQt 2.4 and its libraries (melon's 32-bit desktop): checked against Alpine's sha512sums; cairo against Void's,
+    # LXQt 2.4 and its libraries (Valence's 32-bit desktop): checked against Alpine's sha512sums; cairo against Void's,
     # libfm and menu-cache against Arch's
     'cairo-1.18.4.tar.xz': 'https://cairographics.org/releases/cairo-1.18.4.tar.xz',
     'fribidi-1.0.16.tar.xz': 'https://github.com/fribidi/fribidi/releases/download/v1.0.16/fribidi-1.0.16.tar.xz',
@@ -139,7 +139,7 @@ URL = {  # upstream downloads (Ubuntu 26.04 has NetHack 3.6.7 and Cataclysm: DDA
     'go1.27.1.src.tar.gz': 'https://go.dev/dl/go1.27.1.src.tar.gz',
     'go1.27.1.linux-amd64.tar.gz': 'https://go.dev/dl/go1.27.1.linux-amd64.tar.gz',
     'qemu-11.1.1.tar.xz': 'https://download.qemu.org/qemu-11.1.1.tar.xz',
-    # QEMU's configure venv on a melon build machine (recipes/qemu): PyPI's wheels (PyPI's sha256, files identical to the
+    # QEMU's configure venv on a Valence build machine (recipes/qemu): PyPI's wheels (PyPI's sha256, files identical to the
     # sdists that Gentoo's Manifest and Debian's .dsc list; wheel's PyPI attestation from pypa/wheel)
     'setuptools-84.0.0-py3-none-any.whl': 'https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl',
     'wheel-0.45.1-py3-none-any.whl': 'https://files.pythonhosted.org/packages/0b/2c/87f3254fd8ffd29e4c02732eee68a83a1d3c346ae39bc6822dcbcb697f2b/wheel-0.45.1-py3-none-any.whl',

@@ -1,6 +1,6 @@
 #!/bin/bash
-# host-python.sh: build a host Python of the same version as melon's python3 recipe. Cross-compiling
-# Python needs one (--with-build-python). Installed to hosttools/python; nothing from here ships in melon.
+# host-python.sh: build a host Python of the same version as Valence's python3 recipe. Cross-compiling
+# Python needs one (--with-build-python). Installed to hosttools/python; nothing from here ships in Valence.
 set -euo pipefail
 M=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd); V=3.14.4; H=$M/hosttools/python; W=$M/work/host-python
 unset CC CXX CFLAGS CXXFLAGS LDFLAGS PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_PATH

@@ -6,7 +6,7 @@ eudev dbus elogind polkit linux-pam
 # graphics: Mesa with LLVM, no Vulkan (i915 for Intel GMA, crocus, r300, llvmpipe)
 mesa mesa-dri xwayland
 # LXQt on labwc
-melon-desktop melon-lxqt labwc lxqt-session lxqt-wayland-session lxqt-panel lxqt-runner lxqt-notificationd
+valence-desktop valence-lxqt labwc lxqt-session lxqt-wayland-session lxqt-panel lxqt-runner lxqt-notificationd
 lxqt-policykit lxqt-powermanagement lxqt-config lxqt-globalkeys lxqt-qtplugin lxqt-themes lxqt-menu-data
 pcmanfm-qt qterminal pavucontrol-qt lximage-qt xdg-user-dirs kf6-breeze-icons sddm
 # apps
@@ -22,8 +22,8 @@ e2fsprogs xz bzip2
 # printing (CUPS; driverless IPP printers through cups-filters)
 cups cups-filters avahi
 # fonts
-melon-fonts hicolor-icon-theme shared-mime-info
+valence-fonts hicolor-icon-theme shared-mime-info
 # disks
 cryptsetup dosfstools
 # running in a VM (each tool only starts under its own hypervisor)
-melon-vm-guest
+valence-vm-guest

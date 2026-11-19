@@ -1,4 +1,4 @@
-# basic PAM configuration for melon.
+# basic PAM configuration for Valence.
 auth        sufficient     pam_rootok.so
 auth        include        base-auth
 account     include        base-account

@@ -6,5 +6,5 @@ log=$1 new=$2; shift 2
 until grep -q '^EXIT' "$log" 2>/dev/null; do sleep 30; done
 failed=$(grep '^##### FAILED: ' "$log" | sed 's/^##### FAILED: //')
 [ -z "$failed$*" ] && { echo "EXIT 0" > "$new"; exit 0; }
-MELON_KEEP_GOING=1 $M/scripts/build-all.sh "$@" $failed > "$new" 2>&1
+VALENCE_KEEP_GOING=1 $M/scripts/build-all.sh "$@" $failed > "$new" 2>&1
 echo "EXIT $?" >> "$new"

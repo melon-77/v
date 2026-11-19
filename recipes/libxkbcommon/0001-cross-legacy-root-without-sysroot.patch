@@ -4,7 +4,7 @@
          break
      endif
  endforeach
-+# melon: pkg-config puts the sysroot in front of xkb_base when cross-compiling; this path is compiled in
++# Valence: pkg-config puts the sysroot in front of xkb_base when cross-compiling; this path is compiled in
 +_sysroot = meson.get_external_property('sys_root', '')
 +if _sysroot != '' and XKB_LEGACY_ROOT.startswith(_sysroot)
 +    XKB_LEGACY_ROOT = XKB_LEGACY_ROOT.replace(_sysroot, '')

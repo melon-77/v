@@ -1,9 +1,9 @@
-# Contributing to melon (instructions for agents)
+# Contributing to Valence (instructions for agents)
 
-This file is for AI agents (and humans) who work on melon. Read it fully before changing anything.
+This file is for AI agents (and humans) who work on Valence. Read it fully before changing anything.
 `CLAUDE.md` points here.
 
-## What melon is
+## What Valence is
 
 A from-scratch, rolling, x86_64 Linux distribution. Every package is cross-compiled from upstream
 source by our own scripts and shipped as a signed apk v3 package.
@@ -11,39 +11,39 @@ source by our own scripts and shipped as a signed apk v3 package.
 | Piece | Choice | Notes |
 |---|---|---|
 | libc | musl 1.2.5 | + CVE-2025-26519 iconv patches |
-| toolchain | GCC 15.2, binutils 2.46 | target triple `x86_64-melon-linux-musl` |
+| toolchain | GCC 15.2, binutils 2.46 | target triple `x86_64-valence-linux-musl` |
 | userland | BusyBox 1.37 | applet symlinks created by its post-install script |
 | shell | bash 5.3 (login shell), BusyBox ash is `/bin/sh` | |
 | privileges | doas (OpenDoas 6.8.2) with a `sudo` command on top | members of `wheel` |
-| init | runit 2.3 | stages in `/etc/runit/{1,2,3}`, services in `/etc/sv`, enabled = symlink in `/var/service`; stays melon's init (see Roadmap) |
+| init | runit 2.3 | stages in `/etc/runit/{1,2,3}`, services in `/etc/sv`, enabled = symlink in `/var/service`; stays Valence's init (see Roadmap) |
 | devices | eudev 3.2 on the desktop profile (`udevd` service), BusyBox mdev (`mdevd` service) on the console profile | the desktop profile swaps `mdevd` for `udevd`; see rule 44 |
-| packages | apk-tools 3.0.8 | repo index `Packages.adb`, signed with `keys/melon-signing.rsa` |
-| kernel | Linux 7.0, `linux-melon` (generic) | config = `x86_64_defconfig` + `recipes/linux-melon/config-melon` |
+| packages | apk-tools 3.0.8 | repo index `Packages.adb`, signed with `keys/valence-signing.rsa` |
+| kernel | Linux 7.0, `linux-valence` (generic) | config = `x86_64_defconfig` + `recipes/linux-valence/config-valence` |
 | boot | GRUB 2.14, both `i386-pc` and `x86_64-efi` | ISO and installs boot on BIOS **and** UEFI; the installed system's boot menu is hidden (skipped after 1 s, Shift or Esc opens it) unless another system is found, then it shows for 5 s |
 | disks | GPT: 1 MiB BIOS boot, 1 GiB FAT32 `/boot` (also the ESP), XFS `/` | kernel boots with `root=PARTUUID=...`; only encrypted (LUKS) installs have an initramfs (rule 28); dual boot next to Windows on UEFI (see Installers) |
 | filesystem | merged `/usr`: `/bin`, `/sbin`, `/usr/sbin` -> `usr/bin`, `/lib` -> `usr/lib` | packages must only ship files under `/usr`, `/etc`, `/var`, `/boot` |
 | desktop | KDE Plasma 6.6 on Wayland (KWin, Xwayland), Qt 6.10, SDDM | desktop ISO and desktop profile; list in `scripts/desktop-packages.txt` |
-| 32-bit edition | i686 (`MELON_ARCH=x86`, `-march=pentium-m -mfpmath=sse`: SSE2, as Qt 6 needs), LXQt 2.4 on Wayland with labwc 0.20 (wlroots), SDDM, Mesa with LLVM built for the X86 backend only (i915, crocus, r300, r600, nouveau, llvmpipe, softpipe) | the owner's decision (7 October 2026): LXQt is the 32-bit desktop, for netbooks such as the MSI Wind U100 (Atom N270, 1–2 GB); drivers for every netbook-era Wi-Fi, Ethernet, graphics and laptop chip in `recipes/linux-melon/config-melon-x86` (the owner: "it should just work"; Broadcom b43 cards still need firmware nobody may redistribute); package list `scripts/desktop-packages-x86.txt`, recipes from `scripts/gen-lxqt-recipes.py` plus `recipes/melon-lxqt` (melon's LXQt defaults); no Plasma, Flatpak, NVIDIA or QEMU guest agent there (QEMU 11 doesn't build for 32-bit hosts) |
+| 32-bit edition | i686 (`VALENCE_ARCH=x86`, `-march=pentium-m -mfpmath=sse`: SSE2, as Qt 6 needs), LXQt 2.4 on Wayland with labwc 0.20 (wlroots), SDDM, Mesa with LLVM built for the X86 backend only (i915, crocus, r300, r600, nouveau, llvmpipe, softpipe) | the owner's decision (7 October 2026): LXQt is the 32-bit desktop, for netbooks such as the MSI Wind U100 (Atom N270, 1–2 GB); drivers for every netbook-era Wi-Fi, Ethernet, graphics and laptop chip in `recipes/linux-valence/config-valence-x86` (the owner: "it should just work"; Broadcom b43 cards still need firmware nobody may redistribute); package list `scripts/desktop-packages-x86.txt`, recipes from `scripts/gen-lxqt-recipes.py` plus `recipes/valence-lxqt` (Valence's LXQt defaults); no Plasma, Flatpak, NVIDIA or QEMU guest agent there (QEMU 11 doesn't build for 32-bit hosts) |
 | desktop plumbing | D-Bus, elogind, polkit, PipeWire + WirePlumber, NetworkManager, BlueZ, CUPS, UDisks2 | console profile keeps `dhcp` + wpa_supplicant |
 | graphics | Mesa 26.0 with LLVM: radeonsi/RADV, iris/ANV, nouveau, llvmpipe; zink (OpenGL on Vulkan) | |
-| developer tools | gcc 15.2 + g++, binutils 2.46, make 4.4.1, pkgconf, patch (`gcc`, `g++`, `binutils`, `make`, `pkgconf`, `patch`) | built cross-native with the cross toolchain's settings (PIE, SSP); in the package repository only, not on the ISOs; `melon-first-boot` offers them on first login (default no) |
-| build tools | perl 5.44, m4, bison, flex, gawk, gperf, GNU bc, texinfo, autoconf 2.73, automake 1.19, autoconf-archive, file; cmake 4.4, meson 1.12, ninja 1.13, git 2.56, nasm 3.01, tcl 8.6, rsync 3.5, lz4; xorriso, mtools, scdoc, itstool, dtc, pahole (`dwarves`), rpcgen (`rpcsvc-proto`), the Public Suffix List, Python's mako, Jinja2, pyparsing, PyYAML, packaging, pexpect and libxml2 bindings (`python3-*`) (`BUILDTOOLS`, `BUILDTOOLS2` in `build-everything.sh`) | what melon's recipes need to build on melon itself (self-hosting, see Roadmap); package repository only. gawk and GNU bc take over BusyBox's `awk`/`bc`/`dc` links; BusyBox's `/usr/bin` trigger puts them back when those packages go |
-| compilers, VMs | clang 21 (+ `libclc`, `spirv-llvm-translator`), Go 1.27, gh (`github-cli`), QEMU 11.1 + OVMF (`qemu`, `ovmf`) (`STEP2` in `build-everything.sh`) | package repository only. clang: Mesa's OpenCL C shader compiler on melon; QEMU + OVMF run melon's own install tests on melon; OVMF is Ubuntu 26.04's prebuilt `ovmf-generic` at Ubuntu's paths |
-| NVIDIA | the open driver: nouveau + `linux-firmware-nvidia` (GSP 570.144 from upstream linux-firmware) + NVK (`mesa-nvk`), with zink for OpenGL; or NVIDIA's own kernel driver: `nvidia-open` 615 (open modules + NVIDIA's firmware) | package repository only; `melon-first-boot` asks which one on computers with an NVIDIA card (GTX 16/RTX 20 and newer). NVIDIA's userspace needs glibc: with `nvidia-open` only Flatpak apps (Steam) get NVIDIA's libraries, from Flathub |
-| gaming | Flatpak 1.16 + Flathub, GameMode | Steam is glibc-only, so it can't run natively on musl: `melon-first-boot` offers Steam (and Firefox, VLC, Prism Launcher) from Flathub on first login |
+| developer tools | gcc 15.2 + g++, binutils 2.46, make 4.4.1, pkgconf, patch (`gcc`, `g++`, `binutils`, `make`, `pkgconf`, `patch`) | built cross-native with the cross toolchain's settings (PIE, SSP); in the package repository only, not on the ISOs; `valence-first-boot` offers them on first login (default no) |
+| build tools | perl 5.44, m4, bison, flex, gawk, gperf, GNU bc, texinfo, autoconf 2.73, automake 1.19, autoconf-archive, file; cmake 4.4, meson 1.12, ninja 1.13, git 2.56, nasm 3.01, tcl 8.6, rsync 3.5, lz4; xorriso, mtools, scdoc, itstool, dtc, pahole (`dwarves`), rpcgen (`rpcsvc-proto`), the Public Suffix List, Python's mako, Jinja2, pyparsing, PyYAML, packaging, pexpect and libxml2 bindings (`python3-*`) (`BUILDTOOLS`, `BUILDTOOLS2` in `build-everything.sh`) | what Valence's recipes need to build on Valence itself (self-hosting, see Roadmap); package repository only. gawk and GNU bc take over BusyBox's `awk`/`bc`/`dc` links; BusyBox's `/usr/bin` trigger puts them back when those packages go |
+| compilers, VMs | clang 21 (+ `libclc`, `spirv-llvm-translator`), Go 1.27, gh (`github-cli`), QEMU 11.1 + OVMF (`qemu`, `ovmf`) (`STEP2` in `build-everything.sh`) | package repository only. clang: Mesa's OpenCL C shader compiler on Valence; QEMU + OVMF run Valence's own install tests on Valence; OVMF is Ubuntu 26.04's prebuilt `ovmf-generic` at Ubuntu's paths |
+| NVIDIA | the open driver: nouveau + `linux-firmware-nvidia` (GSP 570.144 from upstream linux-firmware) + NVK (`mesa-nvk`), with zink for OpenGL; or NVIDIA's own kernel driver: `nvidia-open` 615 (open modules + NVIDIA's firmware) | package repository only; `valence-first-boot` asks which one on computers with an NVIDIA card (GTX 16/RTX 20 and newer). NVIDIA's userspace needs glibc: with `nvidia-open` only Flatpak apps (Steam) get NVIDIA's libraries, from Flathub |
+| gaming | Flatpak 1.16 + Flathub, GameMode | Steam is glibc-only, so it can't run natively on musl: `valence-first-boot` offers Steam (and Firefox, VLC, Prism Launcher) from Flathub on first login |
 | game library | SDL3 3.4 + SDL3_image + SDL3_ttf (`sdl3`, `sdl3-image`, `sdl3-ttf`) | package repository only; SDL dlopen()s its Wayland/X11/audio backends |
 | apps and games | Cataclysm: DDA and GNU gettext (package repository only) | what goes on an ISO follows the size rule in "Contributing" |
 
 Owner's config (`CONFIG_*` answers) lives in `docs/config.txt`. Don't change those choices without the owner's approval.
 
-To build on another machine (Ubuntu 24.04 or WSL2, Debian or Devuan through the same apt path, or melon), follow
+To build on another machine (Ubuntu 24.04 or WSL2, Debian or Devuan through the same apt path, or Valence), follow
 `BUILDING.md`: `scripts/host-setup.sh`, then `scripts/build-everything.sh`. Scripts find the repo from their own
 location; recipes use `$M`. Never write a machine's absolute path into a script or recipe. A checkout's `tools/` and
 `sysroot/` are tied to its path (the cross compiler has `--with-sysroot=<checkout>/sysroot` built in): **two sessions must
 not share one checkout** (one switching branches under the other's build). Give each its own `git worktree` with its own
 toolchain, sysroot and `repo/` ("Windows + WSL2 build machine" in `BUILDING.md` says how). Run scripts by their absolute path:
 `toolchain.sh` changes directory and then looks for `toolchain-finish.sh` next to `$0`. The signing key can stay where it is:
-`MELON_SIGN_KEY=/path/to/melon-signing.rsa` is honoured by `melon-build` and `mkiso.sh`.
+`VALENCE_SIGN_KEY=/path/to/valence-signing.rsa` is honoured by `valence-build` and `mkiso.sh`.
 
 ## Repository layout
 
@@ -51,27 +51,27 @@ toolchain, sysroot and `repo/` ("Windows + WSL2 build machine" in `BUILDING.md` 
 scripts/env.sh          paths: M, TARGET, TOOLS, SYSROOT, SRC, WORK, REPO
 scripts/toolchain.sh    cross toolchain, part 1 (binutils, headers, gcc stage 1)
 scripts/toolchain-finish.sh  part 2 (musl, full gcc)
-scripts/melon-build     build ONE recipe -> signed .apk(s) in repo/x86_64, reindex, install into sysroot
+scripts/valence-build     build ONE recipe -> signed .apk(s) in repo/x86_64, reindex, install into sysroot
 scripts/build-all.sh    build a list of recipes in order, logs to logs/pkg-<name>.log
 scripts/check-order.sh  every makedepends is built before the recipe that needs it (build-everything.sh runs it first)
 scripts/mkiso.sh        live/installer ISO: rootfs.sqfs (pristine apk-installed system, copied to disk by the
                         installers) + live.sqfs (small live-session layer) + a small repo of extras (VM guest tools,
                         a few base packages; never a second copy of what rootfs.sqfs already holds)
 scripts/qemu-test.py    headless boot + install + reboot test over the serial console
-recipes/<name>/MELONBUILD   one directory per recipe (see below)
+recipes/<name>/VALENCEBUILD   one directory per recipe (see below)
 recipes/<name>/*.patch      applied automatically with patch -p1, in name order
 recipes/<name>/<pkg>.post-install etc.   apk scripts for (sub)package <pkg>
 iso-files/init          live initramfs /init
 branding/               logo (transparent PNGs)
-recipes/calamares-melon/    graphical installer: Calamares settings, branding, job configs, finishing scripts (stage 2)
+recipes/calamares-valence/    graphical installer: Calamares settings, branding, job configs, finishing scripts (stage 2)
 ```
 
 Not in git (see `.gitignore`): `sources/`, `work/`, `tools/`, `sysroot/`, `hosttools/`, `repo/`, `out/`,
 `logs/`, and **the private signing key**. Never commit `keys/*.rsa`. Only `keys/*.rsa.pub` is committed.
 
-## Recipe format (MELONBUILD)
+## Recipe format (VALENCEBUILD)
 
-A bash fragment sourced by `scripts/melon-build`. Minimal example:
+A bash fragment sourced by `scripts/valence-build`. Minimal example:
 
 ```bash
 pkgname=zlib
@@ -99,7 +99,7 @@ Things the builder gives you:
 - Triggers: `triggers_<x>=(dir ...)` plus a `<pkg>.trigger` script; apk runs the script (with the changed
   directories as arguments) after any transaction that touches those directories, and when `<pkg>` itself is
   installed. Use them for caches other packages feed, e.g. `recipes/shared-mime-info`.
-- `cmake_native <args>` configures CMake as a native build with melon's compilers and sysroot, so generators the build
+- `cmake_native <args>` configures CMake as a native build with Valence's compilers and sysroot, so generators the build
   makes (LLVM's tablegens) run here (rule 18); `recipes/llvm`, `recipes/clang`. `cmake_setup` is the cross build.
 - `py_install <name> <dirs...>` installs pure-Python modules into python3's site-packages with a small `.dist-info`
   (`recipes/python3-mako`). Modules with C parts need their build system (`recipes/python3-libxml2`).
@@ -109,7 +109,7 @@ Things the builder gives you:
 - `so:` provides/depends are generated from SONAME/NEEDED. musl's `libc.so` has no SONAME, so the musl
   recipe declares `so:libc.so` by hand. Keep it that way.
 
-Build one package: `scripts/melon-build <recipe>`. Build several: `scripts/build-all.sh a b c`.
+Build one package: `scripts/valence-build <recipe>`. Build several: `scripts/build-all.sh a b c`.
 Rebuilding the kernel takes about an hour on 2 cores.
 
 ## Hard-won rules (each one broke the build once)
@@ -129,18 +129,18 @@ Rebuilding the kernel takes about an hour on 2 cores.
    the change won't reach the sysroot or users.
 7. **Install scripts must not create config files that another package ships.** apk would then keep the
    script's version and write the package's as `*.apk-new`. See `recipes/bash/bash.post-install`.
-8. **GCC's target libraries install to `tools/x86_64-melon-linux-musl/lib64`**, not `lib`.
+8. **GCC's target libraries install to `tools/x86_64-valence-linux-musl/lib64`**, not `lib`.
 9. Anything that runs cross-built binaries on the build host needs `/lib/ld-musl-x86_64.so.1`
    (a symlink to `sysroot/usr/lib/libc.so`).
 10. **Module handling uses kmod, not BusyBox.** BusyBox's `depmod -b` produced a modules.dep that
     `modprobe` couldn't resolve, so no drivers loaded. The kernel package runs `depmod -a` (kmod) in its
-    post-install, and `kmod` is a dependency of `linux-melon`.
+    post-install, and `kmod` is a dependency of `linux-valence`.
 11. **The build host needs `zstd`** (the kernel compresses bzImage with it), `mtools`, `xorriso` and
     `squashfs-tools`.
 12. **GRUB on a serial console:** `terminal_output gfxterm` replaces the serial output unless `serial`
-    is listed too. `melon-update-grub` handles this when `GRUB_SERIAL=1` is set in `/etc/default/grub`.
-13. **`melon-update-grub` is given the root and boot devices explicitly** by the installer
-    (`MELON_ROOT_DEV`, `MELON_BOOT_DEV`). Guessing them from inside a chroot picked the wrong filesystem UUID.
+    is listed too. `valence-update-grub` handles this when `GRUB_SERIAL=1` is set in `/etc/default/grub`.
+13. **`valence-update-grub` is given the root and boot devices explicitly** by the installer
+    (`VALENCE_ROOT_DEV`, `VALENCE_BOOT_DEV`). Guessing them from inside a chroot picked the wrong filesystem UUID.
 
 14. **Services never write to the console.** Every `/etc/sv/<svc>/run` starts with `exec 2>&1`, and
     anything chatty has a `log/run` that pipes it to `svlogd` in `/var/log/<svc>/`. A crash-looping
@@ -151,13 +151,13 @@ Rebuilding the kernel takes about an hour on 2 cores.
     FAT `/boot` dirty.
 17. **`sudo` is a small front end for doas** (`recipes/opendoas/sudo`). Rules live in `/etc/doas.conf`
     (`permit persist :wheel`). New users get their shell setup from `/etc/skel`.
-18. **melon binaries run on the build host.** `/lib/ld-musl-x86_64.so.1` points at the sysroot's `libc.so`
+18. **Valence binaries run on the build host.** `/lib/ld-musl-x86_64.so.1` points at the sysroot's `libc.so`
     and `/etc/ld-musl-x86_64.path` lists `sysroot/usr/lib` (same for `i386` in 32-bit builds), so
     build-time generators from earlier packages (glib-compile-resources, kconfig_compiler, ...) just run.
     Meson's cross file sets `needs_exe_wrapper=false` for the same reason.
-    **On a melon build machine, never do this:** there the loader is the system's own musl, and pointing it at the
+    **On a valence build machine, never do this:** there the loader is the system's own musl, and pointing it at the
     sysroot swaps libc under every program. `host-setup.sh` only writes `/etc/ld-musl-x86_64.path` with the system's
-    directories first and `sysroot/usr/lib` last (BUILDING.md, "melon as the build machine").
+    directories first and `sysroot/usr/lib` last (BUILDING.md, "valence as the build machine").
 19. **`meson_setup` drops `-D` options the project doesn't have** (`scripts/meson-filter-opts.py`) and
     unsets the `PKG_CONFIG_*` variables for native lookups. Upstream renames options often; a stale
     option must not fail the whole build.
@@ -165,38 +165,38 @@ Rebuilding the kernel takes about an hour on 2 cores.
     `/usr/local`, Mesa's `mesa_clc`/`vtn_bindgen2` in `hosttools/bin` (built against host LLVM), and the
     Qt 6 host tools in `hosttools/qt6` (`scripts/host-qt.sh`, same Qt version as the target, passed as
     `QT_HOST_PATH`). The host also needs `libltdl-dev` (libffi's autoreconf). Meson only finds programs for a
-    cross build in the cross file's `[binaries]`, never on `PATH`, so `melon-build` lists the host Qt tools
+    cross build in the cross file's `[binaries]`, never on `PATH`, so `valence-build` lists the host Qt tools
     (moc, uic, rcc, ...) and `bwrap` there.
 21. **Never kill build processes with `pkill -f <pattern>`** when your own shell's command line contains
     the pattern: it kills your shell too. Find the PID and kill that.
-22. **Edit scripts that may be running (`melon-build`, `mkiso.sh`, queue scripts) through a temporary file
+22. **Edit scripts that may be running (`valence-build`, `mkiso.sh`, queue scripts) through a temporary file
     and `mv`.** bash reads scripts while running them, so an in-place edit corrupts a running build.
 23. **Never type keys or checksums from memory.** The Flathub key is downloaded from Flathub's own
-    `.flatpakrepo` at first use; Alpine's public keys in `melon-base` were fetched from Alpine's aports
+    `.flatpakrepo` at first use; Alpine's public keys in `valence-base` were fetched from Alpine's aports
     and checked against the sha512sums in Alpine's `alpine-keys` APKBUILD.
 24. **musl ships `libc.musl-<arch>.so.1`** (a symlink to the loader), the library name Alpine binaries link
-    against. That's what lets opt-in `@alpine` packages run on melon.
+    against. That's what lets opt-in `@alpine` packages run on valence.
 25. **Cross autoconf answers live in `scripts/config.site`** (`CONFIG_SITE`). Without them `AC_FUNC_MALLOC`
     assumes a broken malloc and the library ends up with undefined `rpl_malloc` (libndp).
 26. **`msgfmt` needs `GETTEXTDATADIRS`** pointing at the sysroot's `/usr/share/gettext` to find the ITS
-    rules (polkit policies, GSettings schemas) that earlier melon packages installed (upower).
+    rules (polkit policies, GSettings schemas) that earlier valence packages installed (upower).
 27. **Host packages the build needs** besides the toolchain: `tcl` (sqlite's amalgamation), `hwdata`
     (libdisplay-info reads `pnp.ids` at build time), `publicsuffix` (libpsl's built-in list), `autopoint`
     (cryptsetup's autoreconf), `libltdl-dev`, `libxml2-utils` (shared-mime-info runs `xmllint`), `appstream` +
     `libappstream-dev` + `itstool` (appstream's metainfo), `nasm` (FFmpeg's x86 assembly), `bubblewrap` (meson checks
     for `bwrap` in flatpak and xdg-desktop-portal).
-28. **Only encrypted installs have an initramfs.** `melon-mkinitramfs` builds it when
-    `/etc/melon/encrypted-root` exists; `melon-update-grub` then writes `cryptroot=UUID=<luks>
-    root=/dev/mapper/melonroot` and an `initrd` line. Everything else still boots straight from the kernel.
+28. **Only encrypted installs have an initramfs.** `valence-mkinitramfs` builds it when
+    `/etc/valence/encrypted-root` exists; `valence-update-grub` then writes `cryptroot=UUID=<luks>
+    root=/dev/mapper/valenceroot` and an `initrd` line. Everything else still boots straight from the kernel.
 30. **musl 1.2.4+ hides the `*64` LFS types** (`off64_t`, `ino64_t`) unless `_LARGEFILE64_SOURCE` is
     defined. Add `-D_LARGEFILE64_SOURCE` to the recipe's CFLAGS (gpgme), as Alpine does.
 31. **The builder's `apk add --upgrade` only reinstalls a package whose version-release changed.** Generated
     recipes take their `pkgrel` from the `PKGREL` table in `scripts/gen-simple-recipes.py`.
-29. **Two build queues may run at once** for the same arch: `melon-build` takes `flock repo/<arch>/.lock`
+29. **Two build queues may run at once** for the same arch: `valence-build` takes `flock repo/<arch>/.lock`
     around sysroot installs and reindexing, and writes packages under a temporary name first.
 
 32. **pkg-config puts the sysroot in front of path *variables*** (`xkb_base`, `dridriverdir`, dbus and polkit
-    dirs, ...). Builds then either install under `/home/.../sysroot/...` (melon-build moves those files back and
+    dirs, ...). Builds then either install under `/home/.../sysroot/...` (valence-build moves those files back and
     logs `LEAK: files installed under ...`) or compile the build machine's path into a program (logged as
     `LEAK: build-machine path compiled into ...`). **Read the LEAK lines after every build**: compiled-in paths
     need an explicit option (`-Dxkb_bin_dir=/usr/bin`, elogind's `-Ddbuspolicydir=...`) or a patch that strips
@@ -210,8 +210,8 @@ Rebuilding the kernel takes about an hour on 2 cores.
     starts elogind and polkitd (their D-Bus activation files run /bin/false): otherwise the first daemon to ask for
     them gets a D-Bus-activated copy, and the supervised one exits and restarts every second because the name is
     taken (polkitd did that on installed systems). Services that need them at startup wait with `sv check`.
-35. **Image assembly installs BusyBox, then melon-base, then everything else** (`mkiso.sh`): install scripts need
-    /bin/sh and adduser, and the users they add (messagebus, polkitd, sddm) must not be overwritten by melon-base's
+35. **Image assembly installs BusyBox, then valence-base, then everything else** (`mkiso.sh`): install scripts need
+    /bin/sh and adduser, and the users they add (messagebus, polkitd, sddm) must not be overwritten by valence-base's
     `/etc/passwd` arriving later.
 36. **Build Qt QML (qt6-qtdeclarative) before anything with QML parts.** Qt modules and frameworks built without it
     silently leave their QML modules out (`Could NOT find Qt6Qml` in the log); rebuild them with a pkgrel bump.
@@ -230,18 +230,18 @@ Rebuilding the kernel takes about an hour on 2 cores.
     (`/usr/share/misc/config.sub`, `config.guess`) as libcanberra and libatasmart do. Tools a build runs on the
     build machine come from `CC_FOR_BUILD=gcc` when the project supports it.
 41. **Absolute symlinks in `usr/lib` and `usr/include`** (`libfoo.so -> /usr/lib/libfoo.so.1`) point into the
-    build machine's own `/usr` from the sysroot, so the linker can't find the library. melon-build makes them
+    build machine's own `/usr` from the sysroot, so the linker can't find the library. valence-build makes them
     relative when packaging; a package built before that needs a pkgrel bump to reach the sysroot (rule 31).
 42. **`.pc` files and `*-config` scripts copy pkg-config's sysroot answers** (`Libs.private: -L<sysroot>/usr/lib`).
-    melon-build turns sysroot paths in `.pc` files into plain `/usr` paths; a `*-config` script needs its recipe to
+    valence-build turns sysroot paths in `.pc` files into plain `/usr` paths; a `*-config` script needs its recipe to
     do the same (`recipes/cups`). The `LEAK:` lines name what is left.
 43. **Kernel options with unmet dependencies vanish silently** in `olddefconfig` (the touchpad's
     `I2C_DESIGNWARE_PLATFORM` needed `I2C_DESIGNWARE_CORE`; `HP_WMI` needed `X86_PLATFORM_DRIVERS_HP`). The kernel
-    recipe now stops when an option from `config-melon` isn't in the final `.config`: look its dependencies up in the
-    Kconfig files and add them. The built config ships as `/boot/config-melon`; check it, not the fragment. For a
-    real machine, `sudo melon-hwreport` lists every PCI/USB/ACPI/I2C device with the driver it got, the modaliases of
+    recipe now stops when an option from `config-valence` isn't in the final `.config`: look its dependencies up in the
+    Kconfig files and add them. The built config ships as `/boot/config-valence`; check it, not the fragment. For a
+    real machine, `sudo valence-hwreport` lists every PCI/USB/ACPI/I2C device with the driver it got, the modaliases of
     devices that got none, graphics, network, sound, Bluetooth, power and service state, and the kernel's firmware
-    messages; map IDs to modules with `modprobe -R <modalias>` against the built kernel. (`scripts/melon-diag.sh`, the
+    messages; map IDs to modules with `modprobe -R <modalias>` against the built kernel. (`scripts/valence-diag.sh`, the
     old `curl | sh` tool, is now a wrapper that prints the same report.)
 44. **Never restart udevd while devices are still appearing: events in the gap are lost.** Stage 1 runs a udevd for the boot
     coldplug. It used to stop it and let the runit service start a new one a moment later; a Wi-Fi card's interface
@@ -249,34 +249,34 @@ Rebuilding the kernel takes about an hour on 2 cores.
     kernel name `wlan0` and NetworkManager left it "unmanaged" (the ProBook's MT7921). Now stage 1 leaves its udevd
     running and the `udevd` service adopts it (`recipes/eudev/udevd.run`: it waits for that process and stops it on
     TERM), so udev never restarts at boot. The service still replays the "add" events for net, ieee80211, rfkill and
-    bluetooth devices when it has to start a fresh udevd (`sv restart udevd`, or the kernel option `melon.udev=sync`,
+    bluetooth devices when it has to start a fresh udevd (`sv restart udevd`, or the kernel option `valence.udev=sync`,
     which brings back the old stop-and-restart; `qemu-test.py desktop` covers that path).
-    The two halves are in different packages, stage 1 in melon-base (`/etc/runit/1`) and the adoption in eudev
-    (`udevd.run`), and melon-base doesn't pin eudev's version: **publish melon-base 0.1-r36 or later online only together
+    The two halves are in different packages, stage 1 in valence-base (`/etc/runit/1`) and the adoption in eudev
+    (`udevd.run`), and valence-base doesn't pin eudev's version: **publish valence-base 0.1-r36 or later online only together
     with eudev 3.2.14-r2 or later.** With an older eudev the service starts a second udevd next to stage 1's, which can't
-    start, so runit restarts it every second. The other mix is safe: a newer eudev with an older melon-base finds no udevd
+    start, so runit restarts it every second. The other mix is safe: a newer eudev with an older valence-base finds no udevd
     running and starts its own.
     Stage 1 no longer waits for udev to finish: it waits only for the devices in `/etc/fstab`, so **a service or a
     stage 1 step that needs a device other than a mounted disk must wait for it itself** (SDDM waits until elogind reports seat0 graphical, i.e. until the GPU driver is up).
 45. **Packaged files must not keep the builder's account.** `cp -a $startdir/files/.` keeps the checkout's owner;
-    apk records that account's name, and on a melon system without it the files become `nobody`'s. Service run
-    scripts, `/etc/profile.d` and the installer's helpers were writable by `nobody`, then run by root. `melon-build`
+    apk records that account's name, and on a valence system without it the files become `nobody`'s. Service run
+    scripts, `/etc/profile.d` and the installer's helpers were writable by `nobody`, then run by root. `valence-build`
     gives root every file owned by an account from 1000 up; system accounts a recipe sets on purpose (below 1000)
     stay. The desktop-install test fails if anything under `/usr` or `/etc` belongs to `nobody`.
 46. **Rust recipes cross-compile with the build machine's Rust** (`scripts/host-rust.sh` puts upstream's release
-    binaries in `hosttools/rust`, with the standard library for `$RUST_TARGET`). melon-build points cargo at
-    `x86_64-unknown-linux-musl`, links with melon's gcc and passes `-C target-feature=-crt-static -C link-self-contained=no` in
+    binaries in `hosttools/rust`, with the standard library for `$RUST_TARGET`). valence-build points cargo at
+    `x86_64-unknown-linux-musl`, links with valence's gcc and passes `-C target-feature=-crt-static -C link-self-contained=no` in
     `RUSTFLAGS` (never `CARGO_TARGET_<triple>_RUSTFLAGS`, which cargo merges with a project's own `.cargo/config.toml`, and
-    ripgrep's turns static linking back on): Rust's musl targets link statically by default, and melon's programs share its libc. Build scripts and proc-macros run on the build
+    ripgrep's turns static linking back on): Rust's musl targets link statically by default, and valence's programs share its libc. Build scripts and proc-macros run on the build
     machine; their C parts get the build machine's gcc from the triple-named variables (`CC_x86_64_unknown_linux_gnu`,
     ...), never `HOST_CC`, which other build systems read too. `cargo_fetch` (in `prepare()`) downloads crates from
     crates.io into `sources/cargo`, pinned by the checksums in the project's `Cargo.lock`; `cargo_build` then builds
     offline with `--locked`, and `cargo_out` names the output directory. A build script that asks git for a commit
-    hash would find melon's own checkout: melon-build exports `GIT_CEILING_DIRECTORIES=$WORK` for every build (clang's
-    `--version` had named melon's repo). `-sys` crates build their own static copy of
-    a C library for musl targets unless told otherwise (`PCRE2_SYS_STATIC=0` in ripgrep): link melon's. **Every recipe
+    hash would find valence's own checkout: valence-build exports `GIT_CEILING_DIRECTORIES=$WORK` for every build (clang's
+    `--version` had named valence's repo). `-sys` crates build their own static copy of
+    a C library for musl targets unless told otherwise (`PCRE2_SYS_STATIC=0` in ripgrep): link valence's. **Every recipe
     that puts Rust code into a package says `options=(rust)`**, so the Rust packages can be found from the recipes
-    (`grep -l 'options=(.*rust' recipes/*/MELONBUILD`).
+    (`grep -l 'options=(.*rust' recipes/*/VALENCEBUILD`).
 
 47. **Flatpak must be built with X11 authorization (`-Dxauth=enabled`, libXau).** Without it, sandboxed X11 apps get
     the host's `DISPLAY` and a path to an Xauthority file that doesn't exist inside the sandbox. Xwayland refuses them
@@ -285,29 +285,29 @@ Rebuilding the kernel takes about an hour on 2 cores.
 
 48. **A configure that must run its test programs can run as if native** (rule 18): perl's `Configure` gets `-Dcc=$CC`
     and the sysroot's `libpth`/`usrinc`, and the recipe strips the sysroot and the triple from the installed
-    `Config.pm` afterwards, so modules built on melon use `gcc` and `/usr`. The same trick compiles `file`'s magic
+    `Config.pm` afterwards, so modules built on valence use `gcc` and `/usr`. The same trick compiles `file`'s magic
     database with the `file` just built. Perl's MakeMaker writes the directory of every library it finds into the
     module's RPATH through `LD_RUN_PATH`: `make LD_RUN_PATH=` keeps the sysroot out (a `LEAK:` line otherwise).
     CMake's own `try_run` checks run the same way: `-DCMAKE_CROSSCOMPILING_EMULATOR=/usr/bin/env` (recipes/cmake).
     A library built without a SONAME (perl's, Tcl's) gets one on its link line, or the `so:` dependency on it can't be met.
 
-49. **melon's llvm-dev keeps only five static archives** (LLVMSupport, LLVMDemangle, LLVMTableGen, -Basic, -Common): the
+49. **Valence's llvm-dev keeps only five static archives** (LLVMSupport, LLVMDemangle, LLVMTableGen, -Basic, -Common): the
     rest (about 1 GB) would pass GitHub's file limit, and everything links the shared libLLVM. Tablegen tools always link
-    those five statically, and a standalone build against melon's LLVM (clang, recipes/clang) makes its own
+    those five statically, and a standalone build against valence's LLVM (clang, recipes/clang) makes its own
     `clang-tblgen`. The recipe also drops the deleted archives from `LLVMExports-release.cmake`: `find_package(LLVM)`
     refuses to configure while an exported file is missing.
 50. **Go records its defaults when it is built:** a set `CGO_ENABLED` becomes the permanent default, and the C compiler's
     name is baked in. recipes/go leaves `CGO_ENABLED` unset (cgo switches on by itself when a compiler is installed) and
-    builds with `CC=gcc`, a wrapper that runs melon's cross compiler, so Go on melon calls plain `gcc`. Go programs in
-    recipes (recipes/github-cli) build with melon's own `go` from the sysroot; their modules are downloaded in
+    builds with `CC=gcc`, a wrapper that runs valence's cross compiler, so Go on valence calls plain `gcc`. Go programs in
+    recipes (recipes/github-cli) build with valence's own `go` from the sysroot; their modules are downloaded in
     `prepare()` into `sources/gomod`, checked against `go.sum` and sum.golang.org, and the build runs with `GOPROXY=off`.
-51. **NVIDIA's kernel modules fit one exact kernel.** `nvidia-open` is built against melon's kernel source with the exact
-    `/boot/config-melon` (a full kernel build, for `Module.symvers`, which NVIDIA's configure checks read) and depends on
-    that `linux-melon` version-release: **every linux-melon version or pkgrel change needs an nvidia-open pkgrel bump
+51. **NVIDIA's kernel modules fit one exact kernel.** `nvidia-open` is built against Valence's kernel source with the exact
+    `/boot/config-valence` (a full kernel build, for `Module.symvers`, which NVIDIA's configure checks read) and depends on
+    that `linux-valence` version-release: **every linux-valence version or pkgrel change needs an nvidia-open pkgrel bump
     and rebuild in the same change**, or systems with it can't take the new kernel. Its firmware (`nvidia-open-firmware`)
     is NVIDIA's, shipped unmodified with NVIDIA's licence (the licence's condition for redistributing it). A real test
     needs an NVIDIA card: QEMU can't emulate one. What the build machine checks: the modules' vermagic, `depmod -e`
-    against `System.map`, and loading them in a melon VM (`NVRM: No NVIDIA GPU found`, then a clean exit).
+    against `System.map`, and loading them in a valence VM (`NVRM: No NVIDIA GPU found`, then a clean exit).
 52. **NVK (recipes/mesa-nvk) is Rust**, so it is its own recipe with `options=(rust)` (the rest of Mesa isn't Rust and
     builds without it). Keep its `pkgver` equal to `mesa`'s. Meson
     cross-compiles its Rust through an extra cross file (`rust` with rule 46's flags, `bindgen`, `cbindgen`); bindgen and
@@ -315,36 +315,36 @@ Rebuilding the kernel takes about an hour on 2 cores.
     `-resource-dir` to find its own headers (`BINDGEN_EXTRA_CLANG_ARGS`). Mesa's Rust crates come through its meson wraps
     (pinned by hash) into `sources/mesa-packagecache`.
 
-53. **On melon, the build machine's triple is not melon's.** `gcc -dumpmachine` on melon prints `x86_64-melon-linux-musl`,
+53. **On Valence, the build machine's triple is not Valence's.** `gcc -dumpmachine` on Valence prints `x86_64-valence-linux-musl`,
     the cross toolchain's own target, so binutils and gcc would configure themselves as native compilers and autoconf
-    would see `--build` equal to `--host`. `env.sh` sets `BUILD_TRIPLE` (`x86_64-pc-linux-musl` on melon, gcc's own
-    answer elsewhere): `melon-build` passes it as `--build`, and `toolchain.sh` gives binutils and gcc
+    would see `--build` equal to `--host`. `env.sh` sets `BUILD_TRIPLE` (`x86_64-pc-linux-musl` on valence, gcc's own
+    answer elsewhere): `valence-build` passes it as `--build`, and `toolchain.sh` gives binutils and gcc
     `--build`/`--host` from `TOOLCHAIN_HOST_FLAGS` (empty on Ubuntu, so Ubuntu builds don't change). Programs built
-    for the Ubuntu host (`tools/`, `hosttools/`) don't run on melon (no glibc): rebuild them there. Host Rust is
-    upstream's musl-hosted build on melon (`host-rust.sh`); there the build machine's Rust triple equals
-    `$RUST_TARGET`, so build scripts' C parts use melon's cross gcc too, and they still run because the build machine
-    is melon. Recipes must not assume Ubuntu paths (`/usr/lib/llvm-*`): look for melon's (`/usr/lib`) as well.
-    melon's `tar` is BusyBox's, whose xz decoder stops at a 64 MiB dictionary (Rust's tarballs use 128 MiB: "tar: corrupted
-    data"): unpack `.xz` with `untar` (melon-build) or `xz -dc | tar -xf -`, never `tar xJf`. Host Rust programs that dlopen()
+    for the Ubuntu host (`tools/`, `hosttools/`) don't run on valence (no glibc): rebuild them there. Host Rust is
+    upstream's musl-hosted build on valence (`host-rust.sh`); there the build machine's Rust triple equals
+    `$RUST_TARGET`, so build scripts' C parts use valence's cross gcc too, and they still run because the build machine
+    is valence. Recipes must not assume Ubuntu paths (`/usr/lib/llvm-*`): look for valence's (`/usr/lib`) as well.
+    valence's `tar` is BusyBox's, whose xz decoder stops at a 64 MiB dictionary (Rust's tarballs use 128 MiB: "tar: corrupted
+    data"): unpack `.xz` with `untar` (valence-build) or `xz -dc | tar -xf -`, never `tar xJf`. Host Rust programs that dlopen()
     (bindgen loads libclang) must be built with `-C target-feature=-crt-static` there: a static musl program can't dlopen.
-    melon's `/usr/include` lacks `sys/cdefs.h` without `bsd-compat-headers` (rule 5), and its python3 has no pip.
+    valence's `/usr/include` lacks `sys/cdefs.h` without `bsd-compat-headers` (rule 5), and its python3 has no pip.
     `find`, `grep` and `realpath` are BusyBox's too: no `find -uid/-gid` or size suffixes beyond `k`, no `grep --exclude`,
-    no `realpath` options, no `ln -r`, no `diff --version` (libvpx's configure asks), and `sed` isn't GNU sed; melon's bison has no `yacc` command (`YACC="bison -y"`).
+    no `realpath` options, no `ln -r`, no `diff --version` (libvpx's configure asks), and `sed` isn't GNU sed; valence's bison has no `yacc` command (`YACC="bison -y"`).
     Scripts and recipes use what both have (or python3). The build machine's gcc is GCC 15 (C23 by default,
     rule 40: the cross toolchain's in-tree GMP gets `-std=gnu17`), and its cmake is CMake 4
-    (`CMAKE_POLICY_VERSION_MINIMUM=3.5` in melon-build for projects asking for less than 3.5). host-setup.sh links
+    (`CMAKE_POLICY_VERSION_MINIMUM=3.5` in valence-build for projects asking for less than 3.5). host-setup.sh links
     automake's `config.sub`/`config.guess` into `/usr/share/misc` and installs `libtool-dev` and `gettext-dev`
-    (libtool.m4, autopoint) for autoreconf. Python modules a build imports on the build machine are melon packages too
+    (libtool.m4, autopoint) for autoreconf. Python modules a build imports on the build machine are valence packages too
     (no pip): elogind's build imports Jinja2 and flatpak's pyparsing, so host-setup.sh asks for `python3-jinja2` and
     `python3-pyparsing` and, while the online repository doesn't have them, copies each module from its sdist in
     `sources/` (a new recipe's package is online only once the owner publishes it, so whatever the build machine itself
     needs must also work before that). The same goes for tools: `rpcgen`
-    (open-vm-tools' configure; melon's libtirpc has none) is built from `sources/` into `/usr/local/bin` until
+    (open-vm-tools' configure; valence's libtirpc has none) is built from `sources/` into `/usr/local/bin` until
     `rpcsvc-proto` is published.
-    melon's `-dev` packages don't pull in the `-dev` packages their `.pc` files require, so a native pkg-config lookup
-    on melon fails unless host-setup.sh asks for those too (`pcre2-dev` for glib-2.0, `xorgproto` and the libXau, Xdmcp,
+    valence's `-dev` packages don't pull in the `-dev` packages their `.pc` files require, so a native pkg-config lookup
+    on valence fails unless host-setup.sh asks for those too (`pcre2-dev` for glib-2.0, `xorgproto` and the libXau, Xdmcp,
     Xfixes and Xxf86vm `-dev` packages for x11 and gl): appstream's cross build looks the build machine's appstream up.
-    QEMU's configure makes a venv with pip (`mkvenv.py`), which melon's python3 can't (no ensurepip): on melon,
+    QEMU's configure makes a venv with pip (`mkvenv.py`), which valence's python3 can't (no ensurepip): on valence,
     recipes/qemu and qemu-guest-agent use the host Python (`hosttools/python` keeps ensurepip) and put setuptools
     and wheel (PyPI wheels in `sources/`) next to QEMU's own in `python/wheels`, where its offline "tooling" group
     looks for them.
@@ -362,16 +362,16 @@ Rebuilding the kernel takes about an hour on 2 cores.
     preset `ax_cv_check_ldflags___Wl___image_base_0x400000=no`.
 57. **Generated recipes are edited in their generator.** `gen-simple-recipes.py`, `gen-kde-recipes.py` and
     `gen-lxqt-recipes.py` rewrite their recipes at every `build-everything.sh` start, so an edit made only in
-    `recipes/<name>/MELONBUILD` is silently undone (qtdeclarative's "no PCH on x86" was). Change the generator, run it,
+    `recipes/<name>/VALENCEBUILD` is silently undone (qtdeclarative's "no PCH on x86" was). Change the generator, run it,
     and commit both. Per-arch options go inside the arguments as `$([ "$APK_ARCH" != x86 ] || echo ...)`. On x86,
     qt6-qtdeclarative builds without precompiled headers: with them its build tree passed 11 GB and filled the disk.
 58. **A failed package unpacks fresh on the next pass.** A CMake cache from a run that failed remembers what wasn't
     there yet (Qt's `HAVE_EGL=false` before Mesa existed) and keeps failing after the dependency is built:
     `build-everything.sh` deletes `work/pkg/<name>/.prepared` of each failed package between passes.
-59. **SDDM's greeter on labwc (melon-lxqt) is an xdg-shell window that labwc makes full screen.** With SDDM's
+59. **SDDM's greeter on labwc (valence-lxqt) is an xdg-shell window that labwc makes full screen.** With SDDM's
     default layer-shell integration under labwc the greeter came up as a small box on a black screen.
     `/etc/sddm.conf.d/15-lxqt.conf` sets `QT_WAYLAND_SHELL_INTEGRATION=xdg-shell` for the greeter and starts labwc with
-    `/usr/share/melon/sddm-labwc/rc.xml` (a window rule: no decorations, full screen). wlroots' Xwayland path must be
+    `/usr/share/valence/sddm-labwc/rc.xml` (a window rule: no decorations, full screen). wlroots' Xwayland path must be
     `/usr/bin/Xwayland` (recipes/wlroots), not the sysroot's, and labwc's own `labwc.desktop` session is removed so
     SDDM starts LXQt.
 
@@ -380,16 +380,16 @@ Rebuilding the kernel takes about an hour on 2 cores.
     an elevated stop of WslService and `vmmem`/`vmwp`, or a restart); Windows' `PATH` is switched off in `/etc/wsl.conf`
     (`appendWindowsPath=false`), because a space in it broke `host-rust.sh`; scripts and queues are run by absolute path from
     the Linux disk, never from `/mnt/c`; and on Windows 10 there is no KVM, so QEMU tests are slow software emulation. A signing
-    key kept on a USB stick is used in place through `MELON_SIGN_KEY` (`melon-build` and `mkiso.sh` read it), never copied.
+    key kept on a USB stick is used in place through `VALENCE_SIGN_KEY` (`valence-build` and `mkiso.sh` read it), never copied.
 
 To resume a failed long build without unpacking again (for example the kernel):
-`MELON_KEEP_SRC=1 scripts/melon-build linux-melon`. `build-everything.sh` does that by itself (`MELON_AUTO_RESUME=1`), but
+`VALENCE_KEEP_SRC=1 scripts/valence-build linux-valence`. `build-everything.sh` does that by itself (`VALENCE_AUTO_RESUME=1`), but
 only while the recipe and its patches are the ones the tree was unpacked with (`work/pkg/<name>/.prepared` holds their
 checksum): after a fix to the recipe, the package unpacks fresh so the new patches and `prepare()` run.
 
 The build container can be reclaimed while idle, which kills background builds. `scripts/resume.sh`
 restarts the host Qt build and the Qt/KF6/Plasma queue (`scripts/queue-4.sh`); finished host Qt modules
-and packages already in the repo (`MELON_SKIP_BUILT=1`) are skipped.
+and packages already in the repo (`VALENCE_SKIP_BUILT=1`) are skipped.
 
 After an unclean shutdown (WSL restart, power loss), files written in the last minutes can be empty or
 truncated. Before resuming: look for empty packages (`find repo -name '*.apk' -size 0`; the builder skips
@@ -397,7 +397,7 @@ nothing that is empty, but a truncated `.apk` still blocks reindexing), delete `
 of the package that was compiling so it unpacks fresh, and check `git fsck` (empty objects in `.git/objects`
 can be restored with `git fetch` once they are moved aside). A package that fails to install into the sysroot
 (a file conflict) stays in the sysroot's world file and breaks every later `apk add` there: remove it with the
-builder's apk command and `del <pkg>` (see `sysroot_add` in melon-build) before rebuilding. `apk verify` needs an absolute `--keys-dir`:
+builder's apk command and `del <pkg>` (see `sysroot_add` in valence-build) before rebuilding. `apk verify` needs an absolute `--keys-dir`:
 a relative one is resolved against `/` and reports every package as UNTRUSTED.
 
 ## Testing (required before you commit a change that affects boot or install)
@@ -405,25 +405,25 @@ a relative one is resolved against `/` and reports every package as UNTRUSTED.
 ```sh
 scripts/mkiso.sh
 qemu-img create -f raw /tmp/disk.img 12G
-scripts/qemu-test.py live out/melon-*-x86_64.iso /tmp/disk.img            # BIOS: boot ISO + unattended install
+scripts/qemu-test.py live out/valence-*-x86_64.iso /tmp/disk.img            # BIOS: boot ISO + unattended install
 scripts/qemu-test.py disk /tmp/disk.img                                   # BIOS: boot the installed system
 scripts/qemu-test.py disk /tmp/disk.img --uefi                            # UEFI: same disk
-scripts/qemu-test.py live out/melon-*-x86_64.iso /tmp/disk.img --luks     # install with an encrypted root
+scripts/qemu-test.py live out/valence-*-x86_64.iso /tmp/disk.img --luks     # install with an encrypted root
 scripts/qemu-test.py disk /tmp/disk.img --luks                            # boot it, typing the passphrase
-scripts/qemu-test.py dualboot out/melon-*-x86_64.iso /tmp/dual.img        # install next to a fake Windows (UEFI), Windows untouched
-MELON_EDITION=desktop scripts/mkiso.sh                                    # the Plasma live ISO (desktop edition)
-scripts/qemu-test.py desktop out/melon-desktop-*-x86_64.iso              # services ready, Plasma running, a USB stick mounts through
+scripts/qemu-test.py dualboot out/valence-*-x86_64.iso /tmp/dual.img        # install next to a fake Windows (UEFI), Windows untouched
+VALENCE_EDITION=desktop scripts/mkiso.sh                                    # the Plasma live ISO (desktop edition)
+scripts/qemu-test.py desktop out/valence-desktop-*-x86_64.iso              # services ready, Plasma running, a USB stick mounts through
                                                                           # UDisks2, screen-recording encoders work, a text file prints
                                                                           # to a virtual IPP Everywhere printer, nmcli online, and
                                                                           # NetworkManager joins WPA2 Wi-Fi on mac80211_hwsim radios;
                                                                           # LOOK at logs/qemu-desktop.ppm
 qemu-img create -f raw /tmp/desk.img 16G
-scripts/qemu-test.py desktop-install out/melon-desktop-*-x86_64.iso /tmp/desk.img   # install, SDDM greeter stays up,
+scripts/qemu-test.py desktop-install out/valence-desktop-*-x86_64.iso /tmp/desk.img   # install, SDDM greeter stays up,
                                                                           # log in through it, Plasma runs; LOOK at both screenshots
 # --offline (any mode): the VM keeps its network card but reaches nothing outside; the installers must still work
 ```
 
-The tests run the console installer by name (`melon-install`, with the `MELON_*` variables from "Installers").
+The tests run the console installer by name (`valence-install`, with the `VALENCE_*` variables from "Installers").
 
 Logs go to `logs/qemu-*.log`. The tests use KVM when it really works (`qemu-test.py` asks the kernel with the
 `KVM_GET_API_VERSION` ioctl: WSL2 on Windows 11 does, WSL2 on **Windows 10, or on a CPU Windows can't nest on, creates a
@@ -435,18 +435,18 @@ Plasma not start in 15 minutes): run those on a machine with KVM. Use generous t
 the serial port, so tests don't need a screen. The VM has an Intel HD Audio card (the `live` and `disk` tests list
 the sound devices the kernel found); QEMU records whatever it plays to `logs/audio-capture.wav`.
 
-## Running melon in a VM
+## Running Valence in a VM
 
 - **Kernel:** the virtual disk controllers are built in (virtio, VMware PVSCSI and LSI, Hyper-V storvsc,
   Xen blkfront, AHCI), because installed systems boot without an initramfs. Network, video, balloon,
-  vsock and VirtualBox drivers are modules (`recipes/linux-melon/config-melon`, "virtual machine guest").
-- **Guest tools:** `melon-vm-guest` pulls in `qemu-guest-agent`, `open-vm-tools` and `hvtools`. Their runit
+  vsock and VirtualBox drivers are modules (`recipes/linux-valence/config-valence`, "virtual machine guest").
+- **Guest tools:** `valence-vm-guest` pulls in `qemu-guest-agent`, `open-vm-tools` and `hvtools`. Their runit
   services are always enabled but switch themselves off (`sv down "$PWD"`) outside their hypervisor.
   mdev doesn't create `/dev/virtio-ports/*` links, so `qemu-ga` finds its port through sysfs.
-- **Installers** add `melon-vm-guest` when `melon-detect-virt` says they run in a VM. The console ISO carries
+- **Installers** add `valence-vm-guest` when `valence-detect-virt` says they run in a VM. The console ISO carries
   it in its package repo; the desktop image includes it.
-- **vmwgfx is blacklisted except on real VMware** (`/etc/modprobe.d/melon-vm.conf`, loaded from `/etc/runit/1`
-  when `melon-detect-virt` says `vmware`). VirtualBox's default VMSVGA adapter and QEMU's vmware-svga look
+- **vmwgfx is blacklisted except on real VMware** (`/etc/modprobe.d/valence-vm.conf`, loaded from `/etc/runit/1`
+  when `valence-detect-virt` says `vmware`). VirtualBox's default VMSVGA adapter and QEMU's vmware-svga look
   like VMware's; vmwgfx switched off the boot console there and then failed, so the screen froze at
   "Starting devices" (reported from VirtualBox). GRUB passes a framebuffer (`gfxpayload`) so simpledrm
   keeps the console alive without any GPU driver. Check the screen, not just the serial log:
@@ -459,76 +459,76 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
 ## Installers: do not break these product decisions
 
 - **Graphical installer (desktop ISO): Calamares.** Its pages are welcome, partitioning, users and summary, then the
-  install and the finished page (`/etc/calamares/settings.conf` in `calamares-melon`). melon is US English and UTC,
+  install and the finished page (`/etc/calamares/settings.conf` in `calamares-valence`). Valence is US English and UTC,
   so there are no locale or keyboard pages (Plasma's settings change both after the install). The live desktop's
-  "Install melon" icon runs `melon-install-gui`, which starts Calamares as root through doas.
-- **melon's look (melon-desktop):** Plasma style `melon`, colours MelonDark, Konsole profile Melon, SDDM theme `melon`
-  (its own QML, `usr/share/sddm/themes/melon`), GRUB theme `usr/share/melon/grub/themes/melon` (the desktop ISO uses
+  "Install Valence" icon runs `valence-install-gui`, which starts Calamares as root through doas.
+- **Valence's look (valence-desktop):** Plasma style `valence`, colours ValenceDark, Konsole profile Valence, SDDM theme `valence`
+  (its own QML, `usr/share/sddm/themes/valence`), GRUB theme `usr/share/valence/grub/themes/valence` (the desktop ISO uses
   it too). The scripts that drew these images (`art/`) are no longer in the tree; git history has them.
-- **Calamares runs melon's own jobs** (`cal-prepare`, `cal-finish` in `calamares-melon`): Calamares'
-  users job calls shadow's `useradd`/`usermod`/`groupadd`, which melon doesn't have, so `cal-prepare`
+- **Calamares runs Valence's own jobs** (`cal-prepare`, `cal-finish` in `calamares-valence`): Calamares'
+  users job calls shadow's `useradd`/`usermod`/`groupadd`, which Valence doesn't have, so `cal-prepare`
   puts BusyBox-backed shims into the target's `/usr/local/bin` and `cal-finish` removes them.
-- **Live-only packages** (`/usr/share/melon/profiles/live-only`, e.g. `calamares-melon`) are in the
+- **Live-only packages** (`/usr/share/valence/profiles/live-only`, e.g. `calamares-valence`) are in the
   desktop ISO's system image and both installers remove them from the new system. Both installers make
   the new system's `/etc/apk/world` match the chosen profile.
-- **Console installer: `melon-install`** (`/usr/bin/melon-install`, in melon-base), on both ISOs and named in the live
+- **Console installer: `valence-install`** (`/usr/bin/valence-install`, in valence-base), on both ISOs and named in the live
   system's motd. It needs root (started by another user, it runs itself again through doas) and the live ISO's system image.
   It asks for the disk, base or desktop (the desktop profile installs exactly what the desktop ISO installs), the host
   name, the root and user passwords, a Wi-Fi network (when there is a Wi-Fi card), the opt-in Alpine repo and LUKS
-  encryption, then partitions, copies `rootfs.sqfs` and installs GRUB. `melon-install --help` lists the unattended
+  encryption, then partitions, copies `rootfs.sqfs` and installs GRUB. `valence-install --help` lists the unattended
   variables below.
 - **Dual boot.** On UEFI, when the chosen disk already has an EFI system partition and at least 20 GiB unallocated
   (Windows' Disk Management "Shrink Volume" makes that), the console installer offers `alongside` (the default
-  then; `MELON_MODE=alongside|erase`): a 1 GiB FAT32 `/boot` (extended boot loader type) and `/` go into the free
-  space, the existing EFI partition becomes `/boot/efi`, GRUB goes into `EFI/melon` with a firmware boot entry
+  then; `VALENCE_MODE=alongside|erase`): a 1 GiB FAT32 `/boot` (extended boot loader type) and `/` go into the free
+  space, the existing EFI partition becomes `/boot/efi`, GRUB goes into `EFI/valence` with a firmware boot entry
   (efibootmgr), and nothing of the other system is touched: no BIOS boot code, and `EFI/BOOT` stays theirs.
   Calamares offers "Install alongside" (it shrinks NTFS with ntfs-3g's ntfsresize), "Replace a partition" and manual
   partitioning; nothing is preselected, and `cal-finish` only writes `EFI/BOOT` on an EFI partition that is
-  melon's alone. `melon-update-grub` adds a Windows entry for Windows Boot Manager on any EFI partition (UEFI) or
+  Valence's alone. `valence-update-grub` adds a Windows entry for Windows Boot Manager on any EFI partition (UEFI) or
   `bootmgr` on an NTFS partition (BIOS). Test: `qemu-test.py dualboot` (a fake Windows disk, persistent UEFI boot
   menu, checksums of everything Windows owns before and after).
-- Unattended install variables: `MELON_DISK MELON_HOSTNAME MELON_ROOTPW MELON_USER MELON_USERPW
-  MELON_PROFILE MELON_YES=1 MELON_SERIAL=1 MELON_WIFI_SSID MELON_WIFI_PSK MELON_ALPINE=y
-  MELON_ENCRYPT=y MELON_LUKSPW MELON_MODE=alongside`. With `MELON_YES=1`, questions that have a default take it.
-- **Profiles** live in `/usr/share/melon/profiles/` on the live system: `<name>` is the package list,
+- Unattended install variables: `VALENCE_DISK VALENCE_HOSTNAME VALENCE_ROOTPW VALENCE_USER VALENCE_USERPW
+  VALENCE_PROFILE VALENCE_YES=1 VALENCE_SERIAL=1 VALENCE_WIFI_SSID VALENCE_WIFI_PSK VALENCE_ALPINE=y
+  VALENCE_ENCRYPT=y VALENCE_LUKSPW VALENCE_MODE=alongside`. With `VALENCE_YES=1`, questions that have a default take it.
+- **Profiles** live in `/usr/share/valence/profiles/` on the live system: `<name>` is the package list,
   `<name>.services` the runit services (`name` enables one, `-name` drops a base service). `mkiso.sh`
   writes them. The desktop profile swaps `mdevd`/`dhcp` for `udevd` and NetworkManager, and the
   installer gives NetworkManager the Wi-Fi network instead of wpa_supplicant.
 - **Other distros' repos are opt-in only.** The console installer offers Alpine as the tagged repo `@alpine`
-  (`MELON_ALPINE=y` runs `melon-repo enable alpine` in the new system); Calamares doesn't ask, and `melon-repo enable
+  (`VALENCE_ALPINE=y` runs `valence-repo enable alpine` in the new system); Calamares doesn't ask, and `valence-repo enable
   alpine` works on any installed system. apk only uses it for packages asked for as `name@alpine`. Void isn't
   offered (xbps, not apk). Never make a foreign repo untagged or on by default.
 
 ## Boot time
 
-Where the time goes after the firmware: GRUB (the live ISO's menu waits 5 s; an installed melon-only system's is hidden and
-skipped after 1 s, `GRUB_TIMEOUT` and `GRUB_TIMEOUT_STYLE` in `/etc/default/grub` change that; the `grub` package's own `/etc/default/grub` must not set `GRUB_TIMEOUT`, or it wins over `melon-update-grub`'s default: it did, until `grub` pkgrel 2), the kernel, stage 1 (`/etc/runit/1`:
+Where the time goes after the firmware: GRUB (the live ISO's menu waits 5 s; an installed valence-only system's is hidden and
+skipped after 1 s, `GRUB_TIMEOUT` and `GRUB_TIMEOUT_STYLE` in `/etc/default/grub` change that; the `grub` package's own `/etc/default/grub` must not set `GRUB_TIMEOUT`, or it wins over `valence-update-grub`'s default: it did, until `grub` pkgrel 2), the kernel, stage 1 (`/etc/runit/1`:
 mounts, udev coldplug, filesystems), then stage 2 (runsvdir starts every service at once; services that need another
 wait for it with `sv check`, which polls for up to 7 s, every 20 ms since `runit` pkgrel 1; it was every 0.42 s). Stage 1 writes a
-timeline to `/run/melon-boot-times` and **`melon-boottime`** prints it with the start times of the main daemons (read from
+timeline to `/run/valence-boot-times` and **`valence-boottime`** prints it with the start times of the main daemons (read from
 their processes, so to 10 ms): run it on a real machine before and after changing anything that touches boot, and quote its
 numbers in the PR.
 
-**Stage 1 doesn't wait for udev to finish** (`melon-base` pkgrel 34). It starts udevd, triggers the coldplug, and waits only
+**Stage 1 doesn't wait for udev to finish** (`valence-base` pkgrel 34). It starts udevd, triggers the coldplug, and waits only
 for the devices named in `/etc/fstab` (their `/dev/disk/by-*` links, at most 20 s in all; `noauto` and `nofail` entries don't
 count) before it mounts. The rest of the coldplug (the GPU's driver and firmware, Wi-Fi, sound) goes on in the background while
-stage 2 starts the services, and `melon-boottime` shows when it ended as `udev-settled`. The `udevd` service adopts the udevd
+stage 2 starts the services, and `valence-boottime` shows when it ended as `udev-settled`. The `udevd` service adopts the udevd
 stage 1 started instead of replacing it (rule 44). Services that need a device wait for it themselves: SDDM waits until elogind
-reports seat0 graphical, NetworkManager and BlueZ handle devices that appear later. The kernel option `melon.udev=sync` (add it
+reports seat0 graphical, NetworkManager and BlueZ handle devices that appear later. The kernel option `valence.udev=sync` (add it
 in GRUB's editor, or to `GRUB_CMDLINE_LINUX_DEFAULT`) brings back the old behaviour (wait for everything, stop udevd, let
 the service start a new one) if a machine misbehaves: an issue report with and without it is the first thing to ask for.
 
 **The live system and the installers read `rootfs.sqfs` through squashfs.** The kernel's defaults were one decompressor and one
 shared cache (`SQUASHFS_DECOMP_SINGLE`, `SQUASHFS_FILE_CACHE`), so every program the live desktop starts waited for the
-others' reads to decompress. `config-melon` now asks for `SQUASHFS_COMPILE_DECOMP_MULTI_PERCPU` and `SQUASHFS_FILE_DIRECT`
-(one decompressor per CPU, straight into the page cache; `linux-melon` pkgrel 5, and `nvidia-open` pkgrel 1 with it, rule 51).
+others' reads to decompress. `config-valence` now asks for `SQUASHFS_COMPILE_DECOMP_MULTI_PERCPU` and `SQUASHFS_FILE_DIRECT`
+(one decompressor per CPU, straight into the page cache; `linux-valence` pkgrel 5, and `nvidia-open` pkgrel 1 with it, rule 51).
 Installed systems don't use squashfs, so only the ISO sessions and installs gain.
 
 Measured on 7 and 8 October 2026 with the 29 September desktop image in QEMU **without KVM** (software emulation on 4 vCPUs, so
 every CPU-bound step is several times slower than on real hardware; read the proportions, not the seconds). Seconds counted
 from the start of stage 1, one boot each except the old order, which ran twice:
 
-| | old order | new order (`melon.udev=sync` gives the old one back) |
+| | old order | new order (`valence.udev=sync` gives the old one back) |
 |---|---|---|
 | udev coldplug + settle in stage 1 | 3.9 to 4.8 s | 0 (finishes 3.8 s after stage 1, in parallel with the services) |
 | stage 1 lasted | 6.5 to 7.3 s | 4.2 s |
@@ -540,7 +540,7 @@ desktop's `plasma_session` from 30.3 s to 27.1 s after stage 1 in one run each, 
 of this setup; the gain is real on a machine that reads from the ISO on several cores, but this container can't size it.
 The 20 ms `sv` poll can't be seen in these numbers either (the services start within 0.4 s of each other). Not measured yet:
 real hardware (a GPU's firmware load blocks `udevadm settle`, so the gain should be larger there) and the installed system, where
-`melon-boottime` is the tool. Ideas, not done: shutdown spends a fixed 1 s between TERM and KILL (`/etc/runit/3`); a smaller
+`valence-boottime` is the tool. Ideas, not done: shutdown spends a fixed 1 s between TERM and KILL (`/etc/runit/3`); a smaller
 kernel config and built-in drivers for the boot disk.
 
 ## Smaller images, second round
@@ -562,17 +562,17 @@ shows the real sizes.
 
 ## Package repository (online)
 
-`scripts/publish-repo.sh` puts `repo/<arch>/` on the `packages` branch of github.com/melon-77/melon-os (one
+`scripts/publish-repo.sh` puts `repo/<arch>/` on the `packages` branch of github.com/melon-77/valence (one
 commit, force-pushed each time), served as
-`https://raw.githubusercontent.com/melon-77/melon-os/packages/<arch>/Packages.adb`. The base URL is in
-`/usr/share/melon/repo-url` (melon-base); the installers write it into `/etc/apk/repositories` before the
-offline copy from the ISO, and the live ISO uses it too. Everything is signed with the melon key, so the
+`https://raw.githubusercontent.com/melon-77/valence/packages/<arch>/Packages.adb`. The base URL is in
+`/usr/share/valence/repo-url` (valence-base); the installers write it into `/etc/apk/repositories` before the
+offline copy from the ISO, and the live ISO uses it too. Everything is signed with the Valence key, so the
 host doesn't need to be trusted. GitHub rejects files over 100 MB: split big packages (Intel Bluetooth
 firmware is its own package for that reason). Publish after building packages people should get.
 
 ## Releases
 
-Releases are named **melon <version> “<melon variety>”**, the varieties in alphabetical order: 0.1 “Antalya”,
+Releases are named **Valence <version> “<Valence variety>”**, the varieties in alphabetical order: 0.1 “Antalya”,
 0.2 “Bailan”, then 0.3 “Cantaloupe”, 0.4 “Dudaim”, 0.5 “Esfahan”, 0.6 “Fukui”, 0.7 “Galia”, 0.8 “Honeydew”, … (the
 owner's choice, 29 September 2026). Tags are `v<version>` from 0.3 on (0.1 and 0.2 kept their date tags). A release
 is marked Latest, carries every ISO and `SHA256SUMS`,
@@ -580,7 +580,7 @@ has notes written for users (what's new, which file to download, `doas apk upgra
 release it replaces is retitled "(superseded)" with a link to the new one.
 
 The 32-bit edition has its own **pre-release**, not marked Latest, so the 64-bit release stays the Latest one: tag
-`i686-<date>` (`i686-20261007`), title "melon 32-bit (i686) test build, <date>", both i686 ISOs and `SHA256SUMS`.
+`i686-<date>` (`i686-20261007`), title "Valence 32-bit (i686) test build, <date>", both i686 ISOs and `SHA256SUMS`.
 
 **New ISOs for meaningful changes (the owner's rule, 7 October 2026).** When a change lands that alters what is on an ISO or how it
 installs or boots (kernel, drivers and firmware, installers, the desktop, base packages, boot, hardware support), new ISOs are built,
@@ -600,17 +600,17 @@ A change that touches only recipes in the online repository or docs doesn't need
 
 Installed systems trust two keys, both shipped in `/etc/apk/keys` by `apk-tools` (and in `keys/trusted/`):
 
-- `melon-signing.rsa`: the everyday key. Everything is signed with it. Keep it on **one** build machine.
-- `melon-backup.rsa`: the offline backup key. Its private half lives off every build machine (a USB stick
+- `valence-signing.rsa`: the everyday key. Everything is signed with it. Keep it on **one** build machine.
+- `valence-backup.rsa`: the offline backup key. Its private half lives off every build machine (a USB stick
   in a drawer) and is used only for a rotation. Never leave it in `keys/`.
 
-If `melon-signing.rsa` leaks or is lost:
+If `valence-signing.rsa` leaks or is lost:
 
-1. Make a new everyday key: `openssl genrsa -out keys/melon-signing.rsa 4096`, then
-   `openssl rsa -in keys/melon-signing.rsa -pubout -out keys/melon-signing.rsa.pub`, and copy the `.pub`
+1. Make a new everyday key: `openssl genrsa -out keys/valence-signing.rsa 4096`, then
+   `openssl rsa -in keys/valence-signing.rsa -pubout -out keys/valence-signing.rsa.pub`, and copy the `.pub`
    into `keys/trusted/` (replacing the old one).
 2. Bump `pkgrel` of `apk-tools` (it now ships the new public key and the backup key, not the old key) and
-   build it signed with the backup key: `MELON_SIGN_KEY=/path/to/melon-backup.rsa scripts/melon-build apk-tools`.
+   build it signed with the backup key: `VALENCE_SIGN_KEY=/path/to/valence-backup.rsa scripts/valence-build apk-tools`.
    Installed systems accept it because they already trust the backup key.
 3. Publish that transition repo (its index is signed with the backup key too) and let systems upgrade.
 4. Rebuild and re-sign everything with the new key (`build-everything.sh` with an empty `repo/`), publish.
@@ -643,57 +643,57 @@ that is the only place Ubuntu is still needed.
   and the desktop profile for both installers (`qemu-test.py desktop` and `desktop-install`). Open hardware work
   is tracked in GitHub issues: Intel SOF audio, newer linux-firmware, Broadcom Wi-Fi.
 - **32-bit (i686) edition with LXQt: built, signed and published, waiting for real hardware** (resumed by the owner,
-  7 October 2026, for an MSI Wind U100: Atom N270, 2 GB). `MELON_ARCH=x86 scripts/build-everything.sh` builds the
+  7 October 2026, for an MSI Wind U100: Atom N270, 2 GB). `VALENCE_ARCH=x86 scripts/build-everything.sh` builds the
   toolchain, the base system, Qt, LXQt and labwc, then both ISOs (BUILDING.md). Both pass their tests on QEMU's Atom
   N270 CPU model: the console ISO (`qemu-test.py live|disk --i686`) and the LXQt desktop ISO
   (`desktop-install --i686`, 2 GB of RAM: install through Calamares, SDDM's greeter on labwc, the LXQt session,
-  printing). Not yet on 32-bit: the QEMU guest agent. Signed with melon's key and published (7 October 2026): `repo/x86` is on the `packages` branch
+  printing). Not yet on 32-bit: the QEMU guest agent. Signed with Valence's key and published (7 October 2026): `repo/x86` is on the `packages` branch
   next to `x86_64` (publish-repo.sh replaces the whole branch, so a machine that built only one architecture must start
   from the branch's current contents); both ISOs rebuilt from scratch on a new build container and retested (the desktop
   test waits 90 s before typing when there is no KVM: the greeter ignores keys for a while on an emulated CPU). When
   Ubuntu's source tool can't find an old version, its `orig` tarballs are still in `archive.ubuntu.com/ubuntu/pool/`
-  (same sha256 as the manifest). Next: a test on the owner's U100 (`sudo melon-hwreport` for Wi-Fi and graphics).
-- **Stage 3 (gaming): in progress.** Done: Flatpak, the Flathub remote (`melon-flathub`), Steam, Firefox, VLC and
+  (same sha256 as the manifest). Next: a test on the owner's U100 (`sudo valence-hwreport` for Wi-Fi and graphics).
+- **Stage 3 (gaming): in progress.** Done: Flatpak, the Flathub remote (`valence-flathub`), Steam, Firefox, VLC and
   Prism Launcher offered from Flathub on first login, GameMode. Still to do: gamepad and controller udev rules,
   MangoHud (`docs/stage2-plan.md`).
-- **Init: runit stays melon's init (the owner's decision).** dinit may one day become an *optional variant* the owner
+- **Init: runit stays Valence's init (the owner's decision).** dinit may one day become an *optional variant* the owner
   builds, never a switch forced on the whole OS. Don't start a dinit port. Improve runit instead:
   readiness through `./check` scripts, and a clear start order in run scripts (a small shared helper is being
   considered). A variant would need services for both inits, so keep run scripts simple and self-contained; what a
   dinit variant would have to cover is listed in `docs/dinit-variant.md`.
 - **Smaller desktop ISO: done.** The ISO's offline repo no longer carries a second copy of the desktop (it did: about
-  460 MB on the ISO and on every install, in `/var/lib/melon/repo`). The installers only need that repo for extras; a
+  460 MB on the ISO and on every install, in `/var/lib/valence/repo`). The installers only need that repo for extras; a
   desktop app someone removes comes back from the online repo. Tested with `qemu-test.py ... --offline`.
-- **Rust:** recipes can be written in Rust (rule 46; ripgrep is the first), and melon has its own `rust` and `cargo`
+- **Rust:** recipes can be written in Rust (rule 46; ripgrep is the first), and Valence has its own `rust` and `cargo`
   packages (`recipes/rust`, rustc 1.98.1 built from source, in the package repository only, not on the ISOs). Built
   and tested on the build machine (29 September 2026): cargo builds and runs a program with a crates.io dependency on
-  melon. `codegen-tests = false` in its `bootstrap.toml`, because melon's llvm ships no FileCheck. It builds cross-native with build = host = target = musl
-  (`x86_64-unknown-linux-musl`), from upstream's musl-hosted stage 0 (manifest entries), against melon's LLVM 21
+  Valence. `codegen-tests = false` in its `bootstrap.toml`, because Valence's llvm ships no FileCheck. It builds cross-native with build = host = target = musl
+  (`x86_64-unknown-linux-musl`), from upstream's musl-hosted stage 0 (manifest entries), against Valence's LLVM 21
   (shared) and its native gcc; `musl-dynamic-by-default.patch` sets musl's `crt_static_default` to false as Alpine
-  and Void do (upstream's own FIXME, compiler-team#422), so `cargo build` on melon links dynamically like melon's
+  and Void do (upstream's own FIXME, compiler-team#422), so `cargo build` on Valence links dynamically like Valence's
   own programs. The recipe says `options=(rust)` (rule 46). Watch
   for: RAM (rustc wants 2 to 3 GB per job), the size of `librustc_driver` against GitHub's 100 MB file limit
   (rule in "Package repository"), and `LEAK:` lines.
-- **Self-hosting (building melon on melon): in progress.** Step 1, the build tools as recipes, is done. The first batch (perl,
-  m4, bison, flex, gawk, gperf, bc, texinfo, autoconf, automake, autoconf-archive, file) is done and tested on melon
+- **Self-hosting (building Valence on Valence): in progress.** Step 1, the build tools as recipes, is done. The first batch (perl,
+  m4, bison, flex, gawk, gperf, bc, texinfo, autoconf, automake, autoconf-archive, file) is done and tested on Valence
   (an autotools project with a bison grammar, a flex scanner, gperf and a Texinfo manual builds and runs; a Perl XS
   module builds and passes its tests). The second batch (cmake, meson, ninja, git, nasm, tcl, rsync, lz4) is done too:
   cmake and meson projects build with ninja, git clones over https, nasm output links and runs. The third batch
   (xorriso, mtools, scdoc, itstool, dtc, pahole, the Public Suffix List, and Python's mako, PyYAML, packaging, pexpect
-  and libxml2 bindings) too: each was run on melon (an ISO and a FAT image made, itstool, scdoc, dtc and pahole output,
+  and libxml2 bindings) too: each was run on Valence (an ISO and a FAT image made, itstool, scdoc, dtc and pahole output,
   pexpect driving a shell). **Step 2 is done too:** clang 21 with libclc and the SPIR-V translator (Mesa's
-  `mesa_clc` and `vtn_bindgen2` build on melon from Mesa's source and turn OpenCL C into valid SPIR-V), QEMU 11.1 with
-  libslirp and OVMF (melon's own `qemu-test.py live`, `disk` and `disk --uefi` pass when run inside melon with melon's
-  QEMU, Python and pexpect), Go 1.27 (cgo on by default with melon's gcc) and gh. Claude Code installs on melon with
+  `mesa_clc` and `vtn_bindgen2` build on Valence from Mesa's source and turn OpenCL C into valid SPIR-V), QEMU 11.1 with
+  libslirp and OVMF (Valence's own `qemu-test.py live`, `disk` and `disk --uefi` pass when run inside Valence with Valence's
+  QEMU, Python and pexpect), Go 1.27 (cgo on by default with Valence's gcc) and gh. Claude Code installs on Valence with
   Anthropic's own installer, which picks its musl build (README, "Developer tools"); it isn't packaged, as it isn't open
-  source. Step 3: build melon on melon (`build-everything.sh` inside a melon system, the recipes' remaining build-machine
-  tools such as Mesa's `hosttools/bin` and the host Qt and Rust replaced by melon's own), run the test suite there, and
+  source. Step 3: build Valence on Valence (`build-everything.sh` inside a Valence system, the recipes' remaining build-machine
+  tools such as Mesa's `hosttools/bin` and the host Qt and Rust replaced by Valence's own), run the test suite there, and
   compare the packages with the WSL-built ones.
 - **NVIDIA (the owner: both drivers, 29 September 2026): built, waiting for a test on real hardware** by a contributor
-  with an NVIDIA card (GTX 16/RTX 20 or newer). Both ways are online installs chosen in `melon-first-boot`. Later: a
-  `linux-melon-dev` package (the kernel's build files, `Module.symvers`) would spare nvidia-open its own kernel build and
-  let people build other out-of-tree modules on melon.
-- **Later:** a native Firefox build (needs clang and Node for melon as well as Rust; Firefox comes from Flathub until then).
+  with an NVIDIA card (GTX 16/RTX 20 or newer). Both ways are online installs chosen in `valence-first-boot`. Later: a
+  `linux-valence-dev` package (the kernel's build files, `Module.symvers`) would spare nvidia-open its own kernel build and
+  let people build other out-of-tree modules on Valence.
+- **Later:** a native Firefox build (needs clang and Node for Valence as well as Rust; Firefox comes from Flathub until then).
 
 ## Contributing: workflow and the owner's rules
 
@@ -706,9 +706,9 @@ that is the only place Ubuntu is still needed.
   one, check that no open PR, open issue or running thread still uses it, and write its name and last commit down so it can be restored.
   A squash merge leaves the branch's own commits looking unmerged, so compare file contents with `testing`, not commit counts.
   Keep `main`, `testing`, `gh-pages` and `packages`. (11 merged branches were cleaned up on 8 October 2026.)
-- **The build machine reviews PRs** about every 20 minutes. Its comments start with "Automated check from the melon
+- **The build machine reviews PRs** about every 20 minutes. Its comments start with "Automated check from the Valence
   build machine:" or "Automated reply ...". It reads the diff, builds every changed recipe, installs and runs the
-  packages on a scratch melon root, runs the QEMU install tests when ISOs or installers change, and then requests
+  packages on a scratch Valence root, runs the QEMU install tests when ISOs or installers change, and then requests
   changes with the exact errors, asks the owner about product decisions, or merges into `testing`. It never pushes
   to a contributor's branch. The owner answers on PRs or on the pinned issue #17 ("Owner <-> build machine").
 - **What goes on an ISO (the owner's size rule):** small packages, below about 45 MB, may go on the ISOs; anything

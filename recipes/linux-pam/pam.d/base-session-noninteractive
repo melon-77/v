@@ -1,4 +1,4 @@
-# basic PAM configuration for melon.
+# basic PAM configuration for Valence.
 
 session required pam_env.so
 session required pam_limits.so

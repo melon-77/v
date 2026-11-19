@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot-test melon in QEMU over the serial console.
+"""Boot-test Valence in QEMU over the serial console.
 
   qemu-test.py live  <iso> <disk.img> [--uefi]   boot the ISO, run the quick installer onto disk.img
   qemu-test.py disk  <disk.img> [--uefi]         boot the installed disk and check the system
@@ -9,7 +9,7 @@
   qemu-test.py desktop-install <desktop-iso> <disk.img>   install the desktop profile, boot the installed disk
                                                  with graphics, log in through SDDM: greeter stays up, Plasma starts
   qemu-test.py dualboot <iso> <disk.img>         a fake Windows disk (EFI partition, MSR, NTFS C:, free space): install
-                                                 alongside on UEFI, boot melon from the firmware's boot menu, Windows in
+                                                 alongside on UEFI, boot Valence from the firmware's boot menu, Windows in
                                                  GRUB, and nothing of Windows' changed
   --luks   install with an encrypted root (and type the passphrase when the installed disk boots)
   --vmware VMware-style virtual hardware: PVSCSI disk, VMXNET3 network, VMware SVGA
@@ -39,9 +39,9 @@ cmd = ['qemu-system-i386' if i686 else 'qemu-system-x86_64', '-m', '1024' if i68
        '-device', 'intel-hda', '-device', 'hda-duplex,audiodev=snd0',
        '-netdev', 'user,id=n0' + (',restrict=on' if offline else ''), '-device', ('vmxnet3' if vmware else 'virtio-net-pci') + ',netdev=n0',
        # QEMU guest agent channel (the host side is a socket the test talks to)
-       '-device', 'virtio-serial', '-chardev', 'socket,path=/tmp/melon-qga.sock,server=on,wait=off,id=qga0',
+       '-device', 'virtio-serial', '-chardev', 'socket,path=/tmp/valence-qga.sock,server=on,wait=off,id=qga0',
        '-device', 'virtserialport,chardev=qga0,name=org.qemu.guest_agent.0',
-       '-monitor', 'unix:/tmp/melon-qmon.sock,server,nowait']
+       '-monitor', 'unix:/tmp/valence-qmon.sock,server,nowait']
 def kvm_works():
     # /dev/kvm can exist and still be unusable (WSL2 on Windows 10 or on an AMD CPU without nesting: QEMU says
     # "failed to initialize kvm: No such device"), so ask the kernel: KVM_GET_API_VERSION must answer 12
@@ -71,12 +71,12 @@ def disk_args(img):
     return ['-drive', f'file={img},if=virtio,format=raw']
 if mode == 'desktop':
     iso, = args
-    # a USB stick like a real one: MBR partition table, one FAT32 partition labelled MELONUSB with a file on it
+    # a USB stick like a real one: MBR partition table, one FAT32 partition labelled VALENCEUSB with a file on it
     import subprocess
-    usb = '/tmp/melon-usb.img'
+    usb = '/tmp/valence-usb.img'
     open(usb, 'wb').truncate(64 << 20)
     subprocess.run(['sfdisk', '-q', usb], input=b'label: dos\nstart=2048, type=c\n', check=True)
-    subprocess.run(['mkfs.vfat', '-F', '32', '-n', 'MELONUSB', '--offset', '2048', usb, str((64 << 20) // 1024 - 1024)],
+    subprocess.run(['mkfs.vfat', '-F', '32', '-n', 'VALENCEUSB', '--offset', '2048', usb, str((64 << 20) // 1024 - 1024)],
                    check=True, stdout=subprocess.DEVNULL)
     subprocess.run(['mcopy', '-i', f'{usb}@@1M', '-', '::hello.txt'], input=b'hello from the stick\n', check=True)
     # a real graphics card for KWin; the serial port stays the test's console
@@ -100,32 +100,32 @@ elif mode == 'dualboot':
     loop = run('losetup', '-P', '-f', '--show', disk).strip()
     try:
         run('mkfs.vfat', '-F', '32', '-n', 'SYSTEM', loop + 'p1'); run('mkntfs', '-Q', '-q', '-L', 'Windows', loop + 'p3')
-        os.makedirs('/tmp/melon-esp', exist_ok=True); run('mount', loop + 'p1', '/tmp/melon-esp')
+        os.makedirs('/tmp/valence-esp', exist_ok=True); run('mount', loop + 'p1', '/tmp/valence-esp')
         for path, blob in (('EFI/Microsoft/Boot/bootmgfw.efi', b'fake windows boot manager\n' * 999),
                            ('EFI/Boot/bootx64.efi', b'fake windows fallback loader\n' * 999)):
-            os.makedirs(os.path.dirname(f'/tmp/melon-esp/{path}'), exist_ok=True); open(f'/tmp/melon-esp/{path}', 'wb').write(blob)
-        run('umount', '/tmp/melon-esp')
+            os.makedirs(os.path.dirname(f'/tmp/valence-esp/{path}'), exist_ok=True); open(f'/tmp/valence-esp/{path}', 'wb').write(blob)
+        run('umount', '/tmp/valence-esp')
     finally:
         run('losetup', '-d', loop)
     def windows_state():
         """checksums of everything Windows owns: its partition table entries, MSR, NTFS C:, its files on the EFI partition"""
         loop = run('losetup', '-P', '-f', '--show', disk).strip()
         try:
-            st = {'table': ''.join(l for l in run('sfdisk', '-d', disk).splitlines(True) if 'melon' not in l and not l.startswith(('last-lba', 'first-lba')))}
+            st = {'table': ''.join(l for l in run('sfdisk', '-d', disk).splitlines(True) if 'valence' not in l and not l.startswith(('last-lba', 'first-lba')))}
             for n in ('p2', 'p3'):
                 st[n] = hashlib.sha256(open(loop + n, 'rb').read(64 << 20)).hexdigest()
-            run('mount', '-o', 'ro', loop + 'p1', '/tmp/melon-esp')
+            run('mount', '-o', 'ro', loop + 'p1', '/tmp/valence-esp')
             for path in ('EFI/Microsoft/Boot/bootmgfw.efi', 'EFI/Boot/bootx64.efi'):
-                st[path] = hashlib.sha256(open(f'/tmp/melon-esp/{path}', 'rb').read()).hexdigest()
-            run('umount', '/tmp/melon-esp')
+                st[path] = hashlib.sha256(open(f'/tmp/valence-esp/{path}', 'rb').read()).hexdigest()
+            run('umount', '/tmp/valence-esp')
         finally:
             run('losetup', '-d', loop)
         return st
     before = windows_state()
     # UEFI with a firmware boot menu that survives reboots (writable OVMF variables)
-    run('cp', '/usr/share/OVMF/OVMF_VARS_4M.fd', '/tmp/melon-ovmf-vars.fd')
+    run('cp', '/usr/share/OVMF/OVMF_VARS_4M.fd', '/tmp/valence-ovmf-vars.fd')
     uefi_args = ['-drive', 'if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd',
-                 '-drive', 'if=pflash,format=raw,file=/tmp/melon-ovmf-vars.fd']
+                 '-drive', 'if=pflash,format=raw,file=/tmp/valence-ovmf-vars.fd']
     base = cmd + uefi_args
     cmd = base + ['-cdrom', iso] + disk_args(disk) + ['-boot', 'd']
 elif mode in ('live', 'toram'):
@@ -139,7 +139,7 @@ t0 = time.monotonic()
 def step(s): print(f'[{time.monotonic()-t0:7.1f}s] {s}', flush=True)
 p = pexpect.spawn(cmd[0], cmd[1:], encoding='utf-8', codec_errors='replace', timeout=600)
 p.logfile_read = log
-PROMPT = r'@melon[\w-]*.*[#$] '
+PROMPT = r'@valence[\w-]*.*[#$] '
 
 def sh(c, timeout=300, expect=PROMPT):
     p.sendline(c)
@@ -158,7 +158,7 @@ def sh(c, timeout=300, expect=PROMPT):
 if mode == 'desktop':
     import socket
     step('waiting for GRUB')
-    p.expect('melon live', timeout=300); time.sleep(1)
+    p.expect('Valence live', timeout=300); time.sleep(1)
     for _ in range(3):
         p.send('\x1b[B'); time.sleep(0.3)          # down to "serial console" (a typed GRUB command line loses keys)
     p.send('\r')
@@ -189,8 +189,8 @@ if mode == 'desktop':
     # Plasma's device list asks UDisks2 over D-Bus, which starts udisksd; then mount the stick the same way Dolphin does
     out = sh('echo UDISKSD=$(ps -o comm | grep -cx udisksd)')
     started = 'UDISKSD=1' in out; ok &= started; step('udisksd started by D-Bus activation: ' + ('yes' if started else 'NO'))
-    out = sh('dev=$(doas blkid -L MELONUSB); echo "stick: $dev"; doas udisksctl mount -b $dev && '
-             'cat /run/media/root/MELONUSB/hello.txt && doas udisksctl unmount -b $dev', timeout=120)
+    out = sh('dev=$(doas blkid -L VALENCEUSB); echo "stick: $dev"; doas udisksctl mount -b $dev && '
+             'cat /run/media/root/VALENCEUSB/hello.txt && doas udisksctl unmount -b $dev', timeout=120)
     mounted = 'hello from the stick' in out and 'Mounted' in out; ok &= mounted
     step('USB stick through UDisks2: ' + ('mounted, file read, unmounted' if mounted else 'FAILED'))
     if not mounted: print(out[-2000:])
@@ -208,9 +208,9 @@ if mode == 'desktop':
     # printing: CUPS' virtual IPP Everywhere printer that only takes PWG raster, a driverless queue for it, and a text
     # file through the whole filter chain (texttopdf, pdftopdf with QPDF, pdftoraster with Poppler, the ipp backend)
     out = sh('rm -rf /tmp/ippspool; mkdir -p /tmp/ippspool; (ippeveprinter -r off -p 8631 -f image/pwg-raster -k -d /tmp/ippspool '
-             'MelonTest >/tmp/ippeve.log 2>&1 &); sleep 3; lpadmin -p melontest -E -v ipp://localhost:8631/ipp/print -m everywhere '
-             '&& lp -d melontest /etc/os-release; for i in $(seq 60); do [ -z "$(lpstat -o melontest)" ] && break; sleep 1; done; '
-             'lpstat -W completed -o melontest | wc -l | sed "s/^/COMPLETED=/"; ls /tmp/ippspool | grep -c "pwg$" | sed "s/^/RASTER=/"', timeout=180)
+             'ValenceTest >/tmp/ippeve.log 2>&1 &); sleep 3; lpadmin -p valencetest -E -v ipp://localhost:8631/ipp/print -m everywhere '
+             '&& lp -d valencetest /etc/os-release; for i in $(seq 60); do [ -z "$(lpstat -o valencetest)" ] && break; sleep 1; done; '
+             'lpstat -W completed -o valencetest | wc -l | sed "s/^/COMPLETED=/"; ls /tmp/ippspool | grep -c "pwg$" | sed "s/^/RASTER=/"', timeout=180)
     v = dict(_re.findall(r'(COMPLETED|RASTER)=(\d+)', out))
     printed = int(v.get('COMPLETED', '0')) >= 1 and int(v.get('RASTER', '0')) >= 1; ok &= printed
     step('printing: ' + ('a text file reached the IPP Everywhere printer as PWG raster' if printed else f'FAILED {v}'))
@@ -222,8 +222,8 @@ if mode == 'desktop':
     if not online: print(repr(out[-600:]))
     # Wi-Fi the way Plasma's network applet does it (NetworkManager, which starts wpa_supplicant over D-Bus) on two
     # virtual radios: wlan1 is a WPA2 access point run by a separate wpa_supplicant, NetworkManager joins it with wlan0
-    ap = ("printf '%s\\n' 'network={' 'ssid=\"melontest\"' 'mode=2' 'frequency=2437' 'key_mgmt=WPA-PSK' 'proto=RSN' "
-          "'pairwise=CCMP' 'psk=\"melonwifi\"' '}' > /tmp/ap.conf")
+    ap = ("printf '%s\\n' 'network={' 'ssid=\"valencetest\"' 'mode=2' 'frequency=2437' 'key_mgmt=WPA-PSK' 'proto=RSN' "
+          "'pairwise=CCMP' 'psk=\"valencewifi\"' '}' > /tmp/ap.conf")
     # The radios appear while udevd is stopped, like a real card whose interface registers after its firmware loads,
     # in the gap between stage 1's udevd and the udevd service: nothing processes them and NetworkManager leaves them
     # unmanaged. Starting udevd must replay those events (recipes/eudev/udevd.run).
@@ -233,15 +233,15 @@ if mode == 'desktop':
     out = sh('for i in $(seq 20); do nmcli -c no -t -f DEVICE,STATE device | grep -q "^wlan1:unmanaged" || break; sleep 1; done; '
              'nmcli -c no device set wlan1 managed no && ' + ap + ' && '
              'wpa_supplicant -B -i wlan1 -c /tmp/ap.conf >/tmp/ap.log 2>&1 && sleep 3 && '
-             'nmcli -c no connection add type wifi ifname wlan0 con-name melontest ssid melontest wifi-sec.key-mgmt wpa-psk '
-             'wifi-sec.psk melonwifi ipv4.method disabled ipv6.method link-local >/dev/null && '
-             'nmcli -c no --wait 60 connection up melontest >/dev/null 2>&1; '
+             'nmcli -c no connection add type wifi ifname wlan0 con-name valencetest ssid valencetest wifi-sec.key-mgmt wpa-psk '
+             'wifi-sec.psk valencewifi ipv4.method disabled ipv6.method link-local >/dev/null && '
+             'nmcli -c no --wait 60 connection up valencetest >/dev/null 2>&1; '
              'nmcli -c no -t -f GENERAL.STATE device show wlan0 | sed "s/^GENERAL.STATE:/WIFI=/"', timeout=180)
     wifi = 'WIFI=100' in out; ok &= wifi
     step(f'Wi-Fi: radios found while udevd was down were {gap}; ' +
          ('after the replay NetworkManager joined a WPA2 network on one' if wifi else 'FAILED'))
     if not wifi: print(out[-1500:]); print(sh('cat /tmp/ap.log; nmcli -c no device; tail -20 /var/log/NetworkManager/current'))
-    m = socket.socket(socket.AF_UNIX); m.connect('/tmp/melon-qmon.sock'); time.sleep(0.5)
+    m = socket.socket(socket.AF_UNIX); m.connect('/tmp/valence-qmon.sock'); time.sleep(0.5)
     m.sendall(f'screendump {M}/logs/qemu-desktop.ppm\n'.encode()); time.sleep(3); m.close()
     step('screenshot: logs/qemu-desktop.ppm')
     sh('doas poweroff', expect=pexpect.EOF, timeout=300)
@@ -251,21 +251,21 @@ if mode == 'desktop':
 if mode == 'desktop-install':
     import socket, re as _re
     def mon(line):
-        m = socket.socket(socket.AF_UNIX); m.connect('/tmp/melon-qmon.sock'); time.sleep(0.3)
+        m = socket.socket(socket.AF_UNIX); m.connect('/tmp/valence-qmon.sock'); time.sleep(0.3)
         m.sendall(line.encode() + b'\n'); time.sleep(0.4); m.close()
     def count(c):                                   # run c, return the number it echoes as N=<n>
         m = _re.search(r'N=(\d+)', sh(f'echo N=$({c})')); return int(m.group(1)) if m else 0
     step('waiting for GRUB')
-    p.expect('melon live', timeout=300); time.sleep(1)
+    p.expect('Valence live', timeout=300); time.sleep(1)
     for _ in range(3):
         p.send('\x1b[B'); time.sleep(0.3)          # down to "serial console"
     p.send('\r')
     p.expect(PROMPT, timeout=900); step('logged in on the live desktop ISO')
     sh('stty cols 160 rows 50; export TERM=vt100')
-    sh(f'export MELON_DISK={DISKNAME} MELON_HOSTNAME=melondesk MELON_ROOTPW=melonroot MELON_USER=jcole '
-       'MELON_USERPW=melonuser MELON_PROFILE=desktop MELON_YES=1 MELON_SERIAL=1 MELON_ENCRYPT=n')
-    out = sh('melon-install', timeout=3600)
-    ok = 'melon is installed' in out
+    sh(f'export VALENCE_DISK={DISKNAME} VALENCE_HOSTNAME=valencedesk VALENCE_ROOTPW=valenceroot VALENCE_USER=jcole '
+       'VALENCE_USERPW=valenceuser VALENCE_PROFILE=desktop VALENCE_YES=1 VALENCE_SERIAL=1 VALENCE_ENCRYPT=n')
+    out = sh('valence-install', timeout=3600)
+    ok = 'Valence is installed' in out
     step(f'desktop install: {"OK" if ok else "FAILED"}')
     if not ok: print(out[-3000:])
     p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300)
@@ -275,7 +275,7 @@ if mode == 'desktop-install':
           + disk_args(disk) + ['-boot', 'c']
     p = pexpect.spawn(cmd[0], cmd[1:], encoding='utf-8', codec_errors='replace', timeout=600)
     p.logfile_read = log
-    p.expect('login:', timeout=900); p.sendline('root'); p.expect('assword:'); p.sendline('melonroot')
+    p.expect('login:', timeout=900); p.sendline('root'); p.expect('assword:'); p.sendline('valenceroot')
     p.expect(PROMPT, timeout=120); step('logged in on the installed desktop (serial console)')
     time.sleep(15)                                  # SDDM and KWin are starting: typing now can lose characters
     sh('stty cols 160 rows 50; export TERM=vt100')
@@ -291,7 +291,7 @@ if mode == 'desktop-install':
     ok &= bool(stable); step('greeter after 20 s: ' + ('same process, active session' if stable else 'RESTARTED OR NO SESSION'))
     mon(f'screendump {M}/logs/qemu-desktop-greeter.ppm'); time.sleep(3)
     if not HAVE_KVM: time.sleep(90)   # emulated CPU: the greeter's password field takes a while to take keys
-    for ch in 'melonuser':
+    for ch in 'valenceuser':
         mon(f'sendkey {ch}'); time.sleep(0.15)
     mon('sendkey ret'); step('typed the password into the greeter')
     time.sleep(3); mon(f'screendump {M}/logs/qemu-desktop-splash.ppm')   # Plasma's loading screen
@@ -334,36 +334,36 @@ if mode == 'desktop-install':
 
 if mode == 'dualboot':
     step('waiting for GRUB (UEFI)')
-    p.expect('melon live', timeout=300); time.sleep(1)
+    p.expect('Valence live', timeout=300); time.sleep(1)
     for _ in range(3):
         p.send('\x1b[B'); time.sleep(0.3)
     p.send('\r')
     p.expect(PROMPT, timeout=900); step('logged in on the live system')
     sh('stty cols 160 rows 50; export TERM=vt100')
-    sh(f'export MELON_DISK={DISKNAME} MELON_HOSTNAME=melondual MELON_ROOTPW=melonroot MELON_USER=jcole MELON_USERPW=melonuser '
-       'MELON_PROFILE=base MELON_YES=1 MELON_SERIAL=1 MELON_ENCRYPT=n MELON_MODE=alongside')
-    out = sh('melon-install', timeout=3600)
-    ok = 'melon is installed' in out and 'next to the other systems' in out
+    sh(f'export VALENCE_DISK={DISKNAME} VALENCE_HOSTNAME=valencedual VALENCE_ROOTPW=valenceroot VALENCE_USER=jcole VALENCE_USERPW=valenceuser '
+       'VALENCE_PROFILE=base VALENCE_YES=1 VALENCE_SERIAL=1 VALENCE_ENCRYPT=n VALENCE_MODE=alongside')
+    out = sh('valence-install', timeout=3600)
+    ok = 'Valence is installed' in out and 'next to the other systems' in out
     step('install alongside: ' + ('OK' if ok else 'FAILED'))
     if not ok: print(out[-3000:])
     p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300)
     if not ok: sys.exit(1)
-    # boot the disk with no boot order given: the firmware must pick melon from its own boot menu
+    # boot the disk with no boot order given: the firmware must pick Valence from its own boot menu
     cmd = base + disk_args(disk)
     p = pexpect.spawn(cmd[0], cmd[1:], encoding='utf-8', codec_errors='replace', timeout=600); p.logfile_read = log
-    i = p.expect(['melon Linux', 'fake windows', pexpect.TIMEOUT], timeout=300)
+    i = p.expect(['Valence Linux', 'fake windows', pexpect.TIMEOUT], timeout=300)
     menu = p.before + (p.after if isinstance(p.after, str) else '')
-    ok &= i == 0; step('firmware boot menu: ' + ('started melon\'s GRUB' if i == 0 else 'DID NOT START MELON'))
+    ok &= i == 0; step('firmware boot menu: ' + ('started Valence\'s GRUB' if i == 0 else 'DID NOT START VALENCE'))
     try: p.expect('Windows', timeout=5); win_menu = True
     except pexpect.TIMEOUT: win_menu = 'Windows' in menu
-    p.expect('login:', timeout=900); p.sendline('root'); p.expect('assword:'); p.sendline('melonroot'); p.expect(PROMPT, timeout=120)
+    p.expect('login:', timeout=900); p.sendline('root'); p.expect('assword:'); p.sendline('valenceroot'); p.expect(PROMPT, timeout=120)
     sh('stty cols 160 rows 50; export TERM=vt100')
     out = sh("echo WIN=$(grep -c \"menuentry 'Windows'\" /boot/grub/grub.cfg) EFIMNT=$(awk '$2==\"/boot/efi\"{print $2}' /proc/mounts) "
-             "NVRAM=$(efibootmgr | grep -c -i melon); ls /boot/efi/EFI | xargs echo ESP:")
+             "NVRAM=$(efibootmgr | grep -c -i valence); ls /boot/efi/EFI | xargs echo ESP:")
     v = dict(_re.findall(r'(WIN|EFIMNT|NVRAM)=(\S*)', out))
     good = v.get('WIN') == '1' and v.get('EFIMNT') == '/boot/efi' and v.get('NVRAM', '0') != '0'; ok &= good
     step(f"installed system: Windows in GRUB {v.get('WIN')} (menu showed it: {win_menu}), EFI partition at {v.get('EFIMNT')}, "
-         f"firmware entries for melon {v.get('NVRAM')}")
+         f"firmware entries for Valence {v.get('NVRAM')}")
     print(sh('ls /boot/efi/EFI; efibootmgr'))
     p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300)
     after = windows_state()
@@ -375,26 +375,26 @@ if mode == 'dualboot':
 
 if mode == 'live':
     step('waiting for GRUB')
-    p.expect('melon live', timeout=300)
+    p.expect('Valence live', timeout=300)
     time.sleep(1)
     for _ in range(3):
         p.send('\x1b[B'); time.sleep(0.3)          # down to "serial console"
     p.send('\r')
     step('booting kernel')
-    p.expect('melon live: looking for boot medium', timeout=600)
+    p.expect('Valence live: looking for boot medium', timeout=600)
     step('initramfs running')
     p.expect(PROMPT, timeout=900)
     step('logged in on live system')
     sh('stty cols 160 rows 50; export TERM=vt100')
-    print(sh('melonfetch'))
+    print(sh('valencefetch'))
     print(sh('cat /proc/asound/cards; ls /dev/snd'))
     step('running the console installer')
-    sh(f'export MELON_DISK={DISKNAME} MELON_HOSTNAME=melontest MELON_ROOTPW=melonroot MELON_USER=jcole '
-       'MELON_USERPW=melonuser MELON_PROFILE=base MELON_YES=1 MELON_SERIAL=1'
-       + (' MELON_ENCRYPT=y MELON_LUKSPW=melonluks' if luks else ' MELON_ENCRYPT=n'))
-    out = sh('melon-install', timeout=3600)
+    sh(f'export VALENCE_DISK={DISKNAME} VALENCE_HOSTNAME=valencetest VALENCE_ROOTPW=valenceroot VALENCE_USER=jcole '
+       'VALENCE_USERPW=valenceuser VALENCE_PROFILE=base VALENCE_YES=1 VALENCE_SERIAL=1'
+       + (' VALENCE_ENCRYPT=y VALENCE_LUKSPW=valenceluks' if luks else ' VALENCE_ENCRYPT=n'))
+    out = sh('valence-install', timeout=3600)
     print(out[-3000:])
-    ok = 'melon is installed' in out
+    ok = 'Valence is installed' in out
     step(f'installer finished: {"OK" if ok else "FAILED"}')
     print(sh('ls /usr/bin | wc -l'))
     p.sendline('poweroff')
@@ -402,7 +402,7 @@ if mode == 'live':
     sys.exit(0 if ok else 1)
 elif mode == 'toram':
     step('waiting for GRUB')
-    p.expect('melon live', timeout=300); time.sleep(1)
+    p.expect('Valence live', timeout=300); time.sleep(1)
     p.send('c'); p.expect('grub>', timeout=60)
     for line in ['linux /boot/vmlinuz toram console=tty0 console=ttyS0,115200', 'initrd /boot/initramfs.img', 'boot']:
         for ch in line: p.send(ch); time.sleep(0.08)   # GRUB drops keys that arrive too fast
@@ -412,58 +412,58 @@ elif mode == 'toram':
     p.expect(PROMPT, timeout=900); step('logged in')
     # pull the "USB stick": eject the CD through the QEMU monitor
     import socket
-    m = socket.socket(socket.AF_UNIX); m.connect('/tmp/melon-qmon.sock'); time.sleep(0.5)
+    m = socket.socket(socket.AF_UNIX); m.connect('/tmp/valence-qmon.sock'); time.sleep(0.5)
     m.sendall(b'eject -f ide1-cd0\n'); time.sleep(1); m.sendall(b'info block\n'); time.sleep(1)
     print(m.recv(65536).decode(errors='replace')); m.close()
     step('boot medium ejected')
     sh('stty cols 160 rows 50; export TERM=vt100')
-    for c in ['grep -E "media|sr0" /proc/mounts', 'ls -la /media/melon/melon', 'dd if=/dev/sr0 of=/dev/null bs=2048 count=1', 'free -m',
-              'melonfetch | tail -3', 'xfs_repair -V']:
+    for c in ['grep -E "media|sr0" /proc/mounts', 'ls -la /media/valence/valence', 'dd if=/dev/sr0 of=/dev/null bs=2048 count=1', 'free -m',
+              'valencefetch | tail -3', 'xfs_repair -V']:
         print(f'$ {c}'); print(sh(c))
-    sh(f'export MELON_DISK={DISKNAME} MELON_HOSTNAME=ramtest MELON_ROOTPW=melonroot MELON_USER=jcole '
-       'MELON_USERPW=melonuser MELON_PROFILE=base MELON_YES=1 MELON_SERIAL=1')
-    out = sh('melon-install', timeout=3600)
-    ok = 'melon is installed' in out
+    sh(f'export VALENCE_DISK={DISKNAME} VALENCE_HOSTNAME=ramtest VALENCE_ROOTPW=valenceroot VALENCE_USER=jcole '
+       'VALENCE_USERPW=valenceuser VALENCE_PROFILE=base VALENCE_YES=1 VALENCE_SERIAL=1')
+    out = sh('valence-install', timeout=3600)
+    ok = 'Valence is installed' in out
     step(f'install with the medium removed: {"OK" if ok else "FAILED"}')
     if not ok: print(out[-3000:])
     p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300)
     sys.exit(0 if ok else 1)
 else:
     step('waiting for GRUB on the installed disk')
-    p.expect("melon Linux", timeout=300)
+    p.expect("Valence Linux", timeout=300)
     step('kernel booting')
     if luks:
         p.expect('unlocking the encrypted disk', timeout=900); step('initramfs asks for the passphrase')
-        p.expect('assphrase', timeout=120); p.sendline('melonluks'); step('passphrase sent')
+        p.expect('assphrase', timeout=120); p.sendline('valenceluks'); step('passphrase sent')
     p.expect('login:', timeout=900)
     step('login prompt')
-    p.sendline('root'); p.expect('assword:'); p.sendline('melonroot')
+    p.sendline('root'); p.expect('assword:'); p.sendline('valenceroot')
     p.expect(PROMPT, timeout=120)
     step('logged in')
     sh('stty cols 160 rows 50; export TERM=vt100')
-    for c in ['melonfetch', 'cat /etc/os-release', 'findmnt / /boot', 'melon-svc status',
+    for c in ['valencefetch', 'cat /etc/os-release', 'findmnt / /boot', 'valence-svc status',
               'apk list --installed | wc -l', 'apk update && apk search -q | wc -l',
               'ls /sys/firmware/efi >/dev/null 2>&1 && echo booted-UEFI || echo booted-BIOS',
               'id jcole', 'ip -4 addr show dev eth0 | grep inet; ping -c1 -W3 10.0.2.2 >/dev/null && echo net-ok',
-              'ls /usr/libexec/melon', 'free -m; df -h / /boot', 'wc -l < /proc/modules; ls /usr/lib/modules',
+              'ls /usr/libexec/valence', 'free -m; df -h / /boot', 'wc -l < /proc/modules; ls /usr/lib/modules',
               'lspci 2>/dev/null | head; cat /sys/bus/pci/devices/*/modalias | head -20',
               'modprobe -v snd_hda_intel; ls /dev/snd; dmesg | tail -5',
-              'melon-detect-virt; lsmod | grep -E "vmw|vmxnet|pvscsi|virtio|hv_|vbox" ; ls /var/service',
+              'valence-detect-virt; lsmod | grep -E "vmw|vmxnet|pvscsi|virtio|hv_|vbox" ; ls /var/service',
               'sleep 3; sv status /var/service/qemu-ga /var/service/vmtoolsd /var/service/hv_kvp_daemon 2>&1']:
         print(f'$ {c}'); print(sh(c))
     # sudo as the normal user: asks for the password once, then remembers it
-    p.sendline('su - jcole'); p.expect(r'@melon[\w-]*.*\$ ', timeout=60)
-    p.sendline('sudo id -u'); p.expect('assword', timeout=60); p.sendline('melonuser')
+    p.sendline('su - jcole'); p.expect(r'@valence[\w-]*.*\$ ', timeout=60)
+    p.sendline('sudo id -u'); p.expect('assword', timeout=60); p.sendline('valenceuser')
     p.expect(r'\n\r*0\r*\n', timeout=60); step('sudo as jcole: OK (got uid 0)')
     p.sendline('sudo -i whoami'); i = p.expect([r'[\r\n]root\r', 'assword'], timeout=60)
     step('sudo -i without asking again: ' + ('OK' if i == 0 else 'asked again'))
-    if i == 1: p.sendline('melonuser'); p.expect('root', timeout=60)
+    if i == 1: p.sendline('valenceuser'); p.expect('root', timeout=60)
     p.sendline('exit'); p.expect(PROMPT, timeout=60)
-    print(sh('melon-svc status; ls /var/log'))
+    print(sh('valence-svc status; ls /var/log'))
     # the host side of the guest agent: ask the VM for its OS info, then shut it down from the host
     import socket, json
     try:
-        q = socket.socket(socket.AF_UNIX); q.connect('/tmp/melon-qga.sock'); q.settimeout(20)
+        q = socket.socket(socket.AF_UNIX); q.connect('/tmp/valence-qga.sock'); q.settimeout(20)
         q.sendall(b'{"execute":"guest-sync","arguments":{"id":1234}}\n'); print('qga sync:', q.recv(4096).decode().strip())
         q.sendall(b'{"execute":"guest-get-osinfo"}\n'); print('qga osinfo:', q.recv(4096).decode().strip())
         q.sendall(b'{"execute":"guest-shutdown"}\n'); step('asked the guest agent to shut down')

@@ -1,17 +1,17 @@
 #!/bin/bash
 # host-setup.sh: prepare a fresh Ubuntu 24.04 machine (or WSL2 Ubuntu 24.04), Debian or Devuan (the same apt path),
-# or a melon system, to build melon.
+# or a Valence system, to build Valence.
 # Run as root (sudo scripts/host-setup.sh). Safe to run again.
 #
-#  1. build dependencies (from Ubuntu, Debian or Devuan, or melon's own packages on melon)
-#  2. not on melon: the Ubuntu 26.04 ("resolute") source archive, where older melon sources come from
-#  3. let the build host run melon's musl binaries (build-time generators from earlier packages)
+#  1. build dependencies (from Ubuntu, Debian or Devuan, or Valence's own packages on Valence)
+#  2. not on Valence: the Ubuntu 26.04 ("resolute") source archive, where older Valence sources come from
+#  3. let the build host run Valence's musl binaries (build-time generators from earlier packages)
 #  4. host tools the cross builds need: apk, wayland-scanner 1.24, Mesa's mesa_clc, GRUB, Python, Rust, Qt
 set -euo pipefail
 M=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 [ "$(id -u)" = 0 ] || { echo "run as root: sudo $0" >&2; exit 1; }
 . /etc/os-release
-[ "$ID" = melon ] || [ "$VERSION_ID" = 24.04 ] || echo "warning: tested on Ubuntu 24.04 and melon, this is $PRETTY_NAME (Debian and Devuan take Ubuntu's path)"
+[ "$ID" = valence ] || [ "$VERSION_ID" = 24.04 ] || echo "warning: tested on Ubuntu 24.04 and Valence, this is $PRETTY_NAME (Debian and Devuan take Ubuntu's path)"
 # build output goes to logs/host-setup.log; a failing step prints its end instead of stopping without a word
 mkdir -p "$M/logs"; export LOG=$M/logs/host-setup.log; : > "$LOG"
 set -E; trap 'rc=$?; echo "host-setup.sh failed (line $LINENO, exit $rc). End of $LOG:" >&2; tail -n 40 "$LOG" >&2; exit $rc' ERR
@@ -45,7 +45,7 @@ ubuntu_deps(){
   pip install -q --break-system-packages meson==1.12.1 mako pyyaml shtab pycotap==1.3.1 packaging pexpect pillow
 
   step "Ubuntu 26.04 source archive (deb-src)"
-  cat > /etc/apt/sources.list.d/melon-src.sources <<'EOF'
+  cat > /etc/apt/sources.list.d/valence-src.sources <<'EOF'
 Types: deb-src
 URIs: http://archive.ubuntu.com/ubuntu/
 Suites: noble noble-updates resolute resolute-updates
@@ -55,10 +55,10 @@ EOF
   apt-get update -q
 }
 
-# melon as the build machine (BUILDING.md): the same tools from melon's own package repository. Everything here was
-# built for melon's self-hosting work (AGENTS.md, Roadmap); names that are missing are listed at the end.
-melon_deps(){
-  step "build dependencies (melon packages)"
+# Valence as the build machine (BUILDING.md): the same tools from Valence's own package repository. Everything here was
+# built for Valence's self-hosting work (AGENTS.md, Roadmap); names that are missing are listed at the end.
+valence_deps(){
+  step "build dependencies (Valence packages)"
   local pkgs="gcc g++ binutils make pkgconf patch perl bison flex texinfo bc gawk gperf m4 python3 python3-mako
     python3-markupsafe python3-yaml python3-packaging python3-pexpect ninja cmake meson autoconf automake autoconf-archive libtool libtool-dev gettext gettext-dev
     file xz zstd lz4 bzip2 rsync curl git ca-certificates xorriso mtools dosfstools xfsprogs squashfs-tools qemu ovmf
@@ -73,35 +73,35 @@ melon_deps(){
   if ! apk add -q $pkgs; then   # one at a time, so one missing name doesn't stop the rest
     local missing=
     for p in $pkgs; do apk add -q "$p" >/dev/null 2>&1 || missing="$missing $p"; done
-    [ -z "$missing" ] || echo "warning: not in melon's repository (builds that need them will fail):$missing"
+    [ -z "$missing" ] || echo "warning: not in Valence's repository (builds that need them will fail):$missing"
   fi
   # packages new enough that the online repository may not have them yet: asked for on their own, so a missing one
   # doesn't send the list above through the slow one-at-a-time path; host-setup.sh takes them from sources/ below
   for p in python3-jinja2 python3-pyparsing rpcsvc-proto; do apk add -q "$p" >/dev/null 2>&1 || true; done
   # recipes copy a current config.sub/config.guess from /usr/share/misc (rule 40), Ubuntu's place (autotools-dev);
-  # melon's are automake's
+  # Valence's are automake's
   local f a; a=$(ls -d /usr/share/automake-* 2>/dev/null | tail -1 || true)
   mkdir -p /usr/share/misc
   for f in config.sub config.guess; do [ -e /usr/share/misc/$f ] || [ -z "$a" ] || ln -s "$a/$f" /usr/share/misc/$f; done
-  # Python modules melon doesn't package (ppd's shell completion, Mesa's test runner). melon's recipes turn both off
-  # (ppd -Dbashcomp=disabled -Dzshcomp=, Mesa -Dbuild-tests=false), and melon's python3 has no pip: optional.
+  # Python modules Valence doesn't package (ppd's shell completion, Mesa's test runner). Valence's recipes turn both off
+  # (ppd -Dbashcomp=disabled -Dzshcomp=, Mesa -Dbuild-tests=false), and Valence's python3 has no pip: optional.
   if python3 -m pip --version >/dev/null 2>&1; then
     python3 -m pip install -q --break-system-packages shtab pycotap==1.3.1 || echo "note: pip could not install shtab and pycotap (optional)"
   fi
 
-  # Rule 18 on melon: the system's own musl is the loader, so never point /lib/ld-musl-x86_64.so.1 at the sysroot
+  # Rule 18 on Valence: the system's own musl is the loader, so never point /lib/ld-musl-x86_64.so.1 at the sysroot
   # (that would swap libc under every running program). Programs from the sysroot run as they are; only libraries that
-  # exist nowhere but in the sysroot need a path, and melon's own directories come first so the system's programs
+  # exist nowhere but in the sysroot need a path, and Valence's own directories come first so the system's programs
   # never load a library from the sysroot.
-  step "running melon binaries from the sysroot (rule 18 in AGENTS.md, melon variant)"
+  step "running Valence binaries from the sysroot (rule 18 in AGENTS.md, Valence variant)"
   printf '%s\n' /usr/local/lib /usr/lib "$M/sysroot/usr/lib" > /etc/ld-musl-x86_64.path
 
-  # recipes unpack Ubuntu .debs (firmware, fonts, certificates, OVMF) with `dpkg-deb -x`; melon has no dpkg
+  # recipes unpack Ubuntu .debs (firmware, fonts, certificates, OVMF) with `dpkg-deb -x`; Valence has no dpkg
   if ! command -v dpkg-deb >/dev/null; then
     cat > /usr/local/bin/dpkg-deb <<'SHIM'
 #!/bin/sh
-# dpkg-deb -x <deb> <dir>, the only form melon's recipes use (melon as the build machine; scripts/host-setup.sh)
-[ "$1" = -x ] && [ $# = 3 ] || { echo "dpkg-deb (melon shim): only 'dpkg-deb -x <deb> <dir>' is supported" >&2; exit 2; }
+# dpkg-deb -x <deb> <dir>, the only form Valence's recipes use (Valence as the build machine; scripts/host-setup.sh)
+[ "$1" = -x ] && [ $# = 3 ] || { echo "dpkg-deb (Valence shim): only 'dpkg-deb -x <deb> <dir>' is supported" >&2; exit 2; }
 m=$(ar t "$2" | grep '^data\.tar') || { echo "dpkg-deb: no data.tar in $2" >&2; exit 1; }
 case $m in *.xz) d="xz -dc" ;; *.zst) d="zstd -dc" ;; *.gz) d="gzip -dc" ;; *.bz2) d="bzip2 -dc" ;; *) d=cat ;; esac
 mkdir -p "$3" && ar p "$2" "$m" | $d | tar -x -C "$3" -f -
@@ -110,13 +110,13 @@ SHIM
   fi
 }
 
-if [ "$ID" = melon ]; then melon_deps; else ubuntu_deps
-  step "running melon's own binaries on the build host (rule 18 in AGENTS.md)"
+if [ "$ID" = valence ]; then valence_deps; else ubuntu_deps
+  step "running Valence's own binaries on the build host (rule 18 in AGENTS.md)"
   ln -sfn $M/sysroot/usr/lib/libc.so /lib/ld-musl-x86_64.so.1
   echo $M/sysroot/usr/lib > /etc/ld-musl-x86_64.path
 fi
-# the 32-bit edition (MELON_ARCH=x86): no build machine has an i386 musl of its own, so its loader is always the
-# 32-bit sysroot's (melon's and Ubuntu's kernels run 32-bit programs)
+# the 32-bit edition (VALENCE_ARCH=x86): no build machine has an i386 musl of its own, so its loader is always the
+# 32-bit sysroot's (Valence's and Ubuntu's kernels run 32-bit programs)
 ln -sfn $M/sysroot-x86/usr/lib/libc.so /lib/ld-musl-i386.so.1
 echo $M/sysroot-x86/usr/lib > /etc/ld-musl-i386.path
 
@@ -127,17 +127,17 @@ step "sources"
 $M/scripts/fetch-sources.sh
 
 # Python modules builds import on the build machine (Ubuntu has them): elogind's tools/meson-render-jinja2.py imports
-# jinja2, flatpak's variant-schema-compiler pyparsing. melon_deps asks for python3-jinja2 and python3-pyparsing, but a
+# jinja2, flatpak's variant-schema-compiler pyparsing. valence_deps asks for python3-jinja2 and python3-pyparsing, but a
 # new build machine can come before those packages are in the online repository: then each comes from its sdist (pure
 # Python, sha256 checked by fetch-sources.sh above), its module copied to where the package puts it in python3's
-# site-packages. A later `apk add` writes over it (apk replaces files no package owns). gzip -dc | tar -xf -: on melon,
+# site-packages. A later `apk add` writes over it (apk replaces files no package owns). gzip -dc | tar -xf -: on Valence,
 # tar is BusyBox's.
-if [ "$ID" = melon ]; then
+if [ "$ID" = valence ]; then
   pl=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
   for mod in jinja2:jinja2-3.1.6:src/jinja2 pyparsing:pyparsing-3.3.3:pyparsing; do
     IFS=: read -r name dir path <<<"$mod"
     python3 -c "import $name" 2>/dev/null && continue
-    step "$dir for the build machine's python3 (python3-$name isn't in melon's repository yet)"
+    step "$dir for the build machine's python3 (python3-$name isn't in Valence's repository yet)"
     gzip -dc $M/sources/$dir.tar.gz | tar -xf - -C $W
     mkdir -p "$pl"; cp -r $W/$dir/$path "$pl/"
     python3 -c "import $name; print('$name', $name.__version__, 'in', $name.__file__)" >>$LOG 2>&1
@@ -145,8 +145,8 @@ if [ "$ID" = melon ]; then
 fi
 
 step "host apk (signs and indexes packages)"
-if [ "$ID" = melon ] && apk --version 2>/dev/null | grep -q 'apk-tools 3\.'; then
-  ln -sfn "$(command -v apk)" $M/hosttools/bin/apk   # melon's own apk is the same apk-tools 3
+if [ "$ID" = valence ] && apk --version 2>/dev/null | grep -q 'apk-tools 3\.'; then
+  ln -sfn "$(command -v apk)" $M/hosttools/bin/apk   # Valence's own apk is the same apk-tools 3
 elif [ ! -x $M/hosttools/bin/apk ]; then
   cd $W; tar xzf $M/sources/apk-tools-3.0.8.tar.gz; cd apk-tools-3.0.8
   meson setup build --prefix=$M/hosttools -Dlua=disabled -Ddocs=disabled -Dhelp=disabled -Dpython=disabled \
@@ -156,24 +156,24 @@ fi
 
 step "wayland-scanner 1.24 (Ubuntu 24.04 has 1.22)"
 if ! /usr/local/bin/wayland-scanner --version 2>&1 | grep -q '1\.24' &&
-   ! { [ "$ID" = melon ] && wayland-scanner --version 2>&1 | grep -q '1\.2[4-9]' &&   # melon ships 1.24: the cross file's
+   ! { [ "$ID" = valence ] && wayland-scanner --version 2>&1 | grep -q '1\.2[4-9]' &&   # Valence ships 1.24: the cross file's
        ln -sfn "$(command -v wayland-scanner)" /usr/local/bin/wayland-scanner; }; then  # path (rule 20) points at it
   cd $W; tar xzf $M/sources/wayland-1.24.0.tar.gz; cd wayland-1.24.0
   meson setup build --prefix=/usr/local -Dlibraries=false -Ddocumentation=false -Dtests=false -Ddtd_validation=false >>$LOG 2>&1
   ninja -C build >>$LOG 2>&1; ninja -C build install >>$LOG 2>&1
 fi
 
-# rpcgen: open-vm-tools' configure needs the build machine's. Ubuntu's comes from rpcsvc-proto (ubuntu_deps), and melon_deps
-# installs melon's once the online repository has it; until then it is built here from recipes/rpcsvc-proto's tarball
+# rpcgen: open-vm-tools' configure needs the build machine's. Ubuntu's comes from rpcsvc-proto (ubuntu_deps), and valence_deps
+# installs Valence's once the online repository has it; until then it is built here from recipes/rpcsvc-proto's tarball
 # into /usr/local/bin (on PATH under doas, like the dpkg-deb shim: doas.conf keeps the caller's PATH)
-if [ "$ID" = melon ] && ! command -v rpcgen >/dev/null && [ ! -x /usr/local/bin/rpcgen ]; then
-  step "rpcgen (melon's repository doesn't have rpcsvc-proto yet)"
+if [ "$ID" = valence ] && ! command -v rpcgen >/dev/null && [ ! -x /usr/local/bin/rpcgen ]; then
+  step "rpcgen (Valence's repository doesn't have rpcsvc-proto yet)"
   cd $W; xz -dc $M/sources/rpcsvc-proto-1.4.4.tar.xz | tar -xf -; cd rpcsvc-proto-1.4.4
   ./configure --prefix=/usr/local --disable-nls >>$LOG 2>&1
   make -C rpcgen >>$LOG 2>&1; install -m755 rpcgen/rpcgen /usr/local/bin/rpcgen
 fi
 
-step "mesa_clc and vtn_bindgen2 for the Intel drivers (built against the host's LLVM: Ubuntu's 19, melon's 21)"
+step "mesa_clc and vtn_bindgen2 for the Intel drivers (built against the host's LLVM: Ubuntu's 19, Valence's 21)"
 if [ ! -x $M/hosttools/bin/mesa_clc ]; then
   cd $W; tar xJf $M/sources/mesa-26.0.8.tar.xz; cd mesa-26.0.8
   meson setup build -Dplatforms= -Dgallium-drivers= -Dvulkan-drivers= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
@@ -186,10 +186,10 @@ fi
 step "GRUB for building ISOs"
 [ -x $M/hosttools/grub/bin/grub-mkrescue ] || $M/scripts/hostgrub.sh
 
-step "Python 3.14 (cross-building melon's Python needs the same version on the host)"
+step "Python 3.14 (cross-building Valence's Python needs the same version on the host)"
 [ -x $M/hosttools/python/bin/python3.14 ] || $M/scripts/host-python.sh
 
-step "Rust 1.98.1 (recipes cross-compile Rust code with it; recipes/rust builds melon's own from source)"
+step "Rust 1.98.1 (recipes cross-compile Rust code with it; recipes/rust builds Valence's own from source)"
 $M/scripts/host-rust.sh
 
 step "Qt 6 host tools (resumable; the long one)"

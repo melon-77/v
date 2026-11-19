@@ -1,44 +1,44 @@
 #!/bin/sh
-# melon live initramfs: find the melon medium, mount the squashfs root with a RAM overlay, hand over to runit.
+# Valence live initramfs: find the Valence medium, mount the squashfs root with a RAM overlay, hand over to runit.
 export PATH=/bin
 /bin/busybox --install -s /bin
 mkdir -p /proc /sys /dev /mnt/media /mnt/ro /mnt/rw /newroot
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
 echo 3 > /proc/sys/kernel/printk
-printf '\033[1;38;5;212m=>\033[0m \033[1mmelon live: looking for boot medium\033[0m\n'
+printf '\033[1;38;5;212m=>\033[0m \033[1mValence live: looking for boot medium\033[0m\n'
 found=
 for try in $(seq 1 40); do
   for d in /dev/sr* /dev/sd* /dev/nvme*n* /dev/vd* /dev/mmcblk*; do
     [ -b "$d" ] || continue
     mount -r "$d" /mnt/media 2>/dev/null || continue
-    if [ -f /mnt/media/melon/rootfs.sqfs ]; then found=$d; break 2; fi
+    if [ -f /mnt/media/valence/rootfs.sqfs ]; then found=$d; break 2; fi
     umount /mnt/media
   done
   sleep 0.5
 done
-[ -n "$found" ] || { echo "melon: boot medium not found. Dropping to a shell."; exec sh; }
+[ -n "$found" ] || { echo "Valence: boot medium not found. Dropping to a shell."; exec sh; }
 echo "   found on $found"
 toram=; for a in $(cat /proc/cmdline); do [ "$a" = toram ] && toram=1; done
 if [ -n "$toram" ]; then
   # copy everything the live session and the installer need (system image, live layer, package repo)
   # into RAM, then release the boot medium so it can be unplugged
-  size=$(du -sm /mnt/media/melon | cut -f1)
+  size=$(du -sm /mnt/media/valence | cut -f1)
   printf '   copying %s MiB to RAM ... ' "$size"
   mkdir -p /mnt/ram; mount -t tmpfs -o mode=755,size=$((size + 64))m tmpfs /mnt/ram
-  cp -a /mnt/media/melon /mnt/ram/ || { echo "failed (not enough RAM?)"; exec sh; }
+  cp -a /mnt/media/valence /mnt/ram/ || { echo "failed (not enough RAM?)"; exec sh; }
   umount /mnt/media
   echo "done - you can remove the boot medium now"
   mount --move /mnt/ram /mnt/media
 fi
 mount -t tmpfs -o mode=755,size=80% tmpfs /mnt/rw
-sq=/mnt/media/melon/rootfs.sqfs lv=/mnt/media/melon/live.sqfs
+sq=/mnt/media/valence/rootfs.sqfs lv=/mnt/media/valence/live.sqfs
 mkdir -p /mnt/live
-mount -t squashfs -o loop,ro $sq /mnt/ro || { echo "melon: cannot mount root image"; exec sh; }
-mount -t squashfs -o loop,ro $lv /mnt/live || { echo "melon: cannot mount live layer"; exec sh; }
+mount -t squashfs -o loop,ro $sq /mnt/ro || { echo "Valence: cannot mount root image"; exec sh; }
+mount -t squashfs -o loop,ro $lv /mnt/live || { echo "Valence: cannot mount live layer"; exec sh; }
 mkdir -p /mnt/rw/upper /mnt/rw/work
 mount -t overlay -o lowerdir=/mnt/live:/mnt/ro,upperdir=/mnt/rw/upper,workdir=/mnt/rw/work overlay /newroot
-mkdir -p /newroot/media/melon
-mount --move /mnt/media /newroot/media/melon
+mkdir -p /newroot/media/valence
+mount --move /mnt/media /newroot/media/valence
 # keep /dev (with /dev/console) for the real system instead of starting it with an empty /dev
 mount --move /dev /newroot/dev 2>/dev/null || umount /dev 2>/dev/null
 umount /proc /sys

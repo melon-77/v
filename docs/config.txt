@@ -1,8 +1,8 @@
 #
-# melon Configuration (the owner's answers; change only with their approval)
+# Valence Configuration (the owner's answers; change only with their approval)
 #
 CONFIG_PROJECT="new"
-CONFIG_NAME="melon"
+CONFIG_NAME="Valence"
 CONFIG_PURPOSE="desktop minimal gaming"
 CONFIG_RELEASE_MODEL="rolling"
 CONFIG_TARGETS="probook x86_64"

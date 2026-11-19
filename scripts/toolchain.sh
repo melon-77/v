@@ -1,9 +1,9 @@
 #!/bin/bash
-# Build the melon cross toolchain for $MELON_ARCH (x86_64-melon-linux-musl or i686-melon-linux-musl).
+# Build the Valence cross toolchain for $VALENCE_ARCH (x86_64-valence-linux-musl or i686-valence-linux-musl).
 set -euo pipefail
 . "$(dirname "$(readlink -f "$0")")/env.sh"
 B=$WORK/toolchain; mkdir -p $B $SYSROOT/usr; cd $B
-# melon uses a merged /usr: /lib -> usr/lib, /bin -> usr/bin
+# Valence uses a merged /usr: /lib -> usr/lib, /bin -> usr/bin
 ln -sfn usr/lib $SYSROOT/lib; ln -sfn usr/bin $SYSROOT/bin; ln -sfn usr/bin $SYSROOT/sbin; ln -sfn bin $SYSROOT/usr/sbin
 mkdir -p $SYSROOT/usr/lib $SYSROOT/usr/bin
 
@@ -43,7 +43,7 @@ GCC_CONF="$TOOLCHAIN_HOST_FLAGS --target=$TARGET --prefix=$TOOLS --with-sysroot=
   --disable-libsanitizer --disable-libssp --disable-libquadmath --disable-libgomp-offload
   --enable-default-pie --enable-default-ssp --enable-tls --enable-initfini-array
   --enable-libstdcxx-time --enable-__cxa_atexit --enable-threads=posix --enable-shared
-  --with-pkgversion=melon --disable-symvers --disable-fixed-point --with-arch=$GCC_ARCH ${GCC_FPMATH:+--with-fpmath=$GCC_FPMATH} --with-tune=generic"
+  --with-pkgversion=valence --disable-symvers --disable-fixed-point --with-arch=$GCC_ARCH ${GCC_FPMATH:+--with-fpmath=$GCC_FPMATH} --with-tune=generic"
 
 step gcc stage1
 mkdir b-gcc; cd b-gcc

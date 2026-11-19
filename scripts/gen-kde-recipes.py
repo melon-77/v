@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate MELONBUILD recipes for Qt 6 modules, KDE Frameworks 6, Plasma 6 and the KDE apps.
+"""Generate VALENCEBUILD recipes for Qt 6 modules, KDE Frameworks 6, Plasma 6 and the KDE apps.
 
 All of them are CMake projects cross-compiled the same way:
   - Qt's host tools (moc, rcc, qmlcachegen, ...) come from hosttools/qt6 (QT_HOST_PATH);
-  - KDE's own build-time tools (kconfig_compiler, ...) are melon binaries, which run on the build host.
+  - KDE's own build-time tools (kconfig_compiler, ...) are Valence binaries, which run on the build host.
 Order matters: build-all builds them in ORDER and each package lands in the sysroot for the next.
 """
 import json, os
@@ -16,7 +16,7 @@ QTDIRS = ('-DINSTALL_BINDIR=lib/qt6/bin -DINSTALL_PUBLICBINDIR=usr/bin -DINSTALL
           '-DINSTALL_MKSPECSDIR=lib/qt6/mkspecs -DINSTALL_DOCDIR=share/doc/qt6 -DINSTALL_EXAMPLESDIR=share/doc/qt6/examples')
 KDE = (QT + ' -DBUILD_QCH=OFF -DBUILD_PYTHON_BINDINGS=OFF -DKDE_INSTALL_QTPLUGINDIR=lib/qt6/plugins '
        '-DKDE_INSTALL_QMLDIR=lib/qt6/qml -DKDE_INSTALL_LIBEXECDIR=libexec -DKF_IGNORE_PLATFORM_CHECK=ON '
-       '-DBUILD_WITH_QT6=ON -DQT_MAJOR_VERSION=6 -DBUILD_DOC=OFF')   # handbooks need KDocTools, not in melon yet
+       '-DBUILD_WITH_QT6=ON -DQT_MAJOR_VERSION=6 -DBUILD_DOC=OFF')   # handbooks need KDocTools, not in Valence yet
 
 QTBASE = (QT + ' ' + QTDIRS + ' -DQT_BUILD_EXAMPLES=OFF -DQT_BUILD_TESTS=OFF '
   '-DFEATURE_opengl=ON -DINPUT_opengl=desktop -DFEATURE_egl=ON -DFEATURE_eglfs=OFF -DFEATURE_xcb=ON '
@@ -102,7 +102,7 @@ PKGREL['kf6-ktextwidgets'] = 1   # Speak Text
 PKGREL['qt6-qtmultimedia'] = 3   # 1: with its QML modules; 2: FFmpeg and PulseAudio backends; 3: no sysroot paths in its qmake module
 PKGREL['kwin'] = 1   # X11 on: in KWin 6.6 it also switches Xwayland support, which startplasma asks for
 PKGREL['sddm'] = 4   # 1: QML components back from the host Qt's qml dir; 2: PAM services; 3: greeter on VT 7, clear of getty-tty1;
-                    # 4: UID_MAX given (it read the build machine's /etc/login.defs, which melon doesn't have; 60000 as Ubuntu's)
+                    # 4: UID_MAX given (it read the build machine's /etc/login.defs, which Valence doesn't have; 60000 as Ubuntu's)
 PKGREL['qcoro'] = 1   # shared libraries instead of static ones
 PKGREL['qca'] = 2   # relocatable CMake export (POST below)
 PKGREL['breeze'] = 1   # drops two unused sizes of the default "Next" wallpaper (POST below)
@@ -126,7 +126,7 @@ PRE = {
 
 # extra package() steps
 POST = {
-    # SDDM's PAM services in melon's scheme (its own files include Arch's system-login); base-session has
+    # SDDM's PAM services in Valence's scheme (its own files include Arch's system-login); base-session has
     # pam_elogind, which registers the login session and creates XDG_RUNTIME_DIR for KWin's Wayland socket
     'sddm': " install -d $pkgdir/etc/pam.d;"
             " printf 'auth\\tinclude\\tbase-auth\\naccount\\tinclude\\tbase-account\\npassword\\tinclude\\tbase-password\\nsession\\tinclude\\tbase-session\\n' > $pkgdir/etc/pam.d/sddm;"
@@ -160,7 +160,7 @@ def write(name, deb, args, kind):
     if kind == 'qt':
         lines.append('pkg_dev(){ default_dev; amove usr/lib/qt6/mkspecs usr/lib/qt6/metatypes usr/lib/qt6/modules usr/lib/qt6/sbom; }')
     d = f'{M}/recipes/{name}'; os.makedirs(d, exist_ok=True)
-    open(f'{d}/MELONBUILD', 'w').write('\n'.join(lines) + '\n')
+    open(f'{d}/VALENCEBUILD', 'w').write('\n'.join(lines) + '\n')
 
 for row in ORDER: write(*row)
 print(' '.join(r[0] for r in ORDER))

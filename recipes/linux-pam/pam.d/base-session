@@ -1,4 +1,4 @@
-# basic PAM configuration for melon.
+# basic PAM configuration for Valence.
 
 session include base-session-noninteractive
 

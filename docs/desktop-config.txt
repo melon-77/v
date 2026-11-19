@@ -1,5 +1,5 @@
 #
-# melon desktop ISO configuration (the owner's answers; change only with their approval)
+# Valence desktop ISO configuration (the owner's answers; change only with their approval)
 #
 CONFIG_AUDIENCE="friends"
 CONFIG_FIRST_PRIORITY="desktop browser install"
@@ -19,7 +19,7 @@ CONFIG_MEDIA="vlc"
 CONFIG_GAME_LAUNCHERS="steam prism"
 CONFIG_GAME_TOOLS="gamemode mangohud controllers"
 CONFIG_GAMES_ON_ISO="firstboot"
-CONFIG_THEME="melon_dark"
+CONFIG_THEME="valence_dark"
 CONFIG_BRANDING="wallpaper splash sddm grub kickoff"
 CONFIG_FONTS="noto"
 CONFIG_PANEL_LAYOUT="bottom"

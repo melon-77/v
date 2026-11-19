@@ -1,12 +1,12 @@
 #!/bin/bash
 # publish-repo.sh: publish the package repository (repo/<arch>/) on GitHub.
 #
-# The packages live on the "packages" branch of github.com/melon-77/melon-os as ONE commit that is replaced
+# The packages live on the "packages" branch of github.com/melon-77/valence as ONE commit that is replaced
 # on every publish (force push), so the git history never fills up with old binaries. GitHub serves the
 # files at
-#     https://raw.githubusercontent.com/melon-77/melon-os/packages/<arch>/Packages.adb
+#     https://raw.githubusercontent.com/melon-77/valence/packages/<arch>/Packages.adb
 # which is what installed systems have in /etc/apk/repositories. Every package and the index are signed
-# with keys/melon-signing.rsa, so the hosting doesn't need to be trusted.
+# with keys/valence-signing.rsa, so the hosting doesn't need to be trusted.
 #
 # GitHub refuses files over 100 MB; split big packages (see linux-firmware) before publishing.
 set -euo pipefail
@@ -17,7 +17,7 @@ rm -rf $W; mkdir -p $W; cd $W
 git init -q -b packages
 for d in $REPO/*/; do
   a=$(basename $d); [ -f $d/Packages.adb ] || continue
-  big=$(find $d -name '*.apk' -size +103809024c)   # 99 MiB in bytes: BusyBox find (melon) has no M suffix
+  big=$(find $d -name '*.apk' -size +103809024c)   # 99 MiB in bytes: BusyBox find (Valence) has no M suffix
   [ -z "$big" ] || { echo "publish-repo: over GitHub's 100 MB limit: $big" >&2; exit 1; }
   # hard links save the copy, but the kernel refuses them for files another user owns (protected_hardlinks),
   # and packages built with sudo belong to root: link or copy each file on its own
@@ -25,15 +25,15 @@ for d in $REPO/*/; do
   echo "$a: $(ls $a/*.apk | wc -l) packages, $(du -sh $a | cut -f1)"
 done
 cat > README.md <<'EOF'
-# melon package repository
+# Valence package repository
 
-This branch is the apk repository for melon Linux, not source code. It is rewritten on every publish.
+This branch is the apk repository for Valence Linux, not source code. It is rewritten on every publish.
 
-    https://raw.githubusercontent.com/melon-77/melon-os/packages/x86_64/Packages.adb
+    https://raw.githubusercontent.com/melon-77/valence/packages/x86_64/Packages.adb
 
-Packages and index are signed with the melon key (`keys/melon-signing.rsa.pub` on the main branch).
+Packages and index are signed with the Valence key (`keys/valence-signing.rsa.pub` on the main branch).
 EOF
 git add -A
-git -c user.name="melon repo" -c user.email="noreply@github.com" commit -q -m "melon packages $(date -u +%Y-%m-%d)"
+git -c user.name="Valence repo" -c user.email="noreply@github.com" commit -q -m "Valence packages $(date -u +%Y-%m-%d)"
 git push -q -f "$URL" packages
-echo "published: https://raw.githubusercontent.com/melon-77/melon-os/packages/"
+echo "published: https://raw.githubusercontent.com/melon-77/valence/packages/"

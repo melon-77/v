@@ -1,6 +1,6 @@
 #!/bin/bash
 # fetch-sources.sh: download every source file listed in sources/MANIFEST.tsv and check its sha256.
-# For a new build machine; the files are the same ones the melon packages were built from.
+# For a new build machine; the files are the same ones the Valence packages were built from.
 #   Ubuntu source archive (apt-get source, falling back to Launchpad's permanent file store),
 #   Ubuntu archive pool (.debs), git tags on GitHub, and a few tarballs from upstream sites.
 set -uo pipefail

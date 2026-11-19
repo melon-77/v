@@ -1,6 +1,6 @@
 #!/bin/sh
 exec 2>&1
-# Stage 1 starts a udevd for the boot coldplug and, unless the kernel option melon.udev=sync is set, leaves it running
+# Stage 1 starts a udevd for the boot coldplug and, unless the kernel option valence.udev=sync is set, leaves it running
 # while the services start: GPU, Wi-Fi and sound drivers finish loading later. Adopt it instead of starting a second one,
 # so udev never restarts and no event is lost. This service stays up as long as that udevd does; stopping or restarting
 # the service (TERM) stops the udevd, and the next run starts a fresh one.

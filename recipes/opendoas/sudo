@@ -1,5 +1,5 @@
 #!/bin/sh
-# melon's sudo: understands the everyday sudo options and runs them through doas.
+# Valence's sudo: understands the everyday sudo options and runs them through doas.
 #   sudo CMD...    sudo -u USER CMD...    sudo -i    sudo -s    sudo -e FILE    sudo -k    sudo -v    sudo -n
 user= login= shell= nonint= edit=
 while [ $# -gt 0 ]; do
@@ -15,10 +15,10 @@ while [ $# -gt 0 ]; do
     -k|-K|--reset-timestamp|--remove-timestamp) exec doas -L ;;
     -v|--validate) exec doas $nonint true ;;
     -l|--list) cat /etc/doas.conf 2>/dev/null || echo "sudo: run as root to see the rules in /etc/doas.conf"; exit 0 ;;
-    -V|--version) echo "melon sudo (doas $(doas -h 2>&1 | head -1 | tr -d '\n'))"; exit 0 ;;
+    -V|--version) echo "Valence sudo (doas $(doas -h 2>&1 | head -1 | tr -d '\n'))"; exit 0 ;;
     -h|--help) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; break ;;
-    -*) echo "sudo: option $1 isn't supported here (melon's sudo runs doas; try: doas $*)" >&2; exit 1 ;;
+    -*) echo "sudo: option $1 isn't supported here (Valence's sudo runs doas; try: doas $*)" >&2; exit 1 ;;
     *) break ;;
   esac
 done

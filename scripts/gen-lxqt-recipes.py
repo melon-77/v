@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate MELONBUILD recipes for LXQt 2.4, the desktop of melon's 32-bit (i686) desktop edition.
+"""Generate VALENCEBUILD recipes for LXQt 2.4, the desktop of Valence's 32-bit (i686) desktop edition.
 
 All of them are CMake projects from LXQt's GitHub releases, cross-compiled like the KDE recipes
 (gen-kde-recipes.py): Qt's host tools (moc, lrelease, ...) come from hosttools/qt6 (QT_HOST_PATH).
@@ -28,7 +28,7 @@ ORDER = [
  ('lxqt-globalkeys', '2.4.0', '', True, 'Global keyboard shortcuts for LXQt'),
  ('libsysstat', '1.1.0', '', True, 'System statistics for the LXQt panel'),
  ('libfm-qt', '2.4.0', '', True, 'File management library for LXQt (PCManFM-Qt, file dialogs)'),
- # the network monitor and CPU load plugins need libstatgrab, which melon doesn't have (the system statistics plugin
+ # the network monitor and CPU load plugins need libstatgrab, which Valence doesn't have (the system statistics plugin
  # shows CPU and network load with libsysstat)
  ('lxqt-panel', '2.4.0', ' -DNETWORKMONITOR_PLUGIN=OFF -DCPULOAD_PLUGIN=OFF', True, 'The LXQt panel'),
  ('pcmanfm-qt', '2.4.0', '', False, 'PCManFM-Qt, the LXQt file manager and desktop'),
@@ -36,7 +36,7 @@ ORDER = [
  ('lxqt-themes', '2.4.0', '', False, 'Themes, graphics and icons of LXQt'),
  # libproc2: procps-ng's library, built without its programs (BusyBox's stay)
  ('lxqt-session', '2.4.0', ' -DWITH_LIBUDEV=ON', False, 'The LXQt session manager'),
- # the calculator needs muparser and the VirtualBox runner is for VirtualBox hosts: neither in melon (no-math.patch)
+ # the calculator needs muparser and the VirtualBox runner is for VirtualBox hosts: neither in Valence (no-math.patch)
  ('lxqt-runner', '2.4.0', ' -DRUNNER_MATH=OFF -DRUNNER_VBOX=OFF', False, 'LXQt application launcher (Alt+F2)'),
  ('lxqt-notificationd', '2.4.0', '', False, 'LXQt notification daemon'),
  ('lxqt-policykit', '2.4.0', '', False, 'LXQt PolicyKit agent (asks for passwords)'),
@@ -58,7 +58,7 @@ def write(name, ver, extra, dev, desc):
     lines.append(f'build(){{ cmake_setup -B build {QT}{extra}; ninja -C build -j$JOBS; }}')
     lines.append('package(){ DESTDIR=$pkgdir ninja -C build install; rm -rf $pkgdir/usr/share/doc $pkgdir/usr/share/man; }')
     d = f'{M}/recipes/{name}'; os.makedirs(d, exist_ok=True)
-    open(f'{d}/MELONBUILD', 'w').write('\n'.join(lines) + '\n')
+    open(f'{d}/VALENCEBUILD', 'w').write('\n'.join(lines) + '\n')
 
 for row in ORDER: write(*row)
 print(' '.join(r[0] for r in ORDER))

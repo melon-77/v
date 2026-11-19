@@ -1,7 +1,7 @@
 #!/bin/bash
 # host-qt.sh: build the Qt 6 host tools (moc, rcc, uic, qsb, qmlcachegen, qtwaylandscanner, lrelease, ...)
-# for the build machine. Cross-compiling Qt and KDE for melon requires host tools of the exact same
-# Qt version (QT_HOST_PATH). Installed to hosttools/qt6; nothing from here ships in melon.
+# for the build machine. Cross-compiling Qt and KDE for Valence requires host tools of the exact same
+# Qt version (QT_HOST_PATH). Installed to hosttools/qt6; nothing from here ships in Valence.
 set -euo pipefail
 M=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 QV=6.10.2
