@@ -4,10 +4,11 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 [Melon Linux](https://github.com/melon-77/melon-os): the same engineering, without the jokes, and with a handful
 of fixes where Melon chose small over sensible.
 
-Status, 18 November 2026: phase 1 is done. Melon's tree (`main` at `8849e5a`) is in this repository without its joke
-layer and under the new name, with Valence's own signing key and logo. Still on musl, the cross toolchain, the base
-system and the console ISO build from it, and that ISO passes the QEMU tests: install and boot on BIOS, boot on UEFI,
-an encrypted install and its boot, and dual boot next to Windows. The desktop has not been built. Phase 2 is next.
+Status, 18 November 2026: phase 1 is done and phase 2 is half done. The base system is on glibc 2.44: the cross
+toolchain, the 50 recipes of the console ISO and the ISO build, and the ISO passes all six console tests in QEMU
+(install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next to Windows). BusyBox
+still provides the commands; the GNU tools are the second half of phase 2. The recipes beyond the base (the
+desktop, the developer tools) have not been rebuilt on glibc. Nothing later has started.
 
 ## Why it exists
 
