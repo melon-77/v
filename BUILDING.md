@@ -110,12 +110,14 @@ Splitting out the documentation (phase 3, the same day) rebuilt 41 of them in 11
 and added mandoc, `docs` and `lang`. The ISO is still 405 MB. The six tests took 6 minutes with the new
 documentation steps.
 With the builder that orders builds itself (phase 4, the same day): from an empty repository and a sysroot as
-`toolchain.sh` leaves it, `scripts/valence-build --edition console` built the 65 recipes the console ISO needs (62
-are on it; the "64" above counted xz and mpg123, which the old list built and nothing on the ISO uses) in 26
-minutes, each in a clean sysroot. Run again, it built nothing, in a few seconds. The six tests took 6
+`toolchain.sh` leaves it, `scripts/valence-build --edition console` built the 65 recipes the console ISO needs (60
+are on it, in the system image or the ISO's package repository: the kernel headers, expat, mandoc, `docs` and `lang`
+are built for it without being on it. The "64" above counted xz and mpg123, which the old list built and nothing on
+the ISO uses; a "62" that stood here and in the other documents until phase 5 counted mandoc, `docs` and `lang` in)
+in 26 minutes, each in a clean sysroot. Run again, it built nothing, in a few seconds. The six tests took 6
 minutes.
 With the Btrfs root and snapshots (phase 5, the same day): btrfs-progs is new, and xfsprogs, with the two libraries
-only it used, is no longer built for the console ISO, which is now 58 recipes and 408 MB. The kernel was
+only it used, is no longer built for the console ISO, which is now 63 recipes built and 58 on it, and 408 MB. The kernel was
 rebuilt with Btrfs built in (13 minutes). There are eight console tests now: the two `rollback` ones start the VM
 five times each, and the eight took 13 minutes.
 
