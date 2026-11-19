@@ -83,6 +83,8 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   `toolchain.sh` builds binutils, GCC and glibc for `x86_64-valence-linux-gnu`. Rebuild the base on it
   (layout, kernel headers, glibc, GCC runtime, zlib, zstd, OpenSSL, apk-tools, the shell and core tools, runit,
   GRUB). Delete the musl-only patches and workarounds as each recipe is rebuilt.
+  In two halves, so a failure points at one change: first glibc with BusyBox still providing every command, tests
+  green; then the GNU tools on the installed system (see "Decided" below), tests green again.
   *Done when:* the console ISO boots in QEMU on BIOS and on UEFI, installs, and the installed system can
   `apk add` a package.
 
@@ -113,12 +115,19 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   Signed ISOs with checksums.
   *Done when:* someone who has never seen Melon can install Valence from the guide alone.
 
+- [ ] **8. A 64-bit ARM edition for Raspberry Pi.**
+  A second architecture, `aarch64-valence-linux-gnu`, next to x86_64 in the same tree (the way Melon carried its
+  32-bit edition): cross toolchain, the base system, a Pi kernel and firmware, and a disk image to write to an SD
+  card instead of an ISO. It needs the build to stop running freshly built programs directly on the build machine,
+  which phase 2 has to solve for glibc anyway, so it starts after phase 2. Console system first; the desktop follows
+  phase 6. Assumed: the 64-bit boards (Pi 3, 4, 5, Zero 2 W), not the 32-bit ones.
+  *Done when:* the image boots on a Raspberry Pi 4 to a login prompt, gets a network address, and can `apk add` a
+  package; and the same image boots in QEMU as an automatic test.
+
 ## Not decided yet
 
 These are open on purpose. Each gets settled before the phase that needs it.
 
-- **Core tools.** Melon uses BusyBox for the whole userland. The alternative is the full GNU tools on the
-  installed system with BusyBox only in the initramfs, which fits glibc and breaks fewer scripts. (Phase 2.)
 - **The 32-bit edition.** Melon has an i686 build with LXQt for old netbooks. Carry it over, or leave it with
   Melon? (After phase 6.)
 - **Steam.** Native Steam needs 32-bit libraries next to the 64-bit ones, which is a lot of extra packages.
@@ -128,6 +137,13 @@ These are open on purpose. Each gets settled before the phase that needs it.
 - **How rollback is offered.** A command, a boot menu entry, or both. (Phase 5.)
 - **Hosting.** Where the package repository and the ISOs live.
 - **Website**, and the font for the wordmark (the current one is a stand-in).
+
+## Decided
+
+- **Core tools: the GNU tools on the installed system** (18 November 2026). coreutils, findutils, grep, sed, tar,
+  gzip, diffutils, less, procps, iproute2 and shadow take over the command names, the way gawk and bc already do.
+  BusyBox stays installed for the initramfs and for the small daemons the services run (getty, DHCP, mdev, the
+  loggers, cron, time sync).
 
 ## How the work is done
 
