@@ -60,7 +60,10 @@ elif i686:
     cmd += ['-cpu', 'n270']   # the Intel Atom N270 of the netbooks the 32-bit edition is for (MSI Wind U100): SSE2/SSSE3, no 64-bit
 else:
     # software emulation: one thread per virtual CPU, and every CPU feature TCG has (Mesa and Qt want the newer ones)
-    cmd += ['-accel', 'tcg,thread=multi', '-cpu', 'max']
+    # No KVM: software emulation. glibc picks AVX2 versions of memcpy, strlen and friends when the CPU offers AVX2, and
+    # QEMU emulates those instructions slowly: the install's copy step took 107 s with them and 74 s without (the same
+    # step with musl, which has no such versions: 57 s). On real CPUs and under KVM they are the faster ones.
+    cmd += ['-accel', 'tcg,thread=multi', '-cpu', 'max,avx=off,avx2=off']
 if uefi:
     cmd += ['-bios', '/usr/share/ovmf/OVMF.fd']
 if vmware:
