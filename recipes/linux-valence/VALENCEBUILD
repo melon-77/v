@@ -1,6 +1,6 @@
 pkgname=linux-valence
 pkgver=7.0.0
-pkgrel=5
+pkgrel=6
 pkgdesc="Linux kernel for Valence (generic x86_64 flavour)"
 license=GPL-2.0-only
 url=https://kernel.org

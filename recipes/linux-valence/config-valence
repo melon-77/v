@@ -75,7 +75,10 @@ CONFIG_XFS_FS=y
 CONFIG_XFS_POSIX_ACL=y
 CONFIG_XFS_ONLINE_SCRUB=y
 CONFIG_EXT4_FS=y
-CONFIG_BTRFS_FS=m
+# Btrfs is the root filesystem (ROADMAP.md, phase 5) and installed systems boot without an initramfs, so it is built
+# in. XFS stays built in for the systems installed from the first test ISOs, whose root is XFS.
+CONFIG_BTRFS_FS=y
+CONFIG_BTRFS_FS_POSIX_ACL=y
 CONFIG_VFAT_FS=y
 CONFIG_FAT_DEFAULT_UTF8=y
 CONFIG_NLS_CODEPAGE_437=y
