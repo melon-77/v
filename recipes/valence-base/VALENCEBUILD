@@ -1,6 +1,6 @@
 pkgname=valence-base
 pkgver=0.1
-pkgrel=37
+pkgrel=38
 pkgdesc="Valence base system: init scripts, services, configuration and tools"
 license=MIT
 depends=(valence-layout musl busybox bash runit apk-tools ncurses-terminfo-base util-linux opendoas)

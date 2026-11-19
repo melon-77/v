@@ -62,7 +62,10 @@ recipes/<name>/VALENCEBUILD   one directory per recipe (see below)
 recipes/<name>/*.patch      applied automatically with patch -p1, in name order
 recipes/<name>/<pkg>.post-install etc.   apk scripts for (sub)package <pkg>
 iso-files/init          live initramfs /init
-branding/               logo (transparent PNGs)
+branding/               the logo: valence-logo.svg and transparent PNGs, written by art/logo.py
+art/logo.py             draws the logo (a bismuth hopper crystal seen straight down); `art/logo.py --export branding`
+                        needs cairosvg. The copies in recipes (icons, Calamares branding) are made from branding/
+ROADMAP.md              the plan: what Valence keeps from Melon, what changes, the phases and their "done when"
 recipes/calamares-valence/    graphical installer: Calamares settings, branding, job configs, finishing scripts (stage 2)
 ```
 
@@ -464,7 +467,9 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
   "Install Valence" icon runs `valence-install-gui`, which starts Calamares as root through doas.
 - **Valence's look (valence-desktop):** Plasma style `valence`, colours ValenceDark, Konsole profile Valence, SDDM theme `valence`
   (its own QML, `usr/share/sddm/themes/valence`), GRUB theme `usr/share/valence/grub/themes/valence` (the desktop ISO uses
-  it too). The scripts that drew these images (`art/`) are no longer in the tree; git history has them.
+  it too). **Still Melon's pictures:** the wallpaper, the splash screen, the login screen's background, the boot menu's
+  background and the green and orange colour scheme were drawn for Melon and are replaced in the desktop phase
+  (ROADMAP.md, phase 6). The logo, the icons made from it, `/etc/issue` and `valencefetch` are already Valence's.
 - **Calamares runs Valence's own jobs** (`cal-prepare`, `cal-finish` in `calamares-valence`): Calamares'
   users job calls shadow's `useradd`/`usermod`/`groupadd`, which Valence doesn't have, so `cal-prepare`
   puts BusyBox-backed shims into the target's `/usr/local/bin` and `cal-finish` removes them.
@@ -572,9 +577,8 @@ firmware is its own package for that reason). Publish after building packages pe
 
 ## Releases
 
-Releases are named **Valence <version> “<Valence variety>”**, the varieties in alphabetical order: 0.1 “Antalya”,
-0.2 “Bailan”, then 0.3 “Cantaloupe”, 0.4 “Dudaim”, 0.5 “Esfahan”, 0.6 “Fukui”, 0.7 “Galia”, 0.8 “Honeydew”, … (the
-owner's choice, 29 September 2026). Tags are `v<version>` from 0.3 on (0.1 and 0.2 kept their date tags). A release
+Valence has had no release yet, and how releases are named is not decided (Melon named its releases after fruit
+varieties; that scheme stayed with Melon). Tags are `v<version>`. A release
 is marked Latest, carries every ISO and `SHA256SUMS`,
 has notes written for users (what's new, which file to download, `doas apk upgrade` for installed systems), and the
 release it replaces is retitled "(superseded)" with a link to the new one.
