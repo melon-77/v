@@ -567,9 +567,9 @@ shows the real sizes.
 
 ## Package repository (online)
 
-`scripts/publish-repo.sh` puts `repo/<arch>/` on the `packages` branch of github.com/melon-77/valence (one
+`scripts/publish-repo.sh` puts `repo/<arch>/` on the `packages` branch of github.com/melon-77/v (one
 commit, force-pushed each time), served as
-`https://raw.githubusercontent.com/melon-77/valence/packages/<arch>/Packages.adb`. The base URL is in
+`https://raw.githubusercontent.com/melon-77/v/packages/<arch>/Packages.adb`. The base URL is in
 `/usr/share/valence/repo-url` (valence-base); the installers write it into `/etc/apk/repositories` before the
 offline copy from the ISO, and the live ISO uses it too. Everything is signed with the Valence key, so the
 host doesn't need to be trusted. GitHub rejects files over 100 MB: split big packages (Intel Bluetooth

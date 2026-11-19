@@ -17,10 +17,10 @@ strings:
     versionedName:       Valence Linux (rolling)
     shortVersionedName:  Valence
     bootloaderEntryName: valence
-    productUrl:          https://github.com/melon-77/valence
-    supportUrl:          https://github.com/melon-77/valence/issues
-    knownIssuesUrl:      https://github.com/melon-77/valence/issues
-    releaseNotesUrl:     https://github.com/melon-77/valence
+    productUrl:          https://github.com/melon-77/v
+    supportUrl:          https://github.com/melon-77/v/issues
+    knownIssuesUrl:      https://github.com/melon-77/v/issues
+    releaseNotesUrl:     https://github.com/melon-77/v
 
 images:
     productLogo:         "logo.png"
