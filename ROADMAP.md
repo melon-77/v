@@ -4,9 +4,10 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 [Melon Linux](https://github.com/melon-77/melon-os): the same engineering, without the jokes, and with a handful
 of fixes where Melon chose small over sensible.
 
-Status, 18 November 2026: phase 1 is under way. Melon's tree (`main` at `8849e5a`) is in this repository without
-its joke layer and under the new name, with Valence's own signing key and logo. Nothing has been built or booted
-yet.
+Status, 18 November 2026: phase 1 is done. Melon's tree (`main` at `8849e5a`) is in this repository without its joke
+layer and under the new name, with Valence's own signing key and logo. Still on musl, the cross toolchain, the base
+system and the console ISO build from it, and that ISO passes the QEMU tests: install and boot on BIOS, boot on UEFI,
+an encrypted install and its boot, and dual boot next to Windows. The desktop has not been built. Phase 2 is next.
 
 ## Why it exists
 
@@ -72,7 +73,7 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
 
 - [x] **0. Name, logo, plan.** This file.
 
-- [ ] **1. Bring Melon's engineering over.**
+- [x] **1. Bring Melon's engineering over.**
   Copy the toolchain, build and ISO scripts, the QEMU tests, the signing setup and the ordinary recipes
   (about 430). Rename `melon` to `valence` throughout: the target triple, `melon-build`, `melon-base`,
   `melon-layout`, `linux-melon` and the rest. Leave out everything listed under "The joke layer goes".

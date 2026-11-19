@@ -97,9 +97,18 @@ Measured on that laptop (12 jobs): `host-setup.sh` about 35 minutes for apt and 
 then 50 minutes for the host Qt; cross toolchain 14 to 21 minutes; `linux-valence` 22 minutes; `grub` 3 minutes; small recipes seconds;
 the console ISO 14 seconds and the desktop ISO about a minute (they install the published packages from `repo/`).
 
-Sources that failed here and what worked: `ftp.gnu.org` did not answer at all (`https://mirrors.kernel.org/gnu/<project>/<file>` did;
-check the sha256 against `sources/MANIFEST.tsv` before using a file from a mirror), and a pinned Ubuntu `.deb` that had left the archive
-pool (`ovmf-generic_2025.11-3ubuntu7.2_all.deb`) was still on `https://launchpad.net/ubuntu/+archive/primary/+files/<name>`.
+Valence's first build, on an HP Victus 15 (i5-12450H, 12 threads, 32 GB, the same Windows 10 edition, `processors=12` in
+`.wslconfig`; 18 November 2026): the sources are 4.9 GB. With the cross toolchain and the host Qt compiling side by side
+(12 jobs each) the toolchain took 18 minutes and the host Qt 31. The 39 recipes of the console ISO then took 32 minutes,
+14 of them `linux-valence`; the console ISO 7 seconds; the six console tests (`live`, `disk`, `disk --uefi`, `live --luks`,
+`disk --luks`, `dualboot`) five minutes together, without KVM.
+
+Sources that fail, and what `fetch-sources.sh` does about it: `ftp.gnu.org` often does not answer (on one run it served nine
+files and then stalled on the tenth for good), and pinned Ubuntu `.deb`s leave the archive pool when Ubuntu updates the package
+(three had by November 2026: `ovmf-generic`, `ca-certificates`, `linux-firmware-amd-graphics`). The script gives up on a stalled
+download after a minute and falls back by itself: `https://mirrors.kernel.org/gnu/<project>/<file>` for GNU's files, Launchpad's
+file store (`https://launchpad.net/ubuntu/+archive/primary/+files/<name>`) for `.deb`s. Every file is still checked against its
+sha256 in `sources/MANIFEST.tsv`, whichever server it came from.
 `apt` prints "Job for systemd-binfmt.service failed" in WSL: harmless.
 
 ## Steps (Ubuntu 24.04 or WSL2)
