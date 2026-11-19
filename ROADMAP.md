@@ -87,10 +87,11 @@ On the installed system apk gives way to a package manager written for Valence: 
 watch, and built around one idea from GoboLinux, that every program lives in a folder of its own. The builder,
 the recipes and the signed packages stay as they are. Phase 9 has the design.
 
-**8. The system can be described in one file.**
-A proposal (19 November 2026). The packages, the services, the users and the settings of a system are written in
-one file, and one command makes the system match it, as NixOS does with `configuration.nix`. It stands on the
-snapshots of point 4, not on a store like Nix's. Phase 10 has the design.
+**8. A file you can throw in to get the system you want.**
+A proposal (19 November 2026). Instead of installing and setting up everything by hand, you write what you want in
+one short file (`packages = steam, firefox, nano`, the groups a user is in, the services that run), and the
+installer, or one command on a running system, does it. It is a convenience and not a specification of the system:
+it adds what it lists and leaves the rest alone. Phase 10 has the design.
 
 ## Roadmap
 
@@ -176,26 +177,33 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   Open: its name. Whether `-dev`, `-doc` and `-lang` parts get folders of their own or live inside the program's
   folder. And when: before the desktop, the desktop is fitted to the layout once.
 
-- [ ] **10. A system described in one file.**
-  A proposal, put here on 19 November 2026; the design below is a starting point. One file says what the system
-  is: its packages, the services that run, the users and their groups, the host name and time zone, kernel
-  options. One command makes the system match the file, the way `nixos-rebuild` does with `configuration.nix`.
-  It stands on phase 5 and needs nothing later. The command makes a writable copy of the system, as the boot menu's
-  snapshot entries do; applies the file inside the copy (apk for the packages, whose list `/etc/apk/world` already
-  is; links in `/var/service` for the services; shadow's tools for the users); and swaps the copy in as the system
-  that starts by default, from the next start on, as a rollback does. If a step fails, the copy is thrown away and
-  the running system was never touched. Each apply is one more entry in the boot menu, so going back is what phase
-  5 already does.
-  What it is not: Nix. The repository is rolling, so the same file gives newer packages next month unless it also
-  pins the repository to a date. What was done by hand stays (an edit in `/etc`, a package added with apk), outside
-  the things the file manages. The format is a plain list of settings, not a language. Several versions of a
-  program side by side, and environments per user, need a store: the folders of phase 9 are where those could come
-  from, and that package manager could take the same file as its input.
-  In stages: packages and services first; then users, the host name and the rest; then the installers write the
-  file for a new system, so that every install starts with one.
-  *Done when:* a QEMU test installs a system, changes the file (a package and a service added, another package
-  removed), applies it, restarts into a system that matches the file, and gets the earlier one back from the boot
-  menu; and an apply that is made to fail leaves the running system and the default as they were.
+- [ ] **10. A file you can throw in to get the system you want.**
+  A proposal, put here on 19 November 2026; the design below is a starting point. What is wanted, in the owner's
+  words: "a file you can throw in to just get what you want", instead of installing everything by hand, "rather
+  than a reproducible system". A sketch of one:
+
+      packages = steam, firefox, nano
+      services = sshd
+      hostname = valence
+      user.jcole.groups = wheel, audio, video
+
+  It is a list of wishes. Applying it does what you would otherwise do by hand, a line at a time: the packages are
+  installed, the services enabled, the user put into the groups, the settings set. What is already so is left as
+  it is, so applying a file a second time changes nothing. What the file does not mention is left alone too:
+  nothing is removed because a file leaves it out. That is the difference from NixOS's `configuration.nix`, which
+  is the whole truth about a system and builds it the same way every time; it was considered and is not what is
+  wanted here.
+  Where a file goes in: the installers take one (a file beside the ISO's own on the stick, or one named when the
+  installer starts), so a new system comes up with everything on the list; and one command applies a file to a
+  running system, at once, with no restart. A snapshot is taken first (phase 5), so one rollback takes back a file
+  that turned out wrong.
+  A name under `packages` is looked for in the package repository first, and then among the apps Valence gets
+  from Flathub, which is where Steam and Firefox come from today.
+  In stages: packages, services, groups and the host name on a running system; then the installers; then whatever
+  else people set by hand after every install and would rather write down once.
+  *Done when:* a QEMU test installs a system with a file thrown in and finds its packages, services and groups
+  there; applies a second file on the running system and has everything on it, with nothing gone that was there
+  before; applies it again and nothing changes; and one rollback takes the second file's changes back.
 
 ## Not decided yet
 
@@ -217,13 +225,16 @@ These are open on purpose. Each gets settled before the phase that needs it.
   alternative is man-db with groff, about 15 MB, which is what Arch and Debian use.
 - **Documentation on the ISO.** The ISO's own package repository carries only a few extras, so `apk add docs` needs
   the online repository. All 38 `-doc` packages of the base and mandoc together are about 5 MB.
-- **The system file (phase 10).** Its name and the command's, the format, how much it manages beyond packages and
-  services, and whether changes made by hand in what it manages are undone or only reported. And when: it needs
-  only phase 5, so it could be built before the desktop.
+- **The system file (phase 10).** Its name and the command's, the exact format, how a name is matched to a Flathub
+  app, and what it covers beyond packages, services and groups. And when: it needs only phase 5, so the part for
+  packages from the repository could be built before the desktop; Steam and Firefox on a list need the desktop's
+  Flatpak.
 - **Website**, and the font for the wordmark (the current one is a stand-in).
 
 ## Decided
 
+- **The system file is a wish list, not a specification** (19 November 2026). "A file you can throw in to just
+  get what you want", rather than a reproducible system: it adds what it lists and removes nothing. (Phase 10.)
 - **Rollback: both a command and the boot menu, and "however Nix does it"** (19 November 2026). Taken as NixOS's
   behaviour on Btrfs snapshots: the boot menu lists every snapshot and starts the one chosen, without changing what
   starts by default; `valence-snapshot rollback` makes a snapshot the default; what a rollback replaces is kept.
