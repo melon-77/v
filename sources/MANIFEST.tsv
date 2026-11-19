@@ -388,6 +388,7 @@ cataclysm-dda-0.9.1.tar.gz	27e35a0a5181f88f0929bef180ca0465d00e606e569911cb02d97
 cryptsetup-2.8.4.tar.gz	-	link	deb/cryptsetup_2.8.4.orig.tar.gz
 curl-8.18.0.tar.gz	-	link	deb/curl_8.18.0.orig.tar.gz
 dbus-1.16.2.tar.xz	-	link	deb/dbus_1.16.2.orig.tar.xz
+diffutils-3.12.tar.xz	7c8b7f9fc8609141fdea9cece85249d308624391ff61dedaf528fcb337727dfd	url	https://ftp.gnu.org/gnu/diffutils/diffutils-3.12.tar.xz
 dolphin-25.12.3.tar.xz	-	link	deb/dolphin_25.12.3.orig.tar.xz
 dosfstools-4.2.tar.gz	-	link	deb/dosfstools_4.2.orig.tar.gz
 duktape-2.7.0.tar.xz	-	link	deb/duktape_2.7.0+tests.orig.tar.xz
@@ -413,9 +414,11 @@ gmp-6.3.0.tar.xz	-	link	deb/gmp_6.3.0+dfsg.orig.tar.xz
 gnupg-2.4.8.tar.bz2	-	link	deb/gnupg2_2.4.8.orig.tar.bz2
 gpgme-2.0.1.tar.bz2	-	link	deb/gpgme1.0_2.0.1.orig.tar.bz2
 gpgmepp-2.0.0.tar.xz	-	link	deb/gpgmepp_2.0.0.orig.tar.xz
+grep-3.12.tar.xz	2649b27c0e90e632eadcd757be06c6e9a4f48d941de51e7c0f83ff76408a07b9	url	https://ftp.gnu.org/gnu/grep/grep-3.12.tar.xz
 grub-2.14.tar.xz	-	link	deb/grub2_2.14.orig.tar.xz
 gst-plugins-base-1.28.2.tar.xz	-	link	deb/gst-plugins-base1.0_1.28.2.orig.tar.xz
 gstreamer-1.28.2.tar.xz	-	link	deb/gstreamer1.0_1.28.2.orig.tar.xz
+gzip-1.15.tar.xz	9aa0cc780dec156b8282844833b342ab7cb08c25d2cd9a1869cdd0df31deff48	url	https://ftp.gnu.org/gnu/gzip/gzip-1.15.tar.xz
 hack-3.003.tar.gz	-	link	deb/fonts-hack_3.003.orig.tar.gz
 harfbuzz-12.3.2.tar.xz	-	link	deb/harfbuzz_12.3.2.orig.tar.xz
 hicolor-icon-theme-0.18.tar.xz	-	link	deb/hicolor-icon-theme_0.18.orig.tar.xz
@@ -423,6 +426,7 @@ hunspell-1.7.2.tar.gz	-	link	deb/hunspell_1.7.2+really1.7.2.orig.tar.gz
 hwdata-0.394.tar.gz	-	link	deb/hwdata_0.394.orig.tar.gz
 icu-78.2.tar.gz	-	link	deb/icu_78.2.orig.tar.gz
 inih-61.tar.gz	-	link	deb/libinih_61.orig.tar.gz
+iproute2-7.3.0.tar.xz	5c1789d290bba048a6135ed1ab81b0402dd0fb528d1f1421765c42b1fc3d6289	url	https://www.kernel.org/pub/linux/utils/net/iproute2/iproute2-7.3.0.tar.xz
 json-c-0.18.tar.xz	-	link	deb/json-c_0.18+ds.orig.tar.xz
 json-glib-1.10.8.tar.xz	-	link	deb/json-glib_1.10.8+ds.orig.tar.xz
 kactivitymanagerd-6.6.4.tar.xz	-	link	deb/kactivitymanagerd_6.6.4.orig.tar.xz
@@ -505,6 +509,7 @@ kwayland-6.6.4.tar.xz	-	link	deb/kwayland_6.6.4.orig.tar.xz
 kwin-6.6.4.tar.xz	-	link	deb/kwin_6.6.4.orig.tar.xz
 layer-shell-qt-6.6.4.tar.xz	-	link	deb/layer-shell-qt_6.6.4.orig.tar.xz
 lcms2-2.17.tar.gz	-	link	deb/lcms2_2.17.orig.tar.gz
+less-710.tar.gz	d1008fb78dcae1323ddab664bcb352a61f022b1b131bd8018548e021d975ec7a	url	https://www.greenwoodsoftware.com/less/less-710.tar.gz
 libarchive-3.8.5.tar.xz	-	link	deb/libarchive_3.8.5.orig.tar.xz
 libassuan-3.0.2.tar.bz2	-	link	deb/libassuan_3.0.2.orig.tar.bz2
 libatasmart-0.19.tar.xz	-	link	deb/libatasmart_0.19.orig.tar.xz
@@ -669,6 +674,7 @@ sddm-kcm-6.6.4.tar.xz	-	link	deb/sddm-kcm_6.6.4.orig.tar.xz
 sdl3-3.4.2.tar.xz	-	link	deb/libsdl3_3.4.2+ds.orig.tar.xz
 sdl3-image-3.4.0.tar.xz	-	link	deb/libsdl3-image_3.4.0+ds.orig.tar.xz
 sdl3-ttf-3.2.2.tar.xz	-	link	deb/libsdl3-ttf_3.2.2+ds.orig.tar.xz
+sed-4.10.tar.xz	b8e72182b2ec96a3574e2998c47b7aaa64cc20ce000d8e9ac313cc07cecf28c7	url	https://ftp.gnu.org/gnu/sed/sed-4.10.tar.xz
 shared-mime-info-2.4.tar.bz2	-	link	deb/shared-mime-info_2.4.orig.tar.bz2
 sound-theme-freedesktop-0.8.tar.bz2	-	link	deb/sound-theme-freedesktop_0.8.orig.tar.bz2
 spirv-headers-1.4.341.0.tar.gz	-	link	deb/spirv-headers_1.6.1+1.4.341.0.orig.tar.gz
@@ -676,6 +682,7 @@ spirv-tools-2026.1.tar.gz	-	link	deb/spirv-tools_2026.1.orig.tar.gz
 sqlite-3.46.1.tar.xz	-	link	deb/sqlite3_3.46.1.orig.tar.xz
 squashfs-tools-4.7.5.tar.gz	-	link	deb/squashfs-tools_4.7.5.orig.tar.gz
 systemsettings-6.6.4.tar.xz	-	link	deb/systemsettings_6.6.4.orig.tar.xz
+tar-1.35.tar.xz	4d62ff37342ec7aed748535323930c7cf94acf71c3591882b26a7ea50f3edc16	url	https://ftp.gnu.org/gnu/tar/tar-1.35.tar.xz
 udisks2-2.10.91.tar.bz2	-	link	deb/udisks2_2.10.91.orig.tar.bz2
 upower-1.91.1.tar.bz2	-	link	deb/upower_1.91.1.orig.tar.bz2
 userspace-rcu-0.15.6.tar.bz2	-	link	deb/liburcu_0.15.6.orig.tar.bz2
@@ -727,7 +734,9 @@ autoconf-2.73.tar.xz	9fd672b1c8425fac2fa67fa0477b990987268b90ff36d5f016dae57be0d
 automake-1.19.tar.xz	e3e2c2e3abf37898138db5b6c1d1dc35c9160c5978be7947d2c741705251d445	url	https://ftp.gnu.org/gnu/automake/automake-1.19.tar.xz
 autoconf-archive-2024.10.16.tar.xz	7bcd5d001916f3a50ed7436f4f700e3d2b1bade3ed803219c592d62502a57363	url	https://ftp.gnu.org/gnu/autoconf-archive/autoconf-archive-2024.10.16.tar.xz
 file-5.48.tar.gz	ed14656883b23a364b4057c05595d93252da9bc473d30106519519d0da141283	url	https://astron.com/pub/file/file-5.48.tar.gz
+findutils-4.11.0.tar.xz	bfd19cb06cc71f3352d567e90284d8cdac02ac89774bbeadf0b533b0c11432fd	url	https://ftp.gnu.org/gnu/findutils/findutils-4.11.0.tar.xz
 cmake-4.4.3.tar.gz	c46400618b4f1f2b43507f24fb22f3ae830c3416cf23b776e16e1d413aa892f0	url	https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3.tar.gz
+coreutils-9.12.tar.xz	a480198559733e9b3da999e90543ac6f888a2caa544d8d664c5a1f17e528e210	url	https://ftp.gnu.org/gnu/coreutils/coreutils-9.12.tar.xz
 meson-1.12.1.tar.gz	ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743	url	https://github.com/mesonbuild/meson/releases/download/1.12.1/meson-1.12.1.tar.gz
 ninja-1.13.2.tar.gz	974d6b2f4eeefa25625d34da3cb36bdcebe7fbce40f4c16ac0835fd1c0cbae17	url	https://github.com/ninja-build/ninja/archive/refs/tags/v1.13.2.tar.gz
 git-2.56.0.tar.xz	26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3	url	https://www.kernel.org/pub/software/scm/git/git-2.56.0.tar.xz
@@ -763,12 +772,14 @@ NVIDIA-kernel-module-source-615.71.09.tar.xz	b038fe5d70e7c3209459a8121f231543939
 NVIDIA-Linux-x86_64-615.71.09.run	cdceed22bbeb61248d1a6deabc2596673e3a6501698ee71ac8d2fdc28f3b70fe	url	https://download.nvidia.com/XFree86/Linux-x86_64/615.71.09/NVIDIA-Linux-x86_64-615.71.09.run
 rpcsvc-proto-1.4.4.tar.xz	81c3aa27edb5d8a18ef027081ebb984234d5b5860c65bd99d4ac8f03145a558b	url	https://github.com/thkukuk/rpcsvc-proto/releases/download/v1.4.4/rpcsvc-proto-1.4.4.tar.xz
 setuptools-84.0.0-py3-none-any.whl	51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670	url	https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl
+shadow-4.20.3.tar.xz	623be9429f64fa2165bfc5957c6a642ec309c5cf23c0d53855c99f7591922297	url	https://github.com/shadow-maint/shadow/releases/download/4.20.3/shadow-4.20.3.tar.xz
 wheel-0.45.1-py3-none-any.whl	708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248	url	https://files.pythonhosted.org/packages/0b/2c/87f3254fd8ffd29e4c02732eee68a83a1d3c346ae39bc6822dcbcb697f2b/wheel-0.45.1-py3-none-any.whl
 lxqt-build-tools-2.4.0.tar.xz	14999ff954e820a23af44389b9f7c65f9e58b2f1c0a559f0badd38f9b459aee6	url	https://github.com/lxqt/lxqt-build-tools/releases/download/2.4.0/lxqt-build-tools-2.4.0.tar.xz
 libqtxdg-4.4.0.tar.xz	34d25949ae7b6275fb54da46187dd8ba41771600353405b15e53bdc90b9e287a	url	https://github.com/lxqt/libqtxdg/releases/download/4.4.0/libqtxdg-4.4.0.tar.xz
 qtxdg-tools-4.4.0.tar.xz	f21ba4308eac0effd417d910cc4916df7b6202aaeee777b51bb120f7abc6c5ac	url	https://github.com/lxqt/qtxdg-tools/releases/download/4.4.0/qtxdg-tools-4.4.0.tar.xz
 lxqt-menu-data-2.4.0.tar.xz	3487e47562dc19e63358a50c81e51cd0cf1a020397943cadd8db35daeb4866cc	url	https://github.com/lxqt/lxqt-menu-data/releases/download/2.4.0/lxqt-menu-data-2.4.0.tar.xz
 liblxqt-2.4.0.tar.xz	6627215644eb370723536274555743db52baed919db6ffc32ebc2bdf3cf8ee4a	url	https://github.com/lxqt/liblxqt/releases/download/2.4.0/liblxqt-2.4.0.tar.xz
+libmnl-1.0.5.tar.bz2	274b9b919ef3152bfb3da3a13c950dd60d6e2bcd54230ffeca298d03b40d0525	url	https://www.netfilter.org/pub/libmnl/libmnl-1.0.5.tar.bz2
 libdbusmenu-lxqt-0.4.0.tar.xz	b7f94d653559f021932aada76291e933535431a337c39c1a146d0461dd27a103	url	https://github.com/lxqt/libdbusmenu-lxqt/releases/download/0.4.0/libdbusmenu-lxqt-0.4.0.tar.xz
 lxqt-globalkeys-2.4.0.tar.xz	6f7fb82337bd06823f698df5a1e631059e99e544bfa9a1d7c5b67fd01ff9319a	url	https://github.com/lxqt/lxqt-globalkeys/releases/download/2.4.0/lxqt-globalkeys-2.4.0.tar.xz
 libsysstat-1.1.0.tar.xz	996e5e8c43b1364a81a660b56956948c628e919f1d73554df6be152bbec8d430	url	https://github.com/lxqt/libsysstat/releases/download/1.1.0/libsysstat-1.1.0.tar.xz

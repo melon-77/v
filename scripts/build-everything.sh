@@ -20,10 +20,11 @@ fi
   --repositories-file /dev/null add >/dev/null 2>&1 || true
 
 BASE="valence-layout linux-headers glibc gcc-runtime libxcrypt zlib zstd xz openssl apk-tools busybox ncurses bash runit util-linux
+  attr acl pcre2 libmnl coreutils findutils grep sed tar gzip diffutils less procps-ng iproute2 shadow
   userspace-rcu inih xfsprogs grub libnl3 expat dbus wpa_supplicant alsa-lib alsa-utils mpg123 kmod
   opendoas ca-certificates linux-firmware valence-base linux-valence"
-PLUMBING="libffi pcre2 glib libcap duktape linux-pam eudev elogind polkit argp-standalone musl-fts musl-obstack elfutils
-  sqlite json-c popt device-mapper cryptsetup dosfstools squashfs-tools e2fsprogs bzip2 hunspell attr acl lm-sensors libogg libvorbis
+PLUMBING="libffi glib libcap duktape linux-pam eudev elogind polkit argp-standalone musl-fts musl-obstack elfutils
+  sqlite json-c popt device-mapper cryptsetup dosfstools squashfs-tools e2fsprogs bzip2 hunspell lm-sensors libogg libvorbis
   libtool sound-theme-freedesktop libcanberra icu boost-headers python3 readline keyutils gmp mpfr
   opus flac liblc3 libfreeaptx libsndfile flite lua5.4"
 # in the package repository only: Cataclysm: DDA's game data is too big for the ISOs
@@ -56,7 +57,7 @@ BUILDTOOLS2="lz4 ninja cmake meson git nasm tcl rsync
   xorriso mtools scdoc dtc dwarves publicsuffix rpcsvc-proto"
 # LXQt on labwc (wlroots): the 32-bit edition's desktop (X86 below); on 64-bit an extra desktop from the online repository
 # (scripts/gen-lxqt-recipes.py), with Valence's LXQt defaults
-LXQT="fribidi cairo pango libsfdo seatd wlroots labwc libexif libfm-extra menu-cache xdg-user-dirs libxscrnsaver libproc2
+LXQT="fribidi cairo pango libsfdo seatd wlroots labwc libexif libfm-extra menu-cache xdg-user-dirs libxscrnsaver
   $(python3 $M/scripts/gen-lxqt-recipes.py) valence-lxqt"
 ALL=$(printf '%s\n' $BASE $PLUMBING $DEVTOOLS $BUILDTOOLS $GAMES $SIMPLE $BUILDTOOLS2 $GETTEXT $RUST $DESKTOP_LIBS $STEP2 $NVIDIA $RUSTC $KDE $INSTALLERS $LXQT | awk '!seen[$0]++')
 # The 32-bit (i686) edition, for old netbooks and laptops (the owner, 7 October 2026: LXQt as its desktop): the base

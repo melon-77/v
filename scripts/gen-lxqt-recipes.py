@@ -34,7 +34,7 @@ ORDER = [
  ('pcmanfm-qt', '2.4.0', '', False, 'PCManFM-Qt, the LXQt file manager and desktop'),
  ('lxqt-qtplugin', '2.4.0', '', False, 'Qt platform theme that makes Qt programs follow LXQt settings'),
  ('lxqt-themes', '2.4.0', '', False, 'Themes, graphics and icons of LXQt'),
- # libproc2: procps-ng's library, built without its programs (BusyBox's stay)
+ # libproc2: procps-ng's library, a part of the procps-ng recipe (the base system)
  ('lxqt-session', '2.4.0', ' -DWITH_LIBUDEV=ON', False, 'The LXQt session manager'),
  # the calculator needs muparser and the VirtualBox runner is for VirtualBox hosts: neither in Valence (no-math.patch)
  ('lxqt-runner', '2.4.0', ' -DRUNNER_MATH=OFF -DRUNNER_VBOX=OFF', False, 'LXQt application launcher (Alt+F2)'),

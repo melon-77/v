@@ -65,6 +65,20 @@ URL = {  # upstream downloads (Ubuntu 26.04 has Cataclysm: DDA 0.H, Rust 1.93 an
     'm4-1.4.21.tar.xz': 'https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.xz',
     'bison-3.8.2.tar.xz': 'https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz',
     'gawk-5.4.1.tar.xz': 'https://ftp.gnu.org/gnu/gawk/gawk-5.4.1.tar.xz',
+    # the GNU tools and what sits beside them (phase 2). Signatures: the GNU ones against gnu-keyring.gpg; iproute2's
+    # .tar.sign (Stephen Hemminger), shadow's .asc (Alejandro Colomar), less's .sig (Mark Nudelman), libmnl's .sig
+    # (Netfilter Core Team). Every signing key's fingerprint is the one in Arch's PKGBUILD for the package.
+    'coreutils-9.12.tar.xz': 'https://ftp.gnu.org/gnu/coreutils/coreutils-9.12.tar.xz',
+    'findutils-4.11.0.tar.xz': 'https://ftp.gnu.org/gnu/findutils/findutils-4.11.0.tar.xz',
+    'grep-3.12.tar.xz': 'https://ftp.gnu.org/gnu/grep/grep-3.12.tar.xz',
+    'sed-4.10.tar.xz': 'https://ftp.gnu.org/gnu/sed/sed-4.10.tar.xz',
+    'tar-1.35.tar.xz': 'https://ftp.gnu.org/gnu/tar/tar-1.35.tar.xz',
+    'gzip-1.15.tar.xz': 'https://ftp.gnu.org/gnu/gzip/gzip-1.15.tar.xz',
+    'diffutils-3.12.tar.xz': 'https://ftp.gnu.org/gnu/diffutils/diffutils-3.12.tar.xz',
+    'less-710.tar.gz': 'https://www.greenwoodsoftware.com/less/less-710.tar.gz',
+    'iproute2-7.3.0.tar.xz': 'https://www.kernel.org/pub/linux/utils/net/iproute2/iproute2-7.3.0.tar.xz',
+    'shadow-4.20.3.tar.xz': 'https://github.com/shadow-maint/shadow/releases/download/4.20.3/shadow-4.20.3.tar.xz',
+    'libmnl-1.0.5.tar.bz2': 'https://www.netfilter.org/pub/libmnl/libmnl-1.0.5.tar.bz2',
     'glibc-2.44.tar.xz': 'https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz',
     'libxcrypt-4.5.2.tar.xz': 'https://github.com/besser82/libxcrypt/releases/download/v4.5.2/libxcrypt-4.5.2.tar.xz',
     'gperf-3.3.tar.gz': 'https://ftp.gnu.org/gnu/gperf/gperf-3.3.tar.gz',
