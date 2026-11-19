@@ -14,7 +14,7 @@ that orders builds itself, and a Btrfs root with a snapshot before every update.
 plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
 
 Test builds of the console ISO are on the repository's Releases page; there is no online package repository yet. The
-base system is on glibc: the cross toolchain and the 48 recipes the console ISO is made of build on it, in an order
+base system is on glibc: the cross toolchain and the 58 recipes the console ISO is made of build on it, in an order
 the builder works out from the recipes, each in a sysroot holding only what its recipe declares (ROADMAP.md has the
 test status). Its documentation is in packages of its own: a fresh install has no man pages, and `apk add docs`
 from a package repository adds them, with `man`, for everything installed. Its root is Btrfs, and apk takes a

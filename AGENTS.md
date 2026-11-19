@@ -49,7 +49,7 @@ path (rule 60). The signing key can stay where it is:
 ### State of the glibc switch
 
 Valence's C library was musl, as in Melon, and is now glibc (ROADMAP.md, phase 2). The base system builds on glibc:
-the cross toolchain and the 48 recipes the console ISO is made of, the GNU tools among them (with mandoc, `docs` and
+the cross toolchain and the 58 recipes the console ISO is made of, the GNU tools among them (with mandoc, `docs` and
 `lang` beside them, for its documentation). ROADMAP.md has the test status.
 Not converted yet:
 

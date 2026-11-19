@@ -5,7 +5,7 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 of fixes where Melon chose small over sensible.
 
 Status, 19 November 2026: phases 1 to 3 and 5 are done. The base system is on glibc 2.44 and its commands are the
-GNU tools: the cross toolchain, the 48 recipes the console ISO is made of and the ISO build. The ISO passes all
+GNU tools: the cross toolchain, the 58 recipes the console ISO is made of and the ISO build. The ISO passes all
 eight console tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next
 to Windows on UEFI, and two rollback tests), and the installed system adds a package from a repository over the
 network. BusyBox stays for `/bin/sh`, the initramfs and the small daemons. Documentation and translations are
