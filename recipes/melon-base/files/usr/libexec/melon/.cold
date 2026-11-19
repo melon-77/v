@@ -1,0 +1,320 @@
+#!/bin/sh
+# the quick melon installer.
+#
+# Layout (GPT, boots on both BIOS and UEFI):
+#   1  1 MiB   BIOS boot (GRUB core for legacy BIOS)
+#   2  1 GiB   FAT32  -> /boot   (kernel, GRUB, EFI/BOOT/BOOTX64.EFI or BOOTIA32.EFI)
+#   3  rest    XFS    -> /
+#
+# Unattended use (for testing): set MELON_DISK, MELON_HOSTNAME, MELON_ROOTPW, MELON_USER,
+# MELON_USERPW and MELON_YES=1 (and optionally MELON_PROFILE, MELON_WIFI_SSID/MELON_WIFI_PSK,
+# MELON_ALPINE=y to add Alpine's repo as the opt-in tagged repo "@alpine", MELON_ENCRYPT=y with
+# MELON_LUKSPW to encrypt / with LUKS2; /boot stays plain and a small initramfs asks for the passphrase,
+# MELON_NORUST=y to install without anything built with Rust, and whatever depends on it; that earns a wallpaper).
+#
+# This is the quick installer. The desktop ISO's advertised installer is Calamares
+# (with the melon gauntlet); this one installs the same thing in a handful of prompts.
+#   MELON_PROFILE=base     console system
+#   MELON_PROFILE=desktop  everything the desktop ISO installs (KDE Plasma, Wayland, Flatpak, ...)
+set -e
+PATH=/usr/bin
+REPO=${MELON_REPO:-/media/melon/melon/repo}
+TARGET=/mnt/melon
+P=$(printf '\033[1;38;5;212m') B=$(printf '\033[1m') R=$(printf '\033[0m')
+
+say(){ printf '%s=>%s %s%s%s\n' "$P" "$R" "$B" "$*" "$R"; }
+die(){ printf '%s!! %s%s\n' "$P" "$*" "$R" >&2; exit 1; }
+ask(){ # ask VAR "question" [default]   (unattended, MELON_YES=1: questions with a default take it)
+  eval "cur=\${$1:-}"; [ -n "$cur" ] && return 0
+  if [ "${MELON_YES:-}" = 1 ] && [ $# -ge 3 ]; then eval "$1=\$3"; return 0; fi
+  printf '%s?%s %s%s: ' "$P" "$R" "$2" "${3:+ [$3]}"; read -r ans; [ -z "$ans" ] && ans=$3; eval "$1=\$ans"; }
+askpw(){ eval "cur=\${$1:-}"; [ -n "$cur" ] && return 0
+  while :; do printf '%s?%s %s: ' "$P" "$R" "$2"; stty -echo; read -r a; stty echo; echo
+    printf '%s?%s again: ' "$P" "$R"; stty -echo; read -r b; stty echo; echo
+    [ -n "$a" ] && [ "$a" = "$b" ] && break; echo "passwords did not match or were empty"; done; eval "$1=\$a"; }
+
+[ "$(id -u)" = 0 ] || die "needs root"
+SYSIMG=${MELON_SYSIMG:-/media/melon/melon/rootfs.sqfs}
+ARCH=$(apk --print-arch)
+case $ARCH in x86) EFI_TARGET=i386-efi EFI_FILE=BOOTIA32.EFI ;; *) EFI_TARGET=x86_64-efi EFI_FILE=BOOTX64.EFI ;; esac
+[ -f "$SYSIMG" ] || die "melon system image not found at $SYSIMG (are you on the live ISO?)"
+
+# theme music, at 30% volume, for as long as this runs
+ICE_PID=
+if [ -f /usr/share/melon/.ice ] && command -v mpg123 >/dev/null; then
+  # play on the card that has the speakers, not the GPU's HDMI audio (card 0 on many laptops)
+  # no sound card (servers, many VMs) is fine: set -e must not end the install here
+  ICE_CARD=$(melon-sound-default 2>/dev/null || true) ICE_PCM=$(melon-sound-default --pcm 2>/dev/null || true)
+  if [ -n "$ICE_CARD" ]; then
+    if amixer -c "$ICE_CARD" sget Master >/dev/null 2>&1; then
+      amixer -c "$ICE_CARD" -q -M sset Master 30% unmute 2>/dev/null || true
+      for c in PCM Speaker Headphone Front; do amixer -c "$ICE_CARD" -q -M sset "$c" 100% unmute 2>/dev/null || true; done
+    else
+      amixer -c "$ICE_CARD" -q -M sset PCM 30% unmute 2>/dev/null || true
+    fi
+    mpg123 -q --loop -1 -a "$ICE_PCM" /usr/share/melon/.ice >/dev/null 2>&1 &
+    ICE_PID=$!
+  fi
+fi
+stop_ice(){ [ -n "$ICE_PID" ] && kill "$ICE_PID" 2>/dev/null; ICE_PID=; }
+trap stop_ice EXIT
+trap 'stop_ice; exit 130' INT TERM
+[ -t 1 ] && [ -z "${MELON_YES:-}" ] && sh /usr/share/melon/.fall
+cat <<EOF
+  This puts melon on a whole disk, erasing it, or next to Windows or another system in the disk's
+  unallocated space (shrink Windows first, in Windows' Disk Management).
+
+EOF
+say "Disks"
+lsblk -d -n -o NAME,SIZE,MODEL,TYPE | grep -v -E ' (rom|loop)$' | grep -v '^loop' | sed 's/^/   /'
+echo
+ask MELON_DISK "Disk to install to (e.g. sda, nvme0n1, vda)"
+DISK=/dev/${MELON_DISK#/dev/}
+[ -b "$DISK" ] || die "$DISK is not a block device"
+# dual boot: on a UEFI machine, a GPT disk that already has an EFI system partition and enough unallocated space
+# can take melon next to what is there; nothing existing is touched (the EFI partition only gets a melon folder)
+MODE=erase ESP= FREE_START= FREE_SECTORS=
+if [ "$ARCH" != x86 ] && [ -d /sys/firmware/efi ]; then
+  ESP=$(sfdisk -d "$DISK" 2>/dev/null | awk -F'[ ,:]+' 'toupper($0) ~ /TYPE=C12A7328-F81F-11D2-BA4B-00A0C93EC93B/ {print $1; exit}')
+  set -- $(sfdisk -F "$DISK" 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $3 > max {max = $3; s = $1} END {if (max) print s, max}')
+  FREE_START=${1:-} FREE_SECTORS=${2:-0}
+  freemib=$(( FREE_SECTORS * $(blockdev --getss "$DISK") / 1048576 ))
+  if [ -n "$ESP" ] && [ $freemib -ge 20480 ]; then
+    say "$DISK has an EFI system partition ($ESP) and $(( freemib / 1024 )) GiB of unallocated space"
+    ask MELON_MODE "Install melon alongside what is on it, in the free space, or erase the whole disk (alongside/erase)" alongside
+    case $MELON_MODE in alongside|a) MODE=alongside ;; erase|e) MODE=erase ;; *) die "answer alongside or erase" ;; esac
+  elif [ -n "$ESP" ]; then
+    echo "   $DISK has other systems but under 20 GiB of unallocated space: to keep them, shrink one first (Windows:"
+    echo "   Disk Management, 'Shrink Volume') and start again; carrying on erases the whole disk."
+  fi
+fi
+PROFILES=$(ls /usr/share/melon/profiles 2>/dev/null | grep -v "\.services$" | xargs)
+DEFPROFILE=base; [ -f /usr/share/melon/profiles/desktop ] && DEFPROFILE=desktop
+ask MELON_PROFILE "What to install ($PROFILES)" $DEFPROFILE
+[ -f /usr/share/melon/profiles/$MELON_PROFILE ] || die "unknown profile $MELON_PROFILE"
+ask MELON_HOSTNAME "Hostname" melon
+askpw MELON_ROOTPW "Root password"
+ask MELON_USER "Your user name (empty for none)" ""
+[ -n "$MELON_USER" ] && askpw MELON_USERPW "Password for $MELON_USER"
+if ls -d /sys/class/net/*/wireless >/dev/null 2>&1; then
+  ask MELON_WIFI_SSID "Wi-Fi network name (empty to skip)" ""
+  [ -n "$MELON_WIFI_SSID" ] && askpw MELON_WIFI_PSK "Wi-Fi password"
+fi
+ask MELON_ALPINE "Also offer Alpine's packages as an opt-in @alpine repo (y/n)" n
+ask MELON_NORUST "Remove everything built with Rust, and whatever depends on it (y/n)" n
+ENCRYPT=n
+if command -v cryptsetup >/dev/null; then
+  ask MELON_ENCRYPT "Encrypt the system with a passphrase (LUKS) (y/n)" n
+  case $MELON_ENCRYPT in y|Y|yes) ENCRYPT=y; askpw MELON_LUKSPW "Disk encryption passphrase" ;; esac
+fi
+if [ "${MELON_YES:-}" != 1 ]; then
+  if [ $MODE = alongside ]; then
+    printf '\n%sInstall melon into the free space on %s (the other partitions stay as they are)? Type YES:%s ' "$B" "$DISK" "$R"
+  else
+    printf '\n%sErase %s and install melon? Type YES:%s ' "$B" "$DISK" "$R"
+  fi
+  read -r ok; [ "$ok" = YES ] || die "aborted"
+fi
+
+case $DISK in *[0-9]) PP=${DISK}p ;; *) PP=$DISK ;; esac
+say "Partitioning $DISK"
+if [ $MODE = alongside ]; then
+  # two new partitions in the largest free region: /boot (FAT32, extended boot loader type, which Windows leaves alone)
+  # and / ; the existing EFI system partition becomes /boot/efi
+  bootsec=$(( 1073741824 / $(blockdev --getss "$DISK") ))
+  printf 'start=%s, size=%s, type=BC13C2FF-59E6-4262-A352-B275FD6F7172, name="melon-boot"\ntype=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709, name="melon"\n' \
+    "$FREE_START" "$bootsec" | sfdisk -q --append -W always "$DISK"
+  partx -u "$DISK" 2>/dev/null || true; sleep 1; command -v udevadm >/dev/null && udevadm settle 2>/dev/null; mdev -s 2>/dev/null; sleep 1
+  BOOTP=$(sfdisk -d "$DISK" | awk '/name="melon-boot"/ {print $1; exit}')
+  ROOTP=$(sfdisk -d "$DISK" | awk '/name="melon"/ {print $1; exit}')
+  [ -b "$BOOTP" ] && [ -b "$ROOTP" ] || die "the new partitions did not appear"
+elif [ "$ARCH" = x86 ]; then
+  for m in $(grep "^$DISK" /proc/mounts | cut -d' ' -f2 | sort -r); do umount "$m"; done
+  wipefs -a -q "$DISK"
+  # 32-bit machines: classic MBR with an active boot partition. Many old BIOSes won't boot a GPT disk.
+  sfdisk -q -W always "$DISK" <<EOF
+label: dos
+size=1GiB, type=ef, bootable
+type=83
+EOF
+  BOOTN=1 ROOTN=2
+else
+  for m in $(grep "^$DISK" /proc/mounts | cut -d' ' -f2 | sort -r); do umount "$m"; done
+  wipefs -a -q "$DISK"
+  sfdisk -q -W always "$DISK" <<EOF
+label: gpt
+size=1MiB, type=21686148-6449-6E6F-744E-656564454649, name="bios"
+size=1GiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="boot"
+type=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709, name="melon"
+EOF
+  BOOTN=2 ROOTN=3
+fi
+if [ $MODE = erase ]; then
+  partx -u "$DISK" 2>/dev/null || true; sleep 1; command -v udevadm >/dev/null && udevadm settle 2>/dev/null; mdev -s 2>/dev/null; sleep 1
+  for n in $BOOTN $ROOTN; do [ -b "$PP$n" ] || die "partition $PP$n did not appear"; done
+  BOOTP=$PP$BOOTN ROOTP=$PP$ROOTN
+fi
+
+say "Creating filesystems (FAT32 /boot, XFS /)"
+mkfs.vfat -F 32 -n MELONBOOT "$BOOTP" >/dev/null
+ROOTDEV=$ROOTP
+if [ $ENCRYPT = y ]; then
+  say "Encrypting $ROOTP (LUKS2)"
+  modprobe -q dm_crypt 2>/dev/null || true
+  printf '%s' "$MELON_LUKSPW" | cryptsetup luksFormat --batch-mode --type luks2 "$ROOTP" -
+  printf '%s' "$MELON_LUKSPW" | cryptsetup open --key-file - "$ROOTP" melonroot
+  ROOTDEV=/dev/mapper/melonroot
+fi
+mkfs.xfs -q -f -L melon "$ROOTDEV"
+
+say "Mounting"
+mkdir -p $TARGET; mount -t xfs "$ROOTDEV" $TARGET
+mkdir -p $TARGET/boot; mount -t vfat -o umask=0077 "$BOOTP" $TARGET/boot
+[ $MODE = alongside ] && { mkdir -p $TARGET/boot/efi; mount -t vfat -o umask=0077 "$ESP" $TARGET/boot/efi; }
+say "Copying the melon system"
+mkdir -p /run/melon-src; mount -t squashfs -o loop,ro "$SYSIMG" /run/melon-src
+tar -C /run/melon-src --exclude=./boot -cf - . | tar -C $TARGET -xpf -
+for f in /run/melon-src/boot/*; do [ -f "$f" ] && cp "$f" $TARGET/boot/; done
+umount /run/melon-src
+mkdir -p $TARGET/dev $TARGET/proc $TARGET/sys $TARGET/run
+for d in dev proc sys; do mount --bind /$d $TARGET/$d; done
+
+# make the new system's package set match the profile: the system image can hold more than the profile
+# (the desktop ISO's image has the desktop and the live-only installer packages), or less
+grep -v '^#' /usr/share/melon/profiles/$MELON_PROFILE | grep . > /tmp/melon-want
+DEL=$(grep -vxF -f /tmp/melon-want $TARGET/etc/apk/world | xargs || true)
+ADD=$(grep -vxF -f $TARGET/etc/apk/world /tmp/melon-want | xargs || true)
+APKT="apk --root $TARGET --arch $ARCH --repositories-file /dev/null --repository $REPO/$ARCH/Packages.adb --no-cache"
+if [ -n "$DEL" ]; then say "Removing what the $MELON_PROFILE profile doesn't include"; $APKT del $DEL >/dev/null; fi
+if [ -n "$ADD" ]; then say "Installing the $MELON_PROFILE profile with apk"; $APKT add $ADD; fi
+# in a virtual machine: the guest tools (screen resize, clean shutdown from the host, time sync, ...)
+VMSVCS=
+if VIRT=$(melon-detect-virt); then
+  if $APKT add melon-vm-guest >/dev/null 2>&1; then
+    say "Running in a $VIRT VM: added the guest tools"
+    VMSVCS=$(cat $TARGET/usr/share/melon/vm-guest.services 2>/dev/null)
+  fi
+fi
+
+say "Configuring the system"
+mkdir -p $TARGET/var/lib/melon
+cp -a "$REPO" $TARGET/var/lib/melon/repo
+# the online melon repo (GitHub) first, the copy from the ISO for offline use
+{ echo "$(cat /usr/share/melon/repo-url)/$ARCH/Packages.adb"; echo "/var/lib/melon/repo/$ARCH/Packages.adb"; } > $TARGET/etc/apk/repositories
+echo "$MELON_HOSTNAME" > $TARGET/etc/hostname
+sed -i "s/^127.0.1.1.*/127.0.1.1\t$MELON_HOSTNAME/" $TARGET/etc/hosts
+ROOT_UUID=$(blkid -s UUID -o value "$ROOTDEV"); BOOT_UUID=$(blkid -s UUID -o value "$BOOTP")
+cat > $TARGET/etc/fstab <<EOF
+# <device>                                 <mountpoint> <type> <options>                 <dump> <pass>
+UUID=$ROOT_UUID  /            xfs    defaults,noatime          0      1
+UUID=$BOOT_UUID                             /boot        vfat   defaults,umask=0077       0      2
+$([ $MODE = alongside ] && echo "UUID=$(blkid -s UUID -o value "$ESP")                             /boot/efi    vfat   defaults,umask=0077       0      2")
+tmpfs                                      /tmp         tmpfs  nosuid,nodev,mode=1777    0      0
+EOF
+# a swap file (RAM size, at most 8 GiB, and never more than an eighth of the disk); the desktop adds zram
+memk=$(awk '/MemTotal/{print $2}' /proc/meminfo); freek=$(df -Pk $TARGET | awk 'NR==2{print $4}')
+swapm=$(( memk / 1024 )); [ $swapm -gt 8192 ] && swapm=8192
+[ $(( freek / 1024 / 8 )) -lt $swapm ] && swapm=$(( freek / 1024 / 8 ))
+if [ $swapm -ge 256 ]; then
+  say "Creating a ${swapm} MiB swap file"
+  fallocate -l ${swapm}M $TARGET/swapfile 2>/dev/null || dd if=/dev/zero of=$TARGET/swapfile bs=1M count=$swapm 2>/dev/null
+  chmod 600 $TARGET/swapfile; mkswap $TARGET/swapfile >/dev/null
+  echo "/swapfile                                  none         swap   defaults,pri=10           0      0" >> $TARGET/etc/fstab
+fi
+echo "root:$MELON_ROOTPW" | chroot $TARGET chpasswd -c sha512
+if [ -n "$MELON_USER" ]; then
+  # -g: the login screen shows the full-name field, and BusyBox's default for it is "Linux User"
+  chroot $TARGET adduser -D -s /bin/bash -G users -g "$MELON_USER" "$MELON_USER"
+  for g in wheel audio video input render plugdev netdev kvm cdrom lpadmin; do chroot $TARGET addgroup "$MELON_USER" $g 2>/dev/null || true; done
+  echo "$MELON_USER:$MELON_USERPW" | chroot $TARGET chpasswd -c sha512
+fi
+SVCS="getty-tty1 getty-tty2 getty-tty3 mdevd syslogd klogd crond ntpd dhcp"
+# <profile>.services: one service per line; "name" enables it, "-name" drops a base service
+# (the desktop profile swaps mdevd/dhcp for udevd and NetworkManager)
+if [ -f /usr/share/melon/profiles/$MELON_PROFILE.services ]; then
+  for s in $(grep -v '^#' /usr/share/melon/profiles/$MELON_PROFILE.services); do
+    case $s in -*) SVCS=$(printf '%s\n' $SVCS | grep -vxF -- "${s#-}" | xargs) ;; *) SVCS="$SVCS $s" ;; esac
+  done
+fi
+if [ -n "${MELON_WIFI_SSID:-}" ]; then
+  if [ -d $TARGET/etc/NetworkManager ]; then
+    # desktop: NetworkManager owns Wi-Fi, so hand it the network instead of wpa_supplicant's own config
+    NMC=$TARGET/etc/NetworkManager/system-connections; mkdir -p $NMC
+    cat > "$NMC/melon-wifi.nmconnection" <<EOF
+[connection]
+id=$MELON_WIFI_SSID
+type=wifi
+autoconnect=true
+
+[wifi]
+mode=infrastructure
+ssid=$MELON_WIFI_SSID
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=$MELON_WIFI_PSK
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+EOF
+    chmod 600 "$NMC/melon-wifi.nmconnection"
+  else
+    wpa_passphrase "$MELON_WIFI_SSID" "$MELON_WIFI_PSK" | grep -v '#psk' >> $TARGET/etc/wpa_supplicant/wpa_supplicant.conf
+    SVCS="$SVCS wpa_supplicant dhcp-wifi"
+  fi
+fi
+SVCS="$SVCS $VMSVCS"
+if [ "${MELON_SERIAL:-0}" = 1 ]; then   # serial console, for headless machines and VMs
+  printf 'GRUB_SERIAL=1\nGRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200"\n' >> $TARGET/etc/default/grub
+  SVCS="$SVCS getty-ttyS0"
+fi
+for s in $SVCS; do if [ -d $TARGET/etc/sv/$s ]; then ln -sfn /etc/sv/$s $TARGET/var/service/$s; fi; done
+case $MELON_ALPINE in y|Y|yes) say "Adding Alpine as the opt-in @alpine repo"; chroot $TARGET melon-repo enable alpine >/dev/null || true ;; esac
+
+if [ $MODE = alongside ]; then
+  # its own folder on the shared EFI partition and an entry in the firmware's boot menu (efibootmgr, through
+  # efivarfs); the BIOS boot code and the fallback EFI/BOOT loader belong to the other system and stay untouched
+  say "Installing GRUB next to the other systems"
+  mountpoint -q $TARGET/sys/firmware/efi/efivars || mount -t efivarfs efivarfs $TARGET/sys/firmware/efi/efivars
+  chroot $TARGET grub-install --target=$EFI_TARGET --efi-directory=/boot/efi --boot-directory=/boot --bootloader-id=melon 2>&1 \
+    | grep -v '^Installing for' || true
+  [ -n "$(ls $TARGET/boot/efi/EFI/melon/*.efi 2>/dev/null)" ] || die "UEFI GRUB was not installed"
+  chroot $TARGET efibootmgr 2>/dev/null | grep -q -i 'melon' || echo "   (the firmware boot menu has no melon entry: pick melon's EFI file in the firmware setup)"
+  umount $TARGET/sys/firmware/efi/efivars 2>/dev/null || true
+else
+  say "Installing GRUB for BIOS and UEFI"
+  chroot $TARGET grub-install --target=i386-pc --boot-directory=/boot "$DISK" 2>&1 | grep -v '^Installing for' || true
+  chroot $TARGET grub-install --target=$EFI_TARGET --efi-directory=/boot --boot-directory=/boot --removable --no-nvram 2>&1 | grep -v '^Installing for' || true
+  [ -f $TARGET/boot/EFI/BOOT/$EFI_FILE ] || die "UEFI GRUB was not installed"
+  [ -f $TARGET/boot/grub/i386-pc/core.img ] || die "BIOS GRUB was not installed"
+fi
+if [ $ENCRYPT = y ]; then
+  say "Building the unlock initramfs"
+  mkdir -p $TARGET/etc/melon; : > $TARGET/etc/melon/encrypted-root
+  chroot $TARGET melon-mkinitramfs
+fi
+MELON_ROOT_DEV="$ROOTDEV" MELON_BOOT_DEV="$BOOTP" chroot $TARGET melon-update-grub
+
+case $MELON_NORUST in y|Y|yes)
+  # the reward first (melon-desktop's, from the new system or else this one), so it stays whatever the removal takes
+  if [ -x $TARGET/usr/libexec/melon/melon-rust-free ]; then chroot $TARGET /usr/libexec/melon/melon-rust-free / "$MELON_USER"
+  elif [ -x /usr/libexec/melon/melon-rust-free ]; then /usr/libexec/melon/melon-rust-free $TARGET "$MELON_USER"; fi
+  say "Removing everything built with Rust"
+  /usr/libexec/melon/melon-remove-rust $TARGET || true ;;
+esac
+
+say "Finishing"
+sync
+for d in dev proc sys; do umount $TARGET/$d; done
+[ $MODE = alongside ] && umount $TARGET/boot/efi
+umount $TARGET/boot; umount $TARGET
+[ $ENCRYPT = y ] && cryptsetup close melonroot
+cat <<EOF
+
+${P}  melon is installed on $DISK.${R}
+  Remove the install media and run ${B}reboot${R}.
+
+EOF

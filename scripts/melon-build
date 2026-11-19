@@ -1,0 +1,310 @@
+#!/bin/bash
+# melon-build: build a MELONBUILD recipe into signed apk v3 packages.
+# usage: melon-build <recipe-name> [--no-install]
+set -euo pipefail
+. "$(dirname "$(readlink -f "$0")")/env.sh"
+APK=$M/hosttools/bin/apk
+KEY=${MELON_SIGN_KEY:-$M/keys/melon-signing.rsa}   # MELON_SIGN_KEY: a key rotation (AGENTS.md), or the everyday key kept on a USB stick and used in place (BUILDING.md); mkiso.sh reads it too
+ARCH=$APK_ARCH
+OUT=$REPO/$ARCH
+mkdir -p "$OUT"
+
+name=$1; shift || true
+INSTALL=1; [ "${1:-}" = "--no-install" ] && INSTALL=0
+RECIPE=$M/recipes/$name/MELONBUILD
+[ -f "$RECIPE" ] || { echo "no recipe $RECIPE"; exit 1; }
+
+msg(){ printf '\033[1;32m>>> %s:\033[0m %s\n' "$name" "$*"; }
+
+# ---------- defaults a recipe may override ----------
+pkgrel=0; depends=(); makedepends=(); subpackages=(); source=(); license=unknown; url=; options=()
+prepare(){ :; }
+build(){ :; }
+check(){ :; }
+
+# cross-compile environment
+export CC="$TARGET-gcc" CXX="$TARGET-g++" AR="$TARGET-ar" AS="$TARGET-as" LD="$TARGET-ld"
+export NM="$TARGET-nm" RANLIB="$TARGET-ranlib" STRIP="$TARGET-strip" OBJCOPY="$TARGET-objcopy"
+export READELF="$TARGET-readelf" OBJDUMP="$TARGET-objdump"
+export CFLAGS="-O2 -pipe -fstack-clash-protection -fno-plt -Wformat -Werror=format-security"
+export CXXFLAGS="$CFLAGS"
+export LDFLAGS="-Wl,--as-needed,-O1,--sort-common,-z,relro,-z,now"
+export PKG_CONFIG_SYSROOT_DIR=$SYSROOT
+export PKG_CONFIG_LIBDIR=$SYSROOT/usr/lib/pkgconfig:$SYSROOT/usr/share/pkgconfig
+export PKG_CONFIG_PATH=
+# msgfmt finds ITS rules (polkit, gschema, ...) installed by earlier melon packages
+export GETTEXTDATADIRS=$SYSROOT/usr/share/gettext:/usr/share/gettext
+export CONFIG_SITE=$M/scripts/config.site
+# CMake 4 (melon's, on a melon build machine) refuses cmake_minimum_required below 3.5 (libjpeg-turbo, yaml-cpp); this
+# raises those to 3.5. CMake 3.x (Ubuntu's) ignores it.
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
+# programs a build compiles for the build machine (CC_FOR_BUILD: flex's stage1flex, gnulib's rpl_malloc) get the C
+# dialect Ubuntu's GCC 13 defaults to: melon's GCC 15 defaults to C23, where old `void *malloc ();` is "no arguments"
+# (rule 40). Ubuntu builds keep autoconf's default.
+[ "$MELON_HOST" = melon ] && export CFLAGS_FOR_BUILD="-g -O2 -std=gnu17"
+# build systems that ask git for "their" revision (clang --version, Rust build scripts) must not find melon's own
+# checkout above the source tree: git stops looking at $WORK
+export GIT_CEILING_DIRECTORIES=$WORK
+CHOST=$TARGET CBUILD=$BUILD_TRIPLE   # env.sh: never equal to $TARGET, even on melon
+export CHOST CBUILD
+conf_flags="--host=$CHOST --build=$CBUILD --prefix=/usr --sysconfdir=/etc --localstatedir=/var --mandir=/usr/share/man --infodir=/usr/share/info --libdir=/usr/lib --bindir=/usr/bin --sbindir=/usr/bin --libexecdir=/usr/libexec"
+
+# meson cross file
+mkdir -p "$WORK"   # a fresh checkout has no work/ yet
+MESON_CROSS=$WORK/meson-cross.ini
+cat > $MESON_CROSS <<EOF
+[binaries]
+c = '$TARGET-gcc'
+cpp = '$TARGET-g++'
+ar = '$TARGET-ar'
+strip = '$TARGET-strip'
+llvm-config = '$SYSROOT/usr/bin/llvm-config'
+pkg-config = 'pkg-config'
+# Qt's code generators must be the host builds (rule 20); for cross builds meson only finds them here, never on PATH
+moc = '$M/hosttools/qt6/libexec/moc'
+uic = '$M/hosttools/qt6/libexec/uic'
+rcc = '$M/hosttools/qt6/libexec/rcc'
+lrelease = '$M/hosttools/qt6/bin/lrelease'
+lupdate = '$M/hosttools/qt6/bin/lupdate'
+qmlcachegen = '$M/hosttools/qt6/libexec/qmlcachegen'
+qmltyperegistrar = '$M/hosttools/qt6/libexec/qmltyperegistrar'
+# the sandbox helper projects compile in; melon's lives here (the build host needs one too for meson's check)
+bwrap = '/usr/bin/bwrap'
+# Rust (scripts/host-rust.sh): for melon's musl target, linked by melon's gcc and dynamically against its libc
+rust = ['$M/hosttools/rust/bin/rustc', '--target', '$RUST_TARGET', '-C', 'linker=$TARGET-gcc', '-C', 'target-feature=-crt-static']
+[properties]
+needs_exe_wrapper = false
+sys_root = '$SYSROOT'
+pkg_config_libdir = '$PKG_CONFIG_LIBDIR'
+[host_machine]
+system = 'linux'
+cpu_family = '$MESON_CPU_FAMILY'
+cpu = '$MESON_CPU'
+endian = 'little'
+EOF
+export MESON_CROSS
+# cmake toolchain file
+CMAKE_TC=$WORK/cmake-toolchain.cmake
+cat > $CMAKE_TC <<EOF
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR $MESON_CPU)
+set(CMAKE_C_COMPILER $TARGET-gcc)
+set(CMAKE_CXX_COMPILER $TARGET-g++)
+set(CMAKE_SYSROOT $SYSROOT)
+set(CMAKE_FIND_ROOT_PATH $SYSROOT)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+EOF
+export CMAKE_TC
+cmake_setup(){ cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TC" -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+  -DCMAKE_INSTALL_SBINDIR=bin -DCMAKE_INSTALL_LIBEXECDIR=libexec -DCMAKE_INSTALL_SYSCONFDIR=/etc -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTING=OFF "$@"; }
+# CMake configured as a *native* build with melon's compilers and sysroot: CMake doesn't know it is cross-compiling,
+# so the programs a build makes and runs (LLVM's tablegens, generators) run here directly (rule 18). recipes/clang.
+cmake_native(){ cmake -G Ninja -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX -DCMAKE_SYSROOT=$SYSROOT \
+  -DCMAKE_FIND_ROOT_PATH=$SYSROOT -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+  -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY -DCMAKE_INSTALL_PREFIX=/usr \
+  -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" "$@"; }
+# the cross file supplies the target pkg-config settings; the environment is left to native (build-host) lookups
+meson_setup(){ local args=(); while IFS= read -r -d '' a; do args+=("$a"); done < <(python3 $M/scripts/meson-filter-opts.py "$@"; printf '\0')
+  env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_SYSROOT_DIR -u PKG_CONFIG_PATH meson setup --cross-file "$MESON_CROSS" --prefix=/usr --libdir=lib --sbindir=bin --libexecdir=libexec --sysconfdir=/etc --localstatedir=/var --buildtype=release -Db_lto=false "${args[@]}"; }
+
+# pure-Python modules (no C parts): copied into python3's site-packages with a small .dist-info (importlib.metadata
+# finds them by it). py_install <distribution name> <package dirs or .py files, relative to the source tree>...
+py_install(){ local name=$1 py site di; shift; py=$(cd $SYSROOT/usr/lib && ls -d python3.* | sort -V | tail -1)
+  site=$pkgdir/usr/lib/$py/site-packages; install -d $site; cp -r "$@" $site/
+  find $site -name __pycache__ -prune -exec rm -rf {} +
+  di=$site/$(printf '%s' "$name" | tr 'A-Z.-' 'a-z__')-$pkgver.dist-info; install -d $di
+  printf 'Metadata-Version: 2.1\nName: %s\nVersion: %s\n' "$name" "$pkgver" > $di/METADATA; echo melon > $di/INSTALLER; }
+
+# Rust (scripts/host-rust.sh, AGENTS.md rule 46). Cargo builds for $RUST_TARGET with melon's gcc as the linker and links
+# dynamically against melon's musl: Rust's musl targets link statically by default (-crt-static turns that off).
+# Build scripts and proc-macros run on the build machine, so the C compiler variables named after the build machine's
+# triple keep their C parts on its own gcc (CC is the cross compiler). Crates come from crates.io into sources/cargo,
+# pinned by the checksums in the project's Cargo.lock: cargo_fetch in prepare(), cargo_build builds offline.
+[ -x $M/hosttools/rust/bin/cargo ] && export PATH=$M/hosttools/rust/bin:$PATH
+_rt=${RUST_TARGET//-/_}; _RT=${_rt^^}
+export CARGO_HOME=$SRC/cargo CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never PKG_CONFIG_ALLOW_CROSS=1
+export "CARGO_TARGET_${_RT}_LINKER=$TARGET-gcc"
+export "CC_$_rt=$TARGET-gcc" "CXX_$_rt=$TARGET-g++" "AR_$_rt=$TARGET-ar"
+export CC_x86_64_unknown_linux_gnu=gcc CXX_x86_64_unknown_linux_gnu=g++ AR_x86_64_unknown_linux_gnu=ar \
+  CFLAGS_x86_64_unknown_linux_gnu=-O2 CXXFLAGS_x86_64_unknown_linux_gnu=-O2
+need_rust(){ command -v cargo >/dev/null || { echo "no host Rust: run scripts/host-rust.sh" >&2; exit 1; }; }
+cargo_fetch(){ need_rust; cargo fetch --locked --target $RUST_TARGET "$@"; }
+# RUSTFLAGS, not CARGO_TARGET_<triple>_RUSTFLAGS: cargo merges that with a project's own .cargo/config.toml, and ripgrep's asks for
+# +crt-static and link-self-contained=yes on musl, which wins (-static-pie, "cannot find -lpcre2-8"). RUSTFLAGS replaces every
+# config-file rustflags, and with --target it reaches only target artifacts, not build scripts and proc-macros.
+cargo_build(){ need_rust; RUSTFLAGS="-C target-feature=-crt-static -C link-self-contained=no" CARGO_NET_OFFLINE=true \
+  cargo build --release --locked --target $RUST_TARGET "$@"; }
+# where cargo_build leaves the binaries
+cargo_out(){ echo target/$RUST_TARGET/release; }
+
+srcdir=$WORK/pkg/$name/src
+pkgbase=$WORK/pkg/$name/pkg
+. "$RECIPE"
+pkgdir=$pkgbase/$pkgname
+: "${builddir:=$srcdir/$pkgname-$pkgver}"
+startdir=$M/recipes/$name
+export srcdir pkgdir builddir startdir pkgname pkgver
+
+# unpack a source tarball. .xz goes through xz itself: BusyBox's tar (melon as the build machine) decodes xz only up to a
+# 64 MiB dictionary, and Rust's release tarballs use 128 MiB ("tar: corrupted data"). Recipes can call it too.
+untar(){ case $1 in *.xz|*.txz) xz -dc "$1" | tar -xf - -C "${2:-.}";; *) tar -xf "$1" -C "${2:-.}";; esac; }
+has_opt(){ local o; for o in "${options[@]:-}"; do [ "$o" = "$1" ] && return 0; done; return 1; }
+
+# ---------- install makedepends into the sysroot ----------
+sysroot_add(){
+  [ $# -eq 0 ] && return 0
+  # the lock lets two builds for the same arch run side by side (sysroot database and repo index)
+  flock $OUT/.lock $APK --root $SYSROOT --arch $ARCH --keys-dir $M/keys/trusted --repositories-file /dev/null \
+       --repository $OUT/Packages.adb --no-scripts --no-cache --quiet add --upgrade "$@"
+}
+if [ ${#makedepends[@]} -gt 0 ]; then msg "sysroot: ${makedepends[*]}"; sysroot_add "${makedepends[@]}"; fi
+
+# ---------- fetch / unpack ----------
+# MELON_KEEP_SRC=1 resumes a failed build in the existing tree (no unpack, no patches, no prepare)
+# MELON_AUTO_RESUME=1 resumes by itself when an earlier run got past "prepare" (container restarts), but only with
+# the same recipe and patches: a fix pulled since then must unpack fresh, or its patches and prepare() never run
+recipe_sum=$(for f in "$startdir"/MELONBUILD "$startdir"/*.patch; do [ ! -f "$f" ] || cat "$f"; done | sha256sum | cut -d' ' -f1)
+[ "${MELON_AUTO_RESUME:-0}" = 1 ] && [ "$(cat "$WORK/pkg/$name/.prepared" 2>/dev/null)" = "$recipe_sum" ] && MELON_KEEP_SRC=1
+if [ "${MELON_KEEP_SRC:-0}" = 1 ] && [ -d "$srcdir" ]; then
+  msg "reusing existing source tree"; rm -rf "$pkgbase"; mkdir -p "$pkgdir"; KEEP=1
+else
+KEEP=0
+rm -rf "$WORK/pkg/$name"; mkdir -p "$srcdir" "$pkgdir"
+for s in "${source[@]:-}"; do
+  [ -z "$s" ] && continue
+  if [ -f "$startdir/$s" ]; then cp "$startdir/$s" "$srcdir/"; continue; fi
+  f=$SRC/$s; [ -e "$f" ] || { echo "missing source $f"; exit 1; }
+  case $s in *.tar*|*.tgz) msg "unpack $s"; untar "$f" "$srcdir";; *) cp "$f" "$srcdir/";; esac
+done
+cd "$srcdir"; [ -d "$builddir" ] && cd "$builddir"
+# apply patches shipped with the recipe
+for p in "$startdir"/*.patch; do [ -f "$p" ] || continue; msg "patch $(basename $p)"; patch -p1 -s < "$p"; done
+msg prepare; prepare
+echo "$recipe_sum" > "$WORK/pkg/$name/.prepared"
+fi
+cd "$builddir" 2>/dev/null || cd "$srcdir"
+msg build; build
+cd "$builddir" 2>/dev/null || cd "$srcdir"
+msg package; package
+# pkg-config answers carry the sysroot (-L$SYSROOT/usr/lib), and build systems copy them into their own .pc files
+# (Libs.private): on the target those are plain /usr paths
+for f in "$pkgdir"/usr/lib/pkgconfig/*.pc "$pkgdir"/usr/share/pkgconfig/*.pc; do
+  [ -f "$f" ] && grep -q "$SYSROOT" "$f" && sed -i -e "s| -L$SYSROOT/usr/lib\b||g; s| -I$SYSROOT/usr/include\b||g; s|$SYSROOT/|/|g" "$f"
+done
+# cross-build safety net: some builds install under build-machine paths (pkg-config puts the sysroot in front of
+# path variables; the host Qt reports its own qml/plugins dirs). Move such files to where they belong, and report
+# files that have a build-machine path compiled in (those need a fix in the recipe).
+_relocate(){ [ -d "$pkgdir$1" ] || return 0; msg "LEAK: files installed under $1, moved to $2"
+  mkdir -p "$pkgdir$2"; cp -a "$pkgdir$1/." "$pkgdir$2/"; rm -rf "$pkgdir$1"; }
+_relocate "$SYSROOT" /
+_relocate "$M/hosttools/qt6/qml" /usr/lib/qt6/qml
+_relocate "$M/hosttools/qt6/plugins" /usr/lib/qt6/plugins
+[ -d "$pkgdir${M%/*}" ] && find "$pkgdir${M%%/${M#/*/}}" -depth -type d -empty -delete 2>/dev/null || true
+# (no --exclude: BusyBox grep, on a melon build machine, has none)
+grep -rlaE "$SYSROOT/(usr/(share|lib|libexec|bin)|etc)|$M/hosttools" "$pkgdir" 2>/dev/null | grep -v '\.la$' | sed "s|^$pkgdir||" | while read -r f; do
+  msg "LEAK: build-machine path compiled into $f"; done || true
+
+varname(){ printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_'; }
+# ---------- subpackage helpers ----------
+# move path(s) relative to pkgdir into subpkgdir
+amove(){ local p; for p in "$@"; do
+  p=${p#/}; for m in $pkgdir/$p; do [ -e "$m" ] || [ -L "$m" ] || continue
+    local rel=${m#$pkgdir/}; mkdir -p "$subpkgdir/$(dirname "$rel")"; mv "$m" "$subpkgdir/$rel"; done; done; }
+default_dev(){
+  amove usr/include usr/lib/pkgconfig usr/share/pkgconfig usr/lib/cmake usr/share/aclocal 'usr/lib/*.a'
+  local l; for l in $pkgdir/usr/lib/*.so; do [ -L "$l" ] && amove "usr/lib/$(basename $l)"; done; true; }
+default_doc(){ amove usr/share/man usr/share/info usr/share/doc usr/share/gtk-doc; }
+
+# ---------- normalise: merged /usr ----------
+normalise(){ local d=$1
+  for x in bin sbin usr/sbin; do [ -d "$d/$x" ] && [ ! -L "$d/$x" ] && { mkdir -p "$d/usr/bin"; cp -a "$d/$x/." "$d/usr/bin/"; rm -rf "$d/$x"; }; done
+  [ -d "$d/lib" ] && [ ! -L "$d/lib" ] && { mkdir -p "$d/usr/lib"; cp -a "$d/lib/." "$d/usr/lib/"; rm -rf "$d/lib"; }
+  find "$d" -name '*.la' -delete
+  # absolute library and header links (keyutils: libkeyutils.so -> /usr/lib/...) would point into the build
+  # machine's own /usr from the sysroot: make them relative, by name only, never through the host's links
+  # (os.path.relpath, as GNU realpath -s -m --relative-to; BusyBox realpath on a melon build machine has no options)
+  find "$d/usr/lib" "$d/usr/include" -type l 2>/dev/null | while read -r l; do
+    t=$(readlink "$l"); case $t in /usr/*) ln -sfn "$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+      "$t" "$(dirname "${l#$d}")")" "$l";; esac; done || true
+  if ! has_opt '!strip'; then
+    find "$d" -type f \( -perm -u+x -o -name '*.so*' \) 2>/dev/null | while read -r f; do
+      case $(file -b "$f") in *ELF*relocatable*) ;; *ELF*) $STRIP --strip-unneeded "$f" 2>/dev/null || true;; esac; done
+  fi
+  has_opt keepdirs || find "$d" -depth -type d -empty -delete 2>/dev/null || true
+  mkdir -p "$d"
+  # files copied with cp -a from the checkout (a recipe's files/) keep the builder's own account; apk records its
+  # name, and a system without that account gets them as nobody (rule 45). Root owns them; system accounts a recipe
+  # chose on purpose (uid/gid below 1000: cups' lp, dbus' messagebus) stay.
+  # (stat, not find -uid/-gid: BusyBox find on a melon build machine has neither; stat -c reads the link itself, like chown -h)
+  find "$d" -exec stat -c '%u %g %n' {} + | while read -r u g f; do
+    if [ "$u" -gt 999 ] || [ "$g" -gt 999 ]; then chown -h 0:0 "$f"; fi; done
+}
+
+# ---------- package metadata + creation ----------
+elf_scan(){ # prints "P soname" / "N needed"
+  find "$1" -type f 2>/dev/null | while read -r f; do
+    case $(file -b "$f") in *ELF*dynamic*|*ELF*shared\ object*|*ELF*pie*) ;; *) continue;; esac
+    $READELF -d "$f" 2>/dev/null | awk '/\(SONAME\)/{gsub(/[\[\]]/,"",$5);print "P",$5} /\(NEEDED\)/{gsub(/[\[\]]/,"",$5);print "N",$5}'
+  done | sort -u; }
+
+make_apk(){ local sub=$1 dir=$2 desc=$3; shift 3; local deps=("$@")
+  normalise "$dir"
+  local scan provides=() sonames=() n
+  scan=$(elf_scan "$dir")
+  while read -r t so; do [ "$t" = P ] && provides+=("so:$so=0") && sonames+=("$so"); done <<< "$scan"
+  while read -r t so; do [ "$t" = N ] || continue
+    printf '%s\n' "${sonames[@]:-}" | grep -qxF "$so" || deps+=("so:$so"); done <<< "$scan"
+  local vp; vp=$(varname "$sub"); local extra="provides_${vp}[@]"; provides+=(${!extra:-})
+  local info=(-I "name:$sub" -I "version:$pkgver-r$pkgrel" -I "description:$desc" -I "arch:$ARCH"
+              -I "license:$license" -I "origin:$pkgname" -I "maintainer:melon builder <builder@melon.local>"
+              -I "build-time:$(date +%s)")
+  [ -n "$url" ] && info+=(-I "url:$url")
+  [ ${#deps[@]} -gt 0 ] && info+=(-I "depends:$(printf '%s\n' "${deps[@]}" | sort -u | xargs)")
+  [ ${#provides[@]} -gt 0 ] && info+=(-I "provides:${provides[*]}")
+  local scr=() st
+  for st in pre-install post-install pre-upgrade post-upgrade pre-deinstall post-deinstall trigger; do
+    [ -f "$startdir/$sub.$st" ] && scr+=(-s "$st:$startdir/$sub.$st"); done
+  # triggers_<x>=(dir ...): apk runs <sub>.trigger after any transaction that changes files in those directories
+  local tv="triggers_${vp}[@]" t
+  for t in ${!tv:-}; do scr+=(-t "$t"); done
+  if [ -f "$startdir/$sub.trigger" ] && [ -z "${!tv:-}" ]; then msg "$sub.trigger has no triggers_$vp directories"; exit 1; fi
+  rm -f "$OUT/$sub"-[0-9]*.apk
+  # written under a temporary name so a parallel reindex never reads a half-written package
+  $APK --sign-key $KEY mkpkg -F "$dir" "${info[@]}" "${scr[@]}" -o "$OUT/.$sub.apk.tmp"
+  mv "$OUT/.$sub.apk.tmp" "$OUT/$sub-$pkgver-r$pkgrel.apk"
+  msg "created $sub-$pkgver-r$pkgrel.apk ($(du -h "$OUT/$sub-$pkgver-r$pkgrel.apk" | cut -f1))"
+}
+
+# subpackages first (they take files out of pkgdir)
+for sp in "${subpackages[@]:-}"; do
+  [ -z "$sp" ] && continue
+  subpkgdir=$pkgbase/$sp; mkdir -p "$subpkgdir"; export subpkgdir
+  fn=$(varname "${sp#$pkgname-}")
+  if declare -F "pkg_$fn" >/dev/null; then "pkg_$fn"
+  elif [ "$fn" = dev ]; then default_dev
+  elif [ "$fn" = doc ]; then default_doc; fi
+done
+for sp in "${subpackages[@]:-}"; do
+  [ -z "$sp" ] && continue
+  v=$(varname "$sp"); d="depends_${v}[@]"; dsc="pkgdesc_${v}"
+  sdeps=(${!d:-}); [[ $sp == *-dev ]] && [ -z "${!d:-}" ] && sdeps=("$pkgname=$pkgver-r$pkgrel")
+  make_apk "$sp" "$pkgbase/$sp" "${!dsc:-$pkgdesc ($sp)}" "${sdeps[@]}"
+done
+make_apk "$pkgname" "$pkgdir" "$pkgdesc" "${depends[@]}"
+
+# ---------- reindex ----------
+msg "reindex"
+( cd $OUT && flock .lock bash -c "$APK --keys-dir $M/keys/trusted --sign-key $KEY mkndx -d 'melon $(date +%Y%m%d)' -o Packages.adb.new *.apk && mv Packages.adb.new Packages.adb" )
+
+# ---------- install into sysroot so later builds can use it ----------
+if [ $INSTALL = 1 ]; then
+  all=("$pkgname"); for sp in "${subpackages[@]:-}"; do [ -n "$sp" ] && [[ $sp != *-doc ]] && all+=("$sp"); done
+  msg "sysroot: ${all[*]}"; sysroot_add "${all[@]}"
+fi
+# free the disk: build trees are large (set MELON_KEEP_WORK=1 to keep them for debugging)
+[ "${MELON_KEEP_WORK:-0}" = 1 ] || rm -rf "$WORK/pkg/$name"
+msg done

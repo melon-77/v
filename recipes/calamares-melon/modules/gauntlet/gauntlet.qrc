@@ -1,0 +1,7 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource>
+    <file>gauntlet.qml</file>
+    <file>questions.js</file>
+    <file>trial.js</file>
+</qresource>
+</RCC>
