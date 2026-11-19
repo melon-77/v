@@ -33,6 +33,8 @@ while IFS=$'\t' read -r path sum method arg; do
     url)    # GNU's own server often doesn't answer; kernel.org mirrors it (the sha256 is checked below either way)
       get "$S/$path" "$arg" || case $arg in
         https://ftp.gnu.org/gnu/*) get "$S/$path" "https://mirrors.kernel.org/gnu/${arg#https://ftp.gnu.org/gnu/}" || true ;;
+        # mandoc's own site has days when its name does not resolve; FreeBSD's source mirror keeps the same file
+        https://mandoc.bsd.lv/snapshots/*) get "$S/$path" "http://distcache.freebsd.org/ports-distfiles/${arg##*/}" || true ;;
       esac ;;
     inner) set -- $arg; tar -xOf "$S/$1" "$2" > "$S/$path" 2>/dev/null || true ;;
     git)

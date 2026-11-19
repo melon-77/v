@@ -79,6 +79,9 @@ URL = {  # upstream downloads (Ubuntu 26.04 has Cataclysm: DDA 0.H, Rust 1.93 an
     'iproute2-7.3.0.tar.xz': 'https://www.kernel.org/pub/linux/utils/net/iproute2/iproute2-7.3.0.tar.xz',
     'shadow-4.20.3.tar.xz': 'https://github.com/shadow-maint/shadow/releases/download/4.20.3/shadow-4.20.3.tar.xz',
     'libmnl-1.0.5.tar.bz2': 'https://www.netfilter.org/pub/libmnl/libmnl-1.0.5.tar.bz2',
+    # mandoc publishes no signature. On 19 November 2026 mandoc.bsd.lv did not resolve at any resolver; the tarball came
+    # from Void's and FreeBSD's source mirrors (identical), and is the file Arch and Void pin by sha256 and Alpine by sha512.
+    'mandoc-1.14.6.tar.gz': 'https://mandoc.bsd.lv/snapshots/mandoc-1.14.6.tar.gz',
     'glibc-2.44.tar.xz': 'https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz',
     'libxcrypt-4.5.2.tar.xz': 'https://github.com/besser82/libxcrypt/releases/download/v4.5.2/libxcrypt-4.5.2.tar.xz',
     'gperf-3.3.tar.gz': 'https://ftp.gnu.org/gnu/gperf/gperf-3.3.tar.gz',

@@ -1,6 +1,8 @@
 # The desktop profile of the 32-bit (i686) edition: LXQt on labwc (Wayland), for old netbooks and laptops
 # (the owner, 7 October 2026). Installed on top of the base system by both installers; mkiso.sh reads
 # desktop-packages-<arch>.txt when it exists. The 64-bit list (Plasma) is scripts/desktop-packages.txt.
+# translations: every installed package's -lang part (the builder splits them out; the desktop keeps them)
+lang
 # session plumbing
 eudev dbus elogind polkit linux-pam
 # graphics: Mesa with LLVM, no Vulkan (i915 for Intel GMA, crocus, r300, llvmpipe)

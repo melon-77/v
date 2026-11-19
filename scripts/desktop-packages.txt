@@ -1,5 +1,7 @@
 # The desktop profile: installed on top of the base system by both installers.
 # (docs/desktop-config.txt has the owner's choices behind this list.)
+# translations: every installed package's -lang part (the builder splits them out; the desktop keeps them)
+lang
 # session plumbing
 eudev dbus elogind polkit linux-pam
 # graphics

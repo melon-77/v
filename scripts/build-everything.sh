@@ -20,7 +20,7 @@ fi
   --repositories-file /dev/null add >/dev/null 2>&1 || true
 
 BASE="valence-layout linux-headers glibc gcc-runtime libxcrypt zlib zstd xz openssl apk-tools busybox ncurses bash runit util-linux
-  attr acl pcre2 libmnl coreutils findutils grep sed tar gzip diffutils less procps-ng iproute2 shadow
+  attr acl pcre2 libmnl coreutils findutils grep sed tar gzip diffutils less procps-ng iproute2 shadow mandoc docs lang
   userspace-rcu inih xfsprogs grub libnl3 expat dbus wpa_supplicant alsa-lib alsa-utils mpg123 kmod
   opendoas ca-certificates linux-firmware valence-base linux-valence"
 PLUMBING="libffi glib libcap duktape linux-pam eudev elogind polkit argp-standalone musl-fts musl-obstack elfutils
