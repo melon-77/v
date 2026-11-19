@@ -7,6 +7,7 @@ license=LGPL-2.1-or-later
 url=https://www.gnu.org/software/libc/
 source=(glibc-2.44.tar.xz)
 subpackages=(glibc-dev glibc-locales)
+makedepends=(linux-headers)   # --with-headers: the kernel's headers in the sysroot
 depends_glibc_dev="glibc linux-headers"
 depends_glibc_locales="glibc"
 pkgdesc_glibc_dev="The GNU C library: headers, start files and static libraries"
@@ -36,7 +37,9 @@ package(){
   install -Dm644 $startdir/ld.so.conf $pkgdir/etc/ld.so.conf
   mkdir -p $pkgdir/etc/ld.so.conf.d
 }
-options=(keepdirs)
+# options=(bootstrap): part of what every other build stands on (BUILD_BASE in scripts/valence-build-recipe), so it is
+# built before that exists as packages, in the sysroot as scripts/toolchain.sh left it
+options=(keepdirs bootstrap)
 # the linker scripts and development links (libc.so, libm.so, ...) are the unversioned *.so files directly in usr/lib;
 # the libraries programs load at run time all carry a version (libc.so.6) or live in usr/lib/gconv
 pkg_dev(){ amove usr/include 'usr/lib/*.a' 'usr/lib/*.o' 'usr/lib/*.so'; }

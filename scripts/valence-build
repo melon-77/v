@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""valence-build: build Valence's packages, in the order the recipes' own dependencies give, and only what changed.
+
+    scripts/valence-build                    every recipe in recipes/
+    scripts/valence-build NAME...            these recipes or packages, and everything they need to be built and installed
+    scripts/valence-build --edition console  everything the console ISO is made of (desktop: the desktop ISO)
+
+      -n, --dry-run   show the order and what would be built, build nothing
+      -f, --force     build the named recipes even if nothing about them changed
+      -x, --stop      stop at the first failure (default: carry on with whatever does not need the failed recipe)
+      --order         print the selection in build order, one recipe per line, and exit
+
+No list anywhere says in which order recipes are built. A recipe is built after the recipes that make its
+makedepends and the build base (BUILD_BASE in scripts/valence-build-recipe), and after the recipes that make
+whatever those packages depend on, because apk installs all of that into the build's sysroot.
+
+A recipe is built when its packages are not in the repository, or when the recipe's directory (VALENCEBUILD, patches,
+files) or the builder's BUILD_EPOCH differs from what they were built with. Run it twice and the second run builds
+nothing. Recipes that depend on a rebuilt recipe are not rebuilt by themselves: bump their pkgrel when they have to be.
+
+Each recipe is built by scripts/valence-build-recipe, in a sysroot holding what the recipe declares and nothing else;
+its output goes to logs/pkg-<recipe>.log. An interrupted build carries on in its source tree the next time; a failed
+one starts fresh (AGENTS.md rule 58).
+"""
+import argparse, hashlib, heapq, os, re, subprocess, sys, time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+
+
+def bash(script, *args):
+    return subprocess.run(['bash', '-c', script, 'valence-build', *args], capture_output=True, text=True)
+
+
+E = dict(l.split('=', 1) for l in bash('. "$1/env.sh" && printf "%s\\n" "M=$M" "APK_ARCH=$APK_ARCH" "REPO=$REPO" "WORK=$WORK" "ARCH_SUFFIX=$ARCH_SUFFIX"', HERE).stdout.splitlines())
+M, ARCH, WORK = E['M'], E['APK_ARCH'], E['WORK']
+OUT = f"{E['REPO']}/{ARCH}"
+STATE = f'{OUT}/.state'
+ONE = f'{HERE}/valence-build-recipe'
+
+# every recipe, read by bash itself: name, version, what it needs, and each package it makes with that package's own
+# dependencies and extra names (a -dev package with no depends_<x> depends on the main package, as the builder has it)
+LOAD = r'''
+. "$1/env.sh"; CHOST=$TARGET; CBUILD=$BUILD_TRIPLE
+vn(){ printf '%s' "$1" | tr -c 'a-zA-Z0-9' '_'; }
+for f in "$M"/recipes/*/VALENCEBUILD; do
+  r=${f%/VALENCEBUILD}; r=${r##*/}
+  ( pkgname=; pkgver=; pkgrel=0; depends=(); makedepends=(); subpackages=(); options=(); source=()
+    srcdir=/nonexistent; pkgdir=/nonexistent; builddir=; startdir=$M/recipes/$r
+    . "$f" >/dev/null 2>&1
+    printf 'R\t%s\t%s\t%s\n' "$r" "$pkgname" "$pkgver-r$pkgrel"
+    printf 'M\t%s\n' "${makedepends[*]}"
+    printf 'O\t%s\n' "${options[*]}"
+    p="provides_$(vn "$pkgname")[*]"; printf 'P\t%s\t%s\t%s\n' "$pkgname" "${depends[*]}" "${!p}"
+    for sp in "${subpackages[@]}"; do [ -n "$sp" ] || continue
+      v=$(vn "$sp"); d="depends_${v}[*]"; p="provides_${v}[*]"; dd="${!d}"
+      case $sp in *-dev) [ -n "$dd" ] || dd=$pkgname ;; esac
+      printf 'P\t%s\t%s\t%s\n' "$sp" "$dd" "${!p}"
+    done )
+done
+'''
+
+
+def bare(dep):
+    """a dependency as a recipe writes it -> the package name; None for what the builder works out itself or a conflict"""
+    dep = re.split(r'[<>=~]', dep, maxsplit=1)[0]
+    return None if not dep or dep[0] == '!' or ':' in dep else dep
+
+
+class Recipe:
+    def __init__(self, name, pkgname, version):
+        self.name, self.pkgname, self.version = name, pkgname, version
+        self.makedepends, self.options, self.packages = [], [], {}   # packages: name -> its declared dependencies
+
+
+def load():
+    recipes, origin, cur = {}, {}, None
+    out = bash(LOAD, HERE)
+    for line in out.stdout.splitlines():
+        t = line.split('\t')
+        if t[0] == 'R':
+            cur = recipes[t[1]] = Recipe(t[1], t[2], t[3])
+        elif t[0] == 'M': cur.makedepends = [d for d in map(bare, t[1].split()) if d]
+        elif t[0] == 'O': cur.options = t[1].split()
+        elif t[0] == 'P':
+            cur.packages[t[1]] = [d for d in map(bare, t[2].split()) if d]
+            for n in [t[1]] + [bare(x) for x in t[3].split()]:
+                if n: origin.setdefault(n, cur.name)
+    for r in recipes.values():
+        if not r.pkgname or r.version.startswith('-r'):
+            sys.exit(f'valence-build: recipes/{r.name}/VALENCEBUILD did not load (no pkgname or pkgver)')
+        for kind in ('doc', 'lang'):   # made by the builder when there is something to put in them
+            origin.setdefault(f'{r.pkgname}-{kind}', r.name)
+    return recipes, origin
+
+
+def fingerprint(name):
+    """everything in the recipe's directory: names, contents, and whether a file is executable"""
+    h, d = hashlib.sha256(), f'{M}/recipes/{name}'
+    for root, dirs, files in os.walk(d):
+        dirs.sort()
+        for fn in sorted(files):
+            p = os.path.join(root, fn)
+            h.update(os.path.relpath(p, d).encode() + b'\0')
+            if os.path.islink(p): h.update(b'link ' + os.readlink(p).encode())
+            else:
+                h.update(b'x' if os.stat(p).st_mode & 0o111 else b'-')
+                with open(p, 'rb') as f: h.update(f.read())
+            h.update(b'\0')
+    return h.hexdigest()
+
+
+def main():
+    ap = argparse.ArgumentParser(usage='valence-build [-n] [-f] [-x] [--order] [--edition console|desktop] [NAME ...]', add_help=False)
+    ap.add_argument('names', nargs='*'); ap.add_argument('-n', '--dry-run', action='store_true')
+    ap.add_argument('-f', '--force', action='store_true'); ap.add_argument('-x', '--stop', action='store_true')
+    ap.add_argument('--order', action='store_true'); ap.add_argument('--edition', choices=['console', 'desktop'])
+    ap.add_argument('-h', '--help', action='store_true')
+    a = ap.parse_args()
+    if a.help: print(__doc__); return 0
+
+    # generated recipes are written fresh from their generators (AGENTS.md rule 57)
+    for g in ('simple', 'kde', 'lxqt'):
+        r = subprocess.run([sys.executable, f'{HERE}/gen-{g}-recipes.py'], capture_output=True, text=True)
+        if r.returncode: sys.exit(f'valence-build: gen-{g}-recipes.py failed:\n{r.stderr[-2000:]}')
+
+    recipes, origin = load()
+    one = open(ONE, encoding='utf-8').read()
+    epoch = re.search(r'^BUILD_EPOCH=(\S+)', one, re.M).group(1)
+    base = re.search(r'^BUILD_BASE="([^"]*)"', one, re.M).group(1).split()
+
+    # what a package brings into a sysroot with it: its declared dependencies, and theirs
+    def closure(pkgs):
+        seen, todo = set(), list(pkgs)
+        while todo:
+            p = todo.pop()
+            if p in seen: continue
+            seen.add(p)
+            o = origin.get(p)
+            if o: todo += recipes[o].packages.get(p, [])
+        return seen
+
+    needs, runtime, missing = {}, {}, {}   # recipe -> recipes built before it; recipes its packages need installed; unknown names
+    for r in recipes.values():
+        seeds = r.makedepends + ([] if 'bootstrap' in r.options else base)
+        pk = closure(seeds)
+        missing[r.name] = sorted(p for p in pk if p not in origin)
+        needs[r.name] = {origin[p] for p in pk if p in origin} - {r.name}
+        runtime[r.name] = {origin[p] for p in closure(r.packages) if p in origin} - {r.name}
+    for r in recipes.values():   # the build base must come from bootstrap recipes, or nothing could ever be built first
+        if 'bootstrap' not in r.options: continue
+        for d in needs[r.name]:
+            if 'bootstrap' not in recipes[d].options:
+                sys.exit(f'valence-build: {r.name} says options=(bootstrap) but needs {d}, which does not')
+    for p in closure(base):
+        if p in origin and 'bootstrap' not in recipes[origin[p]].options:
+            sys.exit(f'valence-build: {p} is part of the build base, so recipes/{origin[p]} needs options=(bootstrap)')
+
+    # the selection
+    names = list(a.names)
+    if a.edition:
+        suffix = E['ARCH_SUFFIX']
+        lists = [f'{HERE}/console-packages.txt']
+        if a.edition == 'desktop':
+            d = f'{HERE}/desktop-packages{suffix}.txt'
+            lists.append(d if os.path.exists(d) else f'{HERE}/desktop-packages.txt')
+            names.append('calamares-valence')
+        for l in lists:
+            names += [w for line in open(l, encoding='utf-8') if not line.startswith('#') for w in line.split()]
+        # mkiso.sh installs these whatever the lists say, and carries the guest tools in the ISO's own repository
+        names += ['busybox', 'valence-base', 'bash', 'glibc', 'apk-tools', 'valence-vm-guest', 'docs', 'lang']
+    asked = []
+    for n in names:
+        r = n if n in recipes else origin.get(n)
+        if not r: sys.exit(f'valence-build: no recipe is called {n} or makes a package called {n}')
+        if r not in asked: asked.append(r)
+    if asked:
+        sel, todo = set(), list(asked)
+        while todo:
+            r = todo.pop()
+            if r in sel: continue
+            sel.add(r); todo += needs[r] | runtime[r]
+    else:
+        sel = set(recipes)
+
+    # build order: a recipe after everything it needs; among those that are ready, by name
+    left = {r: {d for d in needs[r] if d in sel} for r in sel}
+    users = {r: [] for r in sel}
+    for r, ds in left.items():
+        for d in ds: users[d].append(r)
+    ready = [r for r in sel if not left[r]]; heapq.heapify(ready)
+    order = []
+    while ready:
+        r = heapq.heappop(ready); order.append(r)
+        for u in users[r]:
+            left[u].discard(r)
+            if not left[u]: heapq.heappush(ready, u)
+    if len(order) != len(sel):
+        stuck = sorted(r for r in sel if left[r])
+        sys.exit('valence-build: these recipes need each other, so none of them can be built first:\n' +
+                 '\n'.join(f'  {r} needs {" ".join(sorted(left[r]))}' for r in stuck[:40]))
+    if a.order: print('\n'.join(order)); return 0
+
+    def status(r):
+        """None when the repository has this recipe's packages as it would build them now, else why not"""
+        try: st = open(f'{STATE}/{r}', encoding='utf-8').read().split('\n')
+        except OSError: return 'not built yet'
+        fp = fingerprint(r)
+        if len(st) < 4: return 'not built yet'
+        if st[1] != epoch: return 'the builder changed'
+        if st[0] != fp: return 'the recipe changed' + (f', but it is still {st[2]}: bump pkgrel before committing' if st[2] == recipes[r].version else '')
+        gone = [f for f in st[3:] if f and not (os.path.isfile(f'{OUT}/{f}') and os.path.getsize(f'{OUT}/{f}') > 0)]
+        return f'{gone[0]} is missing from the repository' if gone else None
+
+    os.makedirs(f'{M}/logs', exist_ok=True)
+    stamp = lambda: time.strftime('%H:%M:%S')
+    built, current, failed, waiting = [], [], [], {}
+    for r in order:
+        if missing[r]:
+            print(f'##### CANNOT BUILD {r}: it needs {", ".join(missing[r])}, which no recipe makes', flush=True)
+            failed.append(r); continue
+        blocked = sorted(d for d in needs[r] if d in failed or d in waiting)
+        if blocked:
+            waiting[r] = blocked; continue
+        why = status(r)
+        if why is None and a.force and r in asked: why = 'asked for with --force'
+        if why is None: current.append(r); continue
+        if a.dry_run:
+            print(f'{r}: {why}'); built.append(r); continue
+        print(f'##### {stamp()} {r} ({why})', flush=True)
+        env = dict(os.environ, VALENCE_FINGERPRINT=fingerprint(r)); env.setdefault('VALENCE_AUTO_RESUME', '1')
+        log = f'{M}/logs/pkg-{r}.log'
+        with open(log, 'w') as lf:
+            rc = subprocess.run([ONE, r], stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env).returncode
+        text = re.sub(r'\x1b\[[0-9;]*m', '', open(log, encoding='utf-8', errors='replace').read())
+        if rc == 0:
+            print('\n'.join(l for l in text.split('\n') if ': created ' in l or ': removed ' in l), flush=True)
+            built.append(r)
+        else:
+            print(f'##### FAILED {r} (logs/pkg-{r}.log)\n' + '\n'.join(text.rstrip('\n').split('\n')[-25:]), flush=True)
+            failed.append(r)
+            try: os.remove(f'{WORK}/pkg/{r}/.prepared')   # start fresh next time (rule 58)
+            except OSError: pass
+            if a.stop: break
+    verb = 'would build' if a.dry_run else 'built'
+    print(f'##### {stamp()} {verb} {len(built)}, up to date {len(current)}, failed {len(failed)}, not tried {len(waiting)} (of {len(order)} recipes)', flush=True)
+    for r, ds in waiting.items(): print(f'      {r}: waits for {" ".join(ds)}')
+    if failed: print('##### FAILED: ' + ' '.join(failed), flush=True)
+    elif not a.dry_run: print('##### ALL DONE' if built else '##### nothing to build', flush=True)
+    return 1 if failed or waiting else 0
+
+
+if __name__ == '__main__':
+    try: sys.exit(main())
+    except KeyboardInterrupt: sys.exit(130)

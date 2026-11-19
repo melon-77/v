@@ -15,4 +15,6 @@ package(){
   ln -s ../run var/run; ln -s ../run/lock var/lock
   chmod 1777 tmp var/tmp; chmod 700 root
 }
-options=(keepdirs)
+# options=(bootstrap): part of what every other build stands on (BUILD_BASE in scripts/valence-build-recipe), so it is
+# built before that exists as packages, in the sysroot as scripts/toolchain.sh left it
+options=(keepdirs bootstrap)

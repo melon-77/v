@@ -12,6 +12,9 @@ pkgdesc_libstdc___dev="GNU C++ standard library headers"
 pkgdesc_libatomic="GCC atomic operations library"
 pkgdesc_libgomp="GCC OpenMP runtime"
 builddir=$srcdir
+# options=(bootstrap): part of what every other build stands on (BUILD_BASE in scripts/valence-build-recipe), so it is
+# built before that exists as packages, in the sysroot as scripts/toolchain.sh left it
+options=(bootstrap)
 package(){
   L=$TOOLS/$TARGET/lib64; [ -d $L ] || L=$TOOLS/$TARGET/lib; mkdir -p $pkgdir/usr/lib $pkgdir/usr/include
   cp -a $L/libgcc_s.so* $L/libstdc++.so* $L/libatomic.so* $L/libgomp.so* $pkgdir/usr/lib/ 2>/dev/null || true

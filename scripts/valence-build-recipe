@@ -1,16 +1,25 @@
 #!/bin/bash
-# valence-build: build a VALENCEBUILD recipe into signed apk v3 packages.
-# usage: valence-build <recipe-name> [--no-install]
+# valence-build-recipe: build ONE recipe into signed apk v3 packages, in a sysroot that holds what the recipe
+# declares and nothing else. This is the step scripts/valence-build runs for each recipe, in the order it works out
+# from the recipes; use that, unless everything this recipe needs is known to be in the repository already.
+# usage: valence-build-recipe <recipe-name>
 set -euo pipefail
 . "$(dirname "$(readlink -f "$0")")/env.sh"
 APK=$M/hosttools/bin/apk
 KEY=${VALENCE_SIGN_KEY:-$M/keys/valence-signing.rsa}   # VALENCE_SIGN_KEY: a key rotation (AGENTS.md), or the everyday key kept on a USB stick and used in place (BUILDING.md); mkiso.sh reads it too
 ARCH=$APK_ARCH
 OUT=$REPO/$ARCH
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$WORK"
+# Bump when a change to this script alters what packages contain: scripts/valence-build then builds every recipe again.
+BUILD_EPOCH=1
+# What every build may use without naming it: the C library with its headers (and the kernel's), and the compiler's
+# runtime libraries, which a program that a build makes and then runs is started with (scripts/valence-run).
+BUILD_BASE="glibc-dev libgcc libstdc++"
 
-name=$1; shift || true
-INSTALL=1; [ "${1:-}" = "--no-install" ] && INSTALL=0
+name=$1
+# one sysroot per checkout and architecture, so one build at a time
+exec 8>"$WORK/.build.lock"
+flock -n 8 || { echo "valence-build-recipe: another build is running in this checkout ($WORK/.build.lock)"; exit 1; }
 RECIPE=$M/recipes/$name/VALENCEBUILD
 [ -f "$RECIPE" ] || { echo "no recipe $RECIPE"; exit 1; }
 
@@ -157,14 +166,29 @@ export srcdir pkgdir builddir startdir pkgname pkgver
 untar(){ case $1 in *.xz|*.txz) xz -dc "$1" | tar -xf - -C "${2:-.}";; *) tar -xf "$1" -C "${2:-.}";; esac; }
 has_opt(){ local o; for o in "${options[@]:-}"; do [ "$o" = "$1" ] && return 0; done; return 1; }
 
-# ---------- install makedepends into the sysroot ----------
-sysroot_add(){
-  [ $# -eq 0 ] && return 0
-  # the lock lets two builds for the same arch run side by side (sysroot database and repo index)
-  flock $OUT/.lock $APK --root $SYSROOT --arch $ARCH --keys-dir $M/keys/trusted --repositories-file /dev/null \
-       --repository $OUT/Packages.adb --no-scripts --no-cache --quiet add --upgrade "$@"
-}
-if [ ${#makedepends[@]} -gt 0 ]; then msg "sysroot: ${makedepends[*]}"; sysroot_add "${makedepends[@]}"; fi
+# ---------- the sysroot: what this recipe declares, and nothing else ----------
+# Every build starts with a sysroot that holds $BUILD_BASE and the recipe's makedepends, with the packages those
+# depend on, and no other package: a library the recipe does not name is not there to be found, so the same recipe
+# makes the same package whatever was built before it (ROADMAP.md, "Decided": clean builds). apk works out the
+# difference from the sysroot the last build left, so only what differs is unpacked or removed; "upgrade --available"
+# also replaces a package that was rebuilt without a new version.
+# options=(bootstrap) is for the recipes the build base itself is made from. They are built before the base exists
+# as packages, on the C library scripts/toolchain.sh put into the sysroot: their sysroot is left as it is, and only
+# their own makedepends are added.
+apk_sysroot(){ flock $OUT/.lock $APK --root $SYSROOT --arch $ARCH --keys-dir $M/keys/trusted --repositories-file /dev/null \
+       --repository $OUT/Packages.adb --no-scripts --no-cache --quiet "$@"; }
+[ -d $SYSROOT/lib/apk/db ] || $APK --root $SYSROOT --arch $ARCH --initdb --keys-dir $M/keys/trusted \
+  --repositories-file /dev/null add >/dev/null 2>&1 || true
+if has_opt bootstrap; then
+  msg "sysroot (bootstrap, left as it is): ${makedepends[*]:-nothing added}"
+  [ ${#makedepends[@]} -eq 0 ] || apk_sysroot add --upgrade "${makedepends[@]}"
+else
+  msg "sysroot: $BUILD_BASE ${makedepends[*]:-}"
+  mkdir -p $SYSROOT/etc/apk
+  printf '%s\n' $BUILD_BASE "${makedepends[@]:-}" | grep . | sort -u > $SYSROOT/etc/apk/world
+  apk_sysroot upgrade --available --no-self-upgrade || {
+    echo "$name: the sysroot could not be set up: a makedepends that no package in the repository provides?"; exit 1; }
+fi
 
 # ---------- fetch / unpack ----------
 # VALENCE_KEEP_SRC=1 resumes a failed build in the existing tree (no unpack, no patches, no prepare)
@@ -267,6 +291,16 @@ make_apk(){ local sub=$1 dir=$2 desc=$3; shift 3; local deps=("$@")
   while read -r t so; do [ "$t" = N ] || continue
     printf '%s\n' "${sonames[@]:-}" | grep -qxF "$so" || deps+=("so:$so"); done <<< "$scan"
   local vp; vp=$(varname "$sub"); local extra="provides_${vp}[@]"; provides+=(${!extra:-})
+  # pkg-config modules: a package provides the ones it ships as pc:<name>, and depends on the ones their Requires
+  # and Requires.private lines name. Installing a -dev package then brings the -dev packages its headers and link
+  # line need, which a clean sysroot would otherwise lack ("Package zlib, required by libfoo, not found").
+  local pc pcn req
+  for pc in "$dir"/usr/lib/pkgconfig/*.pc "$dir"/usr/share/pkgconfig/*.pc; do [ -f "$pc" ] || continue
+    pcn=$(basename "$pc" .pc); provides+=("pc:$pcn=$pkgver-r$pkgrel")
+    for req in $(sed -n 's/^Requires\(\.private\)\{0,1\}:[ \t]*//p' "$pc" | tr ',' ' ' |
+                 awk '{ for (i = 1; i <= NF; i++) { if ($i ~ /^[<>=!]+$/) { i++; continue }; sub(/[<>=!].*/, "", $i); if ($i != "") print $i } }'); do
+      [ -e "$dir/usr/lib/pkgconfig/$req.pc" ] || [ -e "$dir/usr/share/pkgconfig/$req.pc" ] || deps+=("pc:$req"); done
+  done
   # <pkg>-doc and <pkg>-lang install themselves next to <pkg> once "docs" or "lang" is installed (apk add docs) and
   # leave with it; a -doc package with man pages brings the program that shows them
   local iif=
@@ -331,15 +365,21 @@ done
 make_apk "$pkgname" "$pkgdir" "$pkgdesc" "${depends[@]}"
 
 # ---------- reindex ----------
+# packages an earlier build of this recipe made and this one did not leave the repository first
+mkdir -p "$OUT/.state"; st=$OUT/.state/$name
+made=(); for sp in "${subpackages[@]:-}" "${auto[@]:-}" "$pkgname"; do [ -z "$sp" ] || made+=("$sp-$pkgver-r$pkgrel.apk"); done
+if [ -f "$st" ]; then tail -n +4 "$st" | while read -r old; do
+  printf '%s\n' "${made[@]}" | grep -qxF "$old" || [ ! -e "$OUT/$old" ] || { msg "removed $old (no longer made by this recipe)"; rm -f "$OUT/$old"; }
+done; fi
 msg "reindex"
 ( cd $OUT && flock .lock bash -c "$APK --keys-dir $M/keys/trusted --sign-key $KEY mkndx -d 'Valence $(date +%Y%m%d)' -o Packages.adb.new *.apk && mv Packages.adb.new Packages.adb" )
 
-# ---------- install into sysroot so later builds can use it ----------
-if [ $INSTALL = 1 ]; then
-  # (-doc and -lang packages are not installed: no build needs them)
-  all=("$pkgname"); for sp in "${subpackages[@]:-}"; do [ -n "$sp" ] && [[ $sp != *-doc && $sp != *-lang ]] && all+=("$sp"); done
-  msg "sysroot: ${all[*]}"; sysroot_add "${all[@]}"
-fi
+# ---------- the record scripts/valence-build reads ----------
+# line 1: the recipe's fingerprint as valence-build worked it out ("by hand" when this script was run directly, which
+# makes valence-build build the recipe again); line 2: BUILD_EPOCH; line 3: the version; then the package files.
+# Nothing is installed into the sysroot: the next build sets up its own.
+{ echo "${VALENCE_FINGERPRINT:-by hand}"; echo "$BUILD_EPOCH"; echo "$pkgver-r$pkgrel"; printf '%s\n' "${made[@]}"; } > "$st.new"
+mv "$st.new" "$st"
 # free the disk: build trees are large (set VALENCE_KEEP_WORK=1 to keep them for debugging)
 [ "${VALENCE_KEEP_WORK:-0}" = 1 ] || rm -rf "$WORK/pkg/$name"
 msg done
