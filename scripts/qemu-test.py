@@ -465,7 +465,8 @@ else:
     # The GNU tools own the command names (BusyBox keeps /bin/sh and the commands nothing else provides), and the
     # passwords the installer set are yescrypt hashes made by shadow's chpasswd.
     out = sh('for c in ls cp mv cat sort find xargs grep sed tar gzip diff less ps top free pgrep sysctl ip login passwd su '
-             'useradd; do [ -L /usr/bin/$c ] && echo "LINK-$c"; [ -x /usr/bin/$c ] || echo "MISSING-$c"; done; echo tools-$((40+2))')
+             'useradd findmnt mkswap findfs blkdiscard; do [ -L /usr/bin/$c ] && echo "LINK-$c"; [ -x /usr/bin/$c ] || echo "MISSING-$c"; done; '
+             'echo tools-$((40+2))')
     bad = _re.findall(r'(?:LINK|MISSING)-\w+', out)
     ver = sh('ls --version | head -n1; grep --version | head -n1; sed --version | head -n1; tar --version | head -n1; '
              'find --version | head -n1; diff --version | head -n1; gzip --version | head -n1; ps --version; ip -V')
@@ -475,20 +476,48 @@ else:
     hashes = sh("grep -E '^(root|jcole):' /etc/shadow | cut -d: -f1,2 | cut -c1-9")
     bad += [f'{u} password hash' for u in ('root', 'jcole') if f'{u}:$y$' not in hashes]
     if 'tools-42' not in out: bad.append('the check itself did not finish')
+    # findmnt was asked for by the util-linux recipe and silently not built until pkgrel 1
+    if not _re.search(r'rootfs=\w+', sh('echo "rootfs=$(findmnt -no FSTYPE /)"')): bad.append('findmnt /')
     step('GNU tools on the installed system: ' + ('OK' if not bad else 'FAILED: ' + ', '.join(bad)))
-    # Phase 2's "done when": the installed system adds a package from a repository over the network. The repository
-    # is this build's repo/, served by this script (10.0.2.2 is the host in QEMU's user network); less-doc is in it
-    # and on no installed system. Taken out again afterwards, so the next boot of this disk tests the same thing.
+    # Phase 3's "done when": the installed system carries no documentation; adding one -doc package makes man work for
+    # that package; "docs" brings the -doc part of everything installed; taking them out again leaves nothing behind.
+    # (Phase 2's "done when", a package added from a repository over the network, is the same step.) The repository
+    # is this build's repo/, served by this script (10.0.2.2 is the host in QEMU's user network). Everything is taken
+    # out again afterwards, so the next boot of this disk tests the same thing.
+    nfiles = 'find /usr/share/man /usr/share/doc /usr/share/info /usr/share/locale -type f 2>/dev/null | wc -l'
+    last = lambda name, text: int((_re.findall(name + r'=(\d+)', text) or ['-1'])[-1])
+    out = sh(f'echo "docfiles=$({nfiles})"')
+    if last('docfiles', out) != 0: bad.append(f"{last('docfiles', out)} documentation files on the base system")
+    step('no documentation on the installed system: ' + ('OK' if last('docfiles', out) == 0 else 'FAILED'))
     if not offline:
         import http.server, threading, functools
         srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=f'{M}/repo'))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-        url = f'http://10.0.2.2:{srv.server_address[1]}/{"x86" if i686 else "x86_64"}/Packages.adb'
-        out = sh(f'apk --repositories-file /dev/null --repository {url} add less-doc; ls /usr/share/man/man1/less.1* && echo added-$((40+2))')
+        apkn = f'apk --repositories-file /dev/null --repository http://10.0.2.2:{srv.server_address[1]}/{"x86" if i686 else "x86_64"}/Packages.adb'
+        out = sh(f'{apkn} add less-doc; ls /usr/share/man/man1/less.1* && echo added-$((40+2)); '
+                 'echo "manlines=$(man less 2>/dev/null | grep -c -i less)"; echo "apropos=$(apropos -s 1 less 2>/dev/null | grep -c "^less")"', timeout=600)
         print(out)
-        if 'added-42' not in out: bad.append('apk add over the network')
-        step('apk add less-doc from a repository over the network: ' + ('OK' if 'added-42' in out else 'FAILED'))
-        sh('apk del less-doc')
+        ok = 'added-42' in out and last('manlines', out) > 0
+        if not ok: bad.append('apk add less-doc over the network, then man less')
+        if last('apropos', out) < 1: bad.append('apropos less (the index of man pages)')
+        step('apk add less-doc from a repository over the network, man less, apropos less: ' + ('OK' if ok and last('apropos', out) > 0 else 'FAILED'))
+        pages = ['1 ls', '1 grep', '1 bash', '5 passwd', '8 mount', '8 ip', '1 doas', '8 runsv']
+        out = sh(f'{apkn} add docs >/dev/null; echo "docpkgs=$(apk list --installed 2>/dev/null | grep -c -- -doc-)"; '
+                 'for q in ' + ' '.join(f'"{q}"' for q in pages) + '; do man $q 2>/dev/null | grep -q . || echo "NOPAGE-$q"; done; '
+                 'echo alldocs-$((40+2))', timeout=1800)
+        print(out)
+        n = last('docpkgs', out); nop = _re.findall(r'NOPAGE-\d \w+', out)
+        ok = n >= 20 and not nop and 'alldocs-42' in out
+        if not ok: bad.append(f'apk add docs ({n} -doc packages' + (', no page for ' + ', '.join(x[7:] for x in nop) if nop else '') + ')')
+        step(f'apk add docs: {n} -doc packages came with it, man finds {len(pages) - len(nop)} of {len(pages)} pages: ' + ('OK' if ok else 'FAILED'))
+        # (mandoc came as a dependency and leaves with them; /usr/bin/man is then BusyBox's link again)
+        out = sh(f'apk del docs less-doc >/dev/null; echo "docfiles=$({nfiles})"; '
+                 'echo "docpkgs=$(apk list --installed 2>/dev/null | grep -c -E -- "-doc-|^mandoc-")"; '
+                 '[ -L /usr/bin/man ]; echo "manlink=$?"', timeout=900)
+        print(out)
+        ok = last('docfiles', out) == 0 and last('docpkgs', out) == 0 and last('manlink', out) == 0
+        if not ok: bad.append('apk del docs left documentation behind')
+        step('apk del docs: nothing left behind: ' + ('OK' if ok else 'FAILED'))
     if bad:
         p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300); sys.exit(1)
     # sudo as the normal user: asks for the password once, then remembers it
