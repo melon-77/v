@@ -140,6 +140,24 @@ else:
 
 t0 = time.monotonic()
 def step(s): print(f'[{time.monotonic()-t0:7.1f}s] {s}', flush=True)
+
+def boot_serial_entry(p):
+    """Boot the ISO's "serial console" menu entry. The tests used to press Down three times and Enter; a busy guest
+    drops key presses now and then, one lost Down boots "safe graphics", which says nothing on the serial port, and
+    the test waits ten minutes for a kernel it cannot hear. GRUB marks the highlighted entry with '*' on a serial
+    terminal, so press Down until that entry is the marked one. (Only the start of the title is matched: GRUB
+    sometimes repositions the cursor in the middle of a title.)"""
+    p.expect('Valence live', timeout=300); time.sleep(1)
+    for _ in range(12):
+        p.send('\x1b[B')
+        try:
+            p.expect(_re.escape('*Valence live (ser'), timeout=2); break
+        except pexpect.TIMEOUT:
+            pass
+    else:
+        print('GRUB menu: the "serial console" entry never became the highlighted one'); sys.exit(1)
+    p.send('\r')
+
 p = pexpect.spawn(cmd[0], cmd[1:], encoding='utf-8', codec_errors='replace', timeout=600)
 p.logfile_read = log
 PROMPT = r'@valence[\w-]*.*[#$] '
@@ -161,10 +179,7 @@ def sh(c, timeout=300, expect=PROMPT):
 if mode == 'desktop':
     import socket
     step('waiting for GRUB')
-    p.expect('Valence live', timeout=300); time.sleep(1)
-    for _ in range(3):
-        p.send('\x1b[B'); time.sleep(0.3)          # down to "serial console" (a typed GRUB command line loses keys)
-    p.send('\r')
+    boot_serial_entry(p)
     p.expect(PROMPT, timeout=900); step('logged in on the serial console')
     ok = True
     for svc in ['dbus', 'elogind', 'polkitd', 'udevd', 'NetworkManager', 'sddm', 'avahi-daemon', 'cupsd']:
@@ -259,10 +274,7 @@ if mode == 'desktop-install':
     def count(c):                                   # run c, return the number it echoes as N=<n>
         m = _re.search(r'N=(\d+)', sh(f'echo N=$({c})')); return int(m.group(1)) if m else 0
     step('waiting for GRUB')
-    p.expect('Valence live', timeout=300); time.sleep(1)
-    for _ in range(3):
-        p.send('\x1b[B'); time.sleep(0.3)          # down to "serial console"
-    p.send('\r')
+    boot_serial_entry(p)
     p.expect(PROMPT, timeout=900); step('logged in on the live desktop ISO')
     sh('stty cols 160 rows 50; export TERM=vt100')
     sh(f'export VALENCE_DISK={DISKNAME} VALENCE_HOSTNAME=valencedesk VALENCE_ROOTPW=valenceroot VALENCE_USER=jcole '
@@ -337,10 +349,7 @@ if mode == 'desktop-install':
 
 if mode == 'dualboot':
     step('waiting for GRUB (UEFI)')
-    p.expect('Valence live', timeout=300); time.sleep(1)
-    for _ in range(3):
-        p.send('\x1b[B'); time.sleep(0.3)
-    p.send('\r')
+    boot_serial_entry(p)
     p.expect(PROMPT, timeout=900); step('logged in on the live system')
     sh('stty cols 160 rows 50; export TERM=vt100')
     sh(f'export VALENCE_DISK={DISKNAME} VALENCE_HOSTNAME=valencedual VALENCE_ROOTPW=valenceroot VALENCE_USER=jcole VALENCE_USERPW=valenceuser '
@@ -378,11 +387,7 @@ if mode == 'dualboot':
 
 if mode == 'live':
     step('waiting for GRUB')
-    p.expect('Valence live', timeout=300)
-    time.sleep(1)
-    for _ in range(3):
-        p.send('\x1b[B'); time.sleep(0.3)          # down to "serial console"
-    p.send('\r')
+    boot_serial_entry(p)
     step('booting kernel')
     p.expect('Valence live: looking for boot medium', timeout=600)
     step('initramfs running')
