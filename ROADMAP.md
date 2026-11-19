@@ -134,8 +134,12 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   repositories that the builder makes today.
   *A folder per program*, as in GoboLinux: each package is unpacked into a directory of its own,
   `/Programs/<name>/<version>`, and those directories are the record of what is installed. Removing a program
-  is removing its folder. The usual tree (`/usr/bin`, `/usr/lib`, ...) is made from the folders, so every program
-  finds its files where it expects them, software that was not built for Valence included.
+  is removing its folder. The usual tree (`/usr/bin`, `/usr/lib`, ...) is made from the folders with hard links:
+  each file is the same file under a second name, so every program sees ordinary files where it expects them,
+  software that was not built for Valence included, and nothing needs patching. (GoboLinux uses symbolic links;
+  programs that look for their files next to themselves, such as Qt and Python, then need fixes.) Hard links do
+  not cross file systems or Btrfs subvolumes, so `/Programs` and `/usr` share one. Files under `/etc` are copies,
+  because they are edited.
   *Speed*: packages download and unpack in parallel, each into its own folder, where nothing can collide. An
   upgrade touches the running system in one short step at the end, when the usual tree is pointed at the new
   folders; the old folders stay until they are cleaned up, so going back is the same step in reverse.
@@ -145,11 +149,8 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   *Done when:* a console install and a desktop install made by it pass the QEMU tests; an upgrade that is killed at
   any point leaves a system that boots; and it installs the base system measurably faster than apk and xbps do
   on the same machine.
-  Open: its name. Whether the usual tree is made of hard links (programs see ordinary files; nothing needs
-  patching) or of GoboLinux's symbolic links (the folder shows through, and programs that look for their files
-  next to themselves, such as Qt and Python, need fixes). Whether `-dev`, `-doc` and `-lang` parts get folders of
-  their own or live inside the program's folder. And when: before the desktop, the desktop is fitted to the
-  layout once.
+  Open: its name. Whether `-dev`, `-doc` and `-lang` parts get folders of their own or live inside the program's
+  folder. And when: before the desktop, the desktop is fitted to the layout once.
 
 ## Not decided yet
 
