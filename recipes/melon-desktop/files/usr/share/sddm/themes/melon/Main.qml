@@ -1,5 +1,4 @@
 // melon's login screen (SDDM, Qt 6): the melon planet, a clock, the user, a password field.
-// The survivor edition (melon-gold) is the same file with another theme.conf (background, accent).
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts

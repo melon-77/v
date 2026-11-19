@@ -2,13 +2,13 @@
 
 Today the ISOs are release assets on GitHub (`releases/download/<tag>/...`). That works and costs nothing, but the link says
 "github.com", and the owner wants downloads that look more polished. This note compares the free options, says what each needs
-from the owner, and describes what is already prepared in the repository. (Written 7 October 2026; check a host's current limits
-before relying on one.)
+from the owner, and what melon had set up. (Written 7 October 2026; check a host's current limits before relying on one.
+Which host to use is an open decision.)
 
 ## What a download needs
 
 - a file a browser can fetch with one click, at an address that doesn't change when a release is replaced;
-- the **SHA-256 checksum** next to it (already on the site's download page and in `SHA256SUMS`);
+- the **SHA-256 checksum** next to it (already in each release's `SHA256SUMS`);
 - room for a few ISOs at once: the desktop one is about 835 MB, the console one about 396 MB, and the 32-bit editions will add two more;
 - no money, and nothing that stops working when one person's laptop is off.
 
@@ -32,40 +32,16 @@ before relying on one.)
 
 This is a recommendation; the owner decides, and signing up is the owner's to do (accounts, keys and domains belong to a person).
 
-## What is already prepared
+## What melon had set up (removed with its website)
 
-- **`scripts/upload-isos.sh [--dry-run] HOST RELEASE FILE...`** writes `SHA256SUMS` and uploads to `sourceforge`, `archive` or `r2`.
-  Logins come from the environment or the host tool's own config (the variables are listed at the top of the script); nothing secret is in
-  the repository. `--dry-run` prints the commands. It needs the real accounts to run for real, so it is only dry-run tested.
-- **`site/download/`**, the download page: every file with its size, checksum and download link, how to check it and how to write it.
-  The site's buttons point there, not at GitHub, so moving the files is a change to this one page (generated from `site/releases.json` by
-  `scripts/site-release.py`).
+melon uploaded its ISOs with `scripts/upload-isos.sh` (SourceForge, the Internet Archive or R2; logins from the environment, nothing
+secret in the repository) and listed every file with its size, checksum and links on its website's download page (`site/download/`,
+generated from `site/releases.json`). Both went with the website; git history has them. melon's SourceForge project (`melonl`)
+carried the 0.2, 0.3 and 0.4 ISOs and the 32-bit pre-release `i686-20261007`, with the same checksums as the GitHub releases. The
+Internet Archive and Cloudflare R2 were never set up.
 
-## Adding a host to the site (when an account exists)
+## When a host is chosen
 
-1. Run `scripts/upload-isos.sh` for the host with the release's ISOs.
-2. In `site/releases.json`, add the host to `mirrors` as `{"label": "SourceForge", "url": "https://.../{file}"}` (`{file}` becomes each
-   ISO's name, `{tag}` the GitHub release's tag). A host that only has some releases lists them:
-   `{"label": "SourceForge", "tags": {"i686-20261007": "https://sourceforge.net/projects/<project>/files/i686-20261007/{file}/download"}}`.
-   Then run `scripts/site-release.py render`. Every file the host carries then shows "also from ...", and the note about GitHub changes by itself.
-3. Put the same link in the release notes, update README and `docs/`, and open the pull request against `testing`
-   (the site follows `AGENTS.md` "Website"; `scripts/publish-site.sh` publishes it).
-4. The 32-bit editions are in their own GitHub pre-release (`i686-<date>`). They are filled with
-   `scripts/site-release.py update --tag i686-<date> --editions x86-desktop,x86-console`, which also marks them "test build" on the site.
-
-## Current setup (9 October 2026)
-
-- **SourceForge** project `melonl` (account `melaboton`), files at `https://sourceforge.net/projects/melonl/files/<release folder>/`. Uploads run
-  from the owner's computer in WSL with an ed25519 key made for this (`~/.ssh/id_ed25519_sourceforge`, public half on the SourceForge account):
-  `SF_USER=melaboton SF_PROJECT=melonl scripts/upload-isos.sh sourceforge <release folder> <iso>...`.
-- On SourceForge now: `i686-20261007` (both 32-bit ISOs and `SHA256SUMS`, the same files as the GitHub pre-release) and `melon-20260929.2`
-  (the two 64-bit 0.2 ISOs and `SHA256SUMS`, downloaded from the GitHub release, checked against its checksums and uploaded on 8 October 2026).
-  The download page lists them as the download buttons. Every later release gets its own folder named after its tag.
-- Not set up yet: the Internet Archive and Cloudflare R2.
-- SourceForge is the **primary** host (`"primary": true` on its `mirrors` entry in `site/releases.json`, the owner's decision of 8 October 2026): the
-  download buttons and the `SHA256SUMS` links go there. The owner asked for GitHub's links to stay as well (`"keep_github": true` at the top of
-  `releases.json`), so each file shows "also from GitHub"; without that setting GitHub's link is dropped for every file SourceForge carries.
-  A file SourceForge doesn't carry yet keeps its GitHub link as the button, so no button is ever dead; add a release's folder to the
-  entry's `tags` as soon as it is uploaded. The GitHub releases stay as the release notes and the source of the checksums the site reads.
-- **melon 0.4 “Dudaim”** (9 October 2026, GitHub release `v0.4`, Latest; SourceForge folder `v0.4`: both ISOs and `SHA256SUMS`, same checksums as GitHub): the main download on the site (`scripts/site-release.py update --tag v0.4`, `v0.4` in the SourceForge entry's `tags`). Pass only the ISOs to `upload-isos.sh`: it writes `SHA256SUMS` itself, and naming it too adds a line for the file itself that `sha256sum -c` then fails on.
-- **melon 0.3 “Cantaloupe”** (9 October 2026, GitHub release `v0.3`, superseded by 0.4; SourceForge folder `v0.3`: both ISOs and `SHA256SUMS`, same checksums as GitHub): the main download on the site until 0.4 (`scripts/site-release.py update --tag v0.3`, `v0.3` in the SourceForge entry's `tags`). It was first listed as a test build next to 0.2 until the desktop ISO was confirmed to boot on real hardware.
+1. Upload each release's ISOs and its `SHA256SUMS` there (a new upload script should take its logins from the environment or the host
+   tool's own config, never from the repository). Pass `sha256sum` only the ISOs: a `SHA256SUMS` that lists itself fails `sha256sum -c`.
+2. Put the links in the release notes, update README and `docs/`, and open the pull request against `testing`.

@@ -1,6 +1,7 @@
 pkgname=calamares
 pkgver=3.3.14
-pkgdesc="Calamares system installer (runs the melon gauntlet on the desktop live ISO)"
+pkgrel=1
+pkgdesc="Calamares system installer (the desktop live ISO's graphical installer)"
 license=GPL-3.0-or-later
 url=https://calamares.io
 source=(calamares-3.3.14.tar.gz)

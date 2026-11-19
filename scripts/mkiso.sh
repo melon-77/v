@@ -3,7 +3,7 @@
 #
 # The ISO carries two squashfs layers:
 #   melon/rootfs.sqfs  a pristine, apk-installed melon system (exactly what gets installed)
-#   melon/live.sqfs    the small live-session layer on top (autologin, hostname, live services, sounds)
+#   melon/live.sqfs    the small live-session layer on top (autologin, hostname, live services, motd)
 # The initramfs stacks them with a RAM overlay. The installers copy rootfs.sqfs to disk (fast, and no
 # second copy of every package on the ISO) and use the repo on the ISO only for extra packages.
 set -euo pipefail
@@ -13,7 +13,7 @@ ROOT=$WORK/liveroot LIVE=$WORK/livelayer ISO=$WORK/iso INITRD=$WORK/initrd
 DATE=$(date -u +%Y%m%d)   # UTC: WSL keeps Windows' time zone, which gave ISOs the day before's date
 ISOARCH=$([ $MELON_ARCH = x86 ] && echo i686 || echo x86_64)
 OUTISO=$M/out/melon-$DATE-$ISOARCH.iso
-PKGS=${PKGS:-"melon-base linux-melon linux-firmware wpa_supplicant xfsprogs grub zstd openssl ca-certificates cryptsetup ncurses-terminfo musl-utils alsa-utils mpg123 kmod efibootmgr nethack"}
+PKGS=${PKGS:-"melon-base linux-melon linux-firmware wpa_supplicant xfsprogs grub zstd openssl ca-certificates cryptsetup ncurses-terminfo musl-utils alsa-utils kmod efibootmgr"}
 # leave out optional packages that haven't been built for this architecture yet (with a warning)
 _p=; for x in $PKGS; do
   if ls $M/repo/$APK_ARCH/$x-[0-9]*.apk >/dev/null 2>&1; then _p="$_p $x"; else echo "warning: $x is not built for $APK_ARCH, left out"; fi
@@ -50,10 +50,6 @@ rm -rf $ROOT/var/cache/apk/*
 mkdir -p $ROOT/usr/share/melon/profiles
 printf '%s\n' $PKGS > $ROOT/usr/share/melon/profiles/base
 [ -n "$LIVE_ONLY" ] && printf '%s\n' $LIVE_ONLY > $ROOT/usr/share/melon/profiles/live-only
-# the packages built with Rust (recipes with options=(rust)), for the installers' "remove everything built with Rust"
-for r in $(grep -lE '^options=\(.*\brust\b' $M/recipes/*/MELONBUILD); do
-  ( srcdir=/nonexistent; . "$r"; printf '%s\n' "$pkgname" ${subpackages[@]+"${subpackages[@]}"} )
-done > $ROOT/usr/share/melon/rust-packages
 if [ -n "$DESKTOP_PKGS" ]; then
   printf '%s\n' $PKGS $(printf '%s\n' $DESKTOP_PKGS | grep -vxF "${LIVE_ONLY:-@none@}") > $ROOT/usr/share/melon/profiles/desktop
   # services for the desktop profile: udev replaces mdev, NetworkManager replaces the dhcp/wpa services
@@ -65,7 +61,7 @@ fi
 cp $ROOT/boot/vmlinuz-melon $ISO/boot/vmlinuz
 
 step "live layer"
-mkdir -p $LIVE/etc/sv/getty-tty1 $LIVE/etc/sv/getty-ttyS0 $LIVE/var/service $LIVE/etc/apk $LIVE/usr/share/melon
+mkdir -p $LIVE/etc/sv/getty-tty1 $LIVE/etc/sv/getty-ttyS0 $LIVE/var/service $LIVE/etc/apk
 echo melon-live > $LIVE/etc/hostname
 sed 's/^root:[^:]*:/root::/' $ROOT/etc/shadow > $LIVE/etc/shadow; chmod 640 $LIVE/etc/shadow
 echo 'GETTY_ARGS="-n -l /usr/bin/melon-autologin"' > $LIVE/etc/sv/getty-tty1/conf
@@ -91,11 +87,11 @@ else
   for s in getty-tty1 getty-tty2 getty-tty3 getty-ttyS0 mdevd syslogd klogd dhcp; do ln -sfn /etc/sv/$s $LIVE/var/service/$s; done
 fi
 { echo "$(cat $ROOT/usr/share/melon/repo-url)/$APK_ARCH/Packages.adb"; echo "/media/melon/melon/repo/$APK_ARCH/Packages.adb"; } > $LIVE/etc/apk/repositories
-install -m644 $M/recipes/melon-sounds/ice.mp3 $LIVE/usr/share/melon/.ice
 cat > $LIVE/etc/motd <<'MOTD'
 
   Welcome to the melon live system.
 
+    melon-install     install melon to a disk (melon-install --help for unattended use)
     melonfetch        show system info
     melon-svc list    list services
     melon-wifi        list Wi-Fi networks;  melon-wifi "Name" "password"  to connect

@@ -8,8 +8,8 @@ source=(mesa-26.0.8.tar.xz)   # keep pkgver equal to mesa's
 builddir=$srcdir/mesa-26.0.8
 makedepends=(libdrm-dev wayland-dev wayland-protocols libx11-dev libxext-dev libxrandr-dev libxcb-dev libxshmfence-dev
   expat-dev zlib-dev zstd-dev eudev-dev xorgproto)
-# NVK's shader compiler (NAK) is Rust, so it is its own package: "remove everything built with Rust" takes NVK away
-# and leaves the rest of Mesa. Rust is cross-compiled for melon like every Rust recipe (rule 46), bindgen is the build
+# NVK's shader compiler (NAK) is Rust, so it is its own package and the rest of Mesa builds without Rust.
+# Rust is cross-compiled for melon like every Rust recipe (rule 46), bindgen is the build
 # machine's (scripts/host-rust.sh, with cbindgen) with its libclang, pointed at melon's headers. Mesa's Rust crates come through its
 # meson wraps (pinned by hash in subprojects/*.wrap), downloaded once into sources/mesa-packagecache.
 options=(rust)

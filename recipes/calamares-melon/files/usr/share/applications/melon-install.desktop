@@ -2,7 +2,7 @@
 Type=Application
 Name=Install melon
 GenericName=System installer
-Comment=Install melon to this computer (the gauntlet)
+Comment=Install melon to this computer
 Icon=melon-installer
 Exec=melon-install-gui
 Terminal=false

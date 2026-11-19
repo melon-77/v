@@ -12,12 +12,10 @@ measured when a full switch was on the table, so a variant doesn't have to redis
 - **Boot and shutdown:** the runit stages `/etc/runit/1` (mounts, device coldplug, swap/zram, hostname, the VM
   module blacklist) and `/etc/runit/3` (the explicit `/boot` unmount, rule 16) become dinit boot and shutdown services.
 - **melon's tools:** `melon-svc`, `halt`/`poweroff`/`reboot`, `melon-wifi`, `melonfetch` (shows the init).
-- **Installers and image:** the service lists in `/usr/share/melon/profiles/*.services`, how `.cold`, `cal-finish` and
-  `mkiso.sh` enable services, and a choice between the two inits.
-- **Tests:** `scripts/qemu-test.py` uses `sv status`, `sv check` and `sv restart`.
-- **Text that names runit:** AGENTS.md, README, `docs/config.txt`, `/etc/issue`, the installer slideshow, and the
-  gauntlet's questions. The final trial's answers are stored as salted hashes, so those questions have to be
-  regenerated from the draft outside the repo.
+- **Installers and image:** the service lists in `/usr/share/melon/profiles/*.services`, how `melon-install`,
+  `cal-finish` and `mkiso.sh` enable services, and a choice between the two inits.
+- **Tests:** `scripts/qemu-test.py` uses `sv status`, `sv check`, `sv down` and `sv up`.
+- **Text that names runit:** AGENTS.md, README, `docs/config.txt`, `/etc/issue` and the installer slideshow.
 
 ## Keeping two formats in sync
 

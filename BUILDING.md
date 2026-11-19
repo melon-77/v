@@ -86,7 +86,7 @@ build 19041 or newer.
    `/home/hi/melon/sysroot/usr/include`: "includes non-existent path"). Until you have rebuilt those packages yourself, let the
    path resolve: `mkdir -p /home/hi/melon && ln -s ~/melon-r2/sysroot /home/hi/melon/sysroot && ln -s ~/melon/hosttools /home/hi/melon/hosttools`.
 
-   A worktree that only rebuilds packages with nothing to compile (`melon-base`, `melon-sounds`) and installs the rest from
+   A worktree that only rebuilds packages with nothing to compile (`melon-base`, `melon-desktop`) and installs the rest from
    `repo/` can skip the toolchain (the 0.4 ISOs were made that way, with the round-2 packages copied in from the worktree that
    built them). Then nothing creates the sysroot's merged `/usr`: make `sysroot/usr/lib` and `sysroot/usr/bin` and the `lib`, `bin`
    and `sbin` links to them **before** `apk --initdb`, or apk makes `lib/` a real directory for its database and the first install
@@ -106,7 +106,6 @@ pool (`ovmf-generic_2025.11-3ubuntu7.2_all.deb`) was still on `https://launchpad
 
     git clone https://github.com/melon-77/melon-os ~/melon
     cd ~/melon
-    git submodule update --init       # melon's own games (recipes/melon-pinball/game)
     sudo scripts/host-setup.sh        # build tools, sources (~2 GB), host tools; about an hour
     # put the signing key in place (below)
     sudo JOBS=16 scripts/build-everything.sh

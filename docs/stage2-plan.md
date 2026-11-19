@@ -26,7 +26,7 @@ Built from the owner's answers in `docs/desktop-config.txt`. Decisions made with
 | Audio | PipeWire + WirePlumber |
 | Network | NetworkManager + wpa_supplicant (D-Bus build) |
 | Look | melon dark (Breeze + green/orange accents), Noto fonts + Hack, bottom panel; logo on wallpaper, splash, SDDM, GRUB theme, launcher icon |
-| Installers | Calamares + gauntlet (3 s Next delay, wrong answer = back 10, same music, finish rewards: certificate, exclusive wallpaper, melonfetch badge). The quick console installer gets the desktop profile. Both: dual boot, optional LUKS encryption, zram + swap file, US/English/UTC, optional Alpine repo |
+| Installers | Calamares. The console installer (`melon-install`) gets the desktop profile. Both: dual boot, optional LUKS encryption, zram + swap file, US/English/UTC; the console installer also offers the optional Alpine repo |
 
 ## Build layers (in order)
 
@@ -41,7 +41,7 @@ Built from the owner's answers in `docs/desktop-config.txt`. Decisions made with
 5. **Services:** NetworkManager, BlueZ, PipeWire + WirePlumber, CUPS, fprintd, power-profiles-daemon,
    UPower, UDisks2, xdg-desktop-portal, SDDM.
 6. **Flatpak** (ostree, bubblewrap, xdg-dbus-proxy, appstream, libarchive, gpgme, fuse3), GameMode, MangoHud.
-7. **Installers:** Calamares + kpmcore, gauntlet QML module, melon branding; console installer desktop
+7. **Installers:** Calamares + kpmcore, melon branding; console installer desktop
    profile, dual boot, LUKS (adds a small initramfs for encrypted installs), zram + swap file.
 8. **Theme and branding**, desktop ISO assembly, QEMU tests (the VM uses virtio-gpu, so a Plasma
    session is tested with llvmpipe/virgl).
@@ -54,7 +54,7 @@ Built from the owner's answers in `docs/desktop-config.txt`. Decisions made with
 - Layer 5/6 libraries and services are built except where noted in the build logs; NetworkManager is
   built without `nmcli` until readline is packaged (Plasma's network applet uses libnm).
 - Qt 6, KF6 and Plasma: recipes generated (`scripts/gen-kde-recipes.py`), building after the host Qt tools.
-- Installers: Calamares configuration, the gauntlet module and the finishing jobs are written
+- Installers: Calamares configuration and the finishing jobs are written
   (`recipes/calamares-melon`); both installers can encrypt the root (LUKS2) and make a swap file.
 - Desktop ISO: `MELON_EDITION=desktop scripts/mkiso.sh` (package list in `scripts/desktop-packages.txt`).
 - First login offers Firefox, VLC, Steam and Prism Launcher from Flathub (`melon-first-boot`).

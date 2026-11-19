@@ -264,7 +264,7 @@ if mode == 'desktop-install':
     sh('stty cols 160 rows 50; export TERM=vt100')
     sh(f'export MELON_DISK={DISKNAME} MELON_HOSTNAME=melondesk MELON_ROOTPW=melonroot MELON_USER=jcole '
        'MELON_USERPW=melonuser MELON_PROFILE=desktop MELON_YES=1 MELON_SERIAL=1 MELON_ENCRYPT=n')
-    out = sh('/usr/libexec/melon/.cold', timeout=3600)
+    out = sh('melon-install', timeout=3600)
     ok = 'melon is installed' in out
     step(f'desktop install: {"OK" if ok else "FAILED"}')
     if not ok: print(out[-3000:])
@@ -326,36 +326,8 @@ if mode == 'desktop-install':
     svcs = count('n=0; for s in avahi-daemon cupsd; do sv check /var/service/$s >/dev/null 2>&1 && n=$((n+1)); done; echo $n')
     lpadm = count('id -Gn jcole | tr " " "\\n" | grep -cx lpadmin')
     ok &= svcs == 2 and lpadm == 1; step(f'printing on the installed system: {svcs}/2 services up, jcole in lpadmin: {lpadm == 1}')
-    # the gauntlet rewards through the unlock script (called by path; the command that starts it stays unnamed)
-    out = sh('/usr/libexec/melon/.gold jcole; echo REW=$([ -s /etc/melon/gauntlet-survivor ] && echo badge)'
-             '$(ls -d /usr/share/wallpapers/melon-survivor-* | wc -l)$([ -s /home/jcole/Pictures/melon-gauntlet-certificate.svg ] && echo cert)'
-             '$(grep -q "set theme=" /boot/grub/grub.cfg && grep -q "survivor edition" /boot/grub/themes/melon/theme.txt && echo gold)'
-             '$(grep -qx "Current=melon-gold" /etc/sddm.conf.d/20-survivor.conf && [ -s /usr/share/sddm/themes/melon-gold/Main.qml ] && echo sddm)')
-    rew = 'REW=badge3certgoldsddm' in out; ok &= rew
-    step('gauntlet rewards: ' + ('badge, 3 survivor wallpapers, certificate, gold boot menu, gold login screen' if rew else f'MISSING {out[-300:]!r}'))
-    # the gold look in jcole's running session (what a survivor's first login runs), read back from jcole's config;
-    # it is Plasma's look (colours, Plasma style, Konsole), so not on the 32-bit LXQt edition
-    if not i686:
-        sh("pid=$(ps -o pid,user,comm | awk '$2==\"jcole\" && $3==\"plasmashell\"{print $1}' | head -1)")
-        sh("e=$(tr '\\0' '\\n' < /proc/$pid/environ | grep -E '^(DBUS_SESSION_BUS_ADDRESS|WAYLAND_DISPLAY|XDG_RUNTIME_DIR)=' | tr '\\n' ' ')")
-        look = sh('su -s /bin/sh jcole -c "env $e /usr/libexec/melon/melon-survivor-look"; echo LOOK=$?; '
-                  'su -s /bin/sh jcole -c \'kreadconfig6 --file kdeglobals --group General --key ColorScheme; '
-                  'kreadconfig6 --file plasmarc --group Theme --key name; '
-                  'kreadconfig6 --file konsolerc --group "Desktop Entry" --key DefaultProfile; '
-                  'kreadconfig6 --file kscreenlockerrc --group Greeter --group Wallpaper --group org.kde.image --group General --key Image\' '
-                  '| tr "\\n" " " | sed "s/^/GOLD=/"')
-        gold = 'LOOK=0' in look and 'GOLD=MelonGold melon-gold MelonGold.profile /usr/share/wallpapers/melon-survivor-gold/' in look
-        ok &= gold; step('gold look in the session: ' + ('colours, Plasma style, Konsole, lock screen, wallpaper' if gold else f'MISSING {look[-300:]!r}'))
     time.sleep(10); mon(f'screendump {M}/logs/qemu-desktop-installed.ppm'); time.sleep(3)
-    # the gold login screen: back to the greeter (this ends jcole's session)
-    sh('sv restart sddm')
-    for _ in range(60):
-        time.sleep(2); gpid = count(greeter)
-        if gpid and gpid != pid: break
-    time.sleep(15); gup = gpid and count(greeter) == gpid; ok &= bool(gup)
-    step('gold greeter after restarting SDDM: ' + ('running' if gup else 'NOT RUNNING'))
-    mon(f'screendump {M}/logs/qemu-desktop-greeter-gold.ppm'); time.sleep(3)
-    step('screenshots: logs/qemu-desktop-greeter.ppm, -splash.ppm, -installed.ppm, -greeter-gold.ppm')
+    step('screenshots: logs/qemu-desktop-greeter.ppm, -splash.ppm, -installed.ppm')
     p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300)
     step('installed desktop test: ' + ('OK' if ok else 'FAILED'))
     sys.exit(0 if ok else 1)
@@ -370,7 +342,7 @@ if mode == 'dualboot':
     sh('stty cols 160 rows 50; export TERM=vt100')
     sh(f'export MELON_DISK={DISKNAME} MELON_HOSTNAME=melondual MELON_ROOTPW=melonroot MELON_USER=jcole MELON_USERPW=melonuser '
        'MELON_PROFILE=base MELON_YES=1 MELON_SERIAL=1 MELON_ENCRYPT=n MELON_MODE=alongside')
-    out = sh('/usr/libexec/melon/.cold', timeout=3600)
+    out = sh('melon-install', timeout=3600)
     ok = 'melon is installed' in out and 'next to the other systems' in out
     step('install alongside: ' + ('OK' if ok else 'FAILED'))
     if not ok: print(out[-3000:])
@@ -416,11 +388,11 @@ if mode == 'live':
     sh('stty cols 160 rows 50; export TERM=vt100')
     print(sh('melonfetch'))
     print(sh('cat /proc/asound/cards; ls /dev/snd'))
-    step('running the hidden installer')
+    step('running the console installer')
     sh(f'export MELON_DISK={DISKNAME} MELON_HOSTNAME=melontest MELON_ROOTPW=melonroot MELON_USER=jcole '
        'MELON_USERPW=melonuser MELON_PROFILE=base MELON_YES=1 MELON_SERIAL=1'
        + (' MELON_ENCRYPT=y MELON_LUKSPW=melonluks' if luks else ' MELON_ENCRYPT=n'))
-    out = sh('/usr/libexec/melon/.cold', timeout=3600)
+    out = sh('melon-install', timeout=3600)
     print(out[-3000:])
     ok = 'melon is installed' in out
     step(f'installer finished: {"OK" if ok else "FAILED"}')
@@ -446,11 +418,11 @@ elif mode == 'toram':
     step('boot medium ejected')
     sh('stty cols 160 rows 50; export TERM=vt100')
     for c in ['grep -E "media|sr0" /proc/mounts', 'ls -la /media/melon/melon', 'dd if=/dev/sr0 of=/dev/null bs=2048 count=1', 'free -m',
-              'melonfetch | tail -3', 'mpg123 --version | head -1']:
+              'melonfetch | tail -3', 'xfs_repair -V']:
         print(f'$ {c}'); print(sh(c))
     sh(f'export MELON_DISK={DISKNAME} MELON_HOSTNAME=ramtest MELON_ROOTPW=melonroot MELON_USER=jcole '
        'MELON_USERPW=melonuser MELON_PROFILE=base MELON_YES=1 MELON_SERIAL=1')
-    out = sh('/usr/libexec/melon/.cold', timeout=3600)
+    out = sh('melon-install', timeout=3600)
     ok = 'melon is installed' in out
     step(f'install with the medium removed: {"OK" if ok else "FAILED"}')
     if not ok: print(out[-3000:])
@@ -488,13 +460,6 @@ else:
     if i == 1: p.sendline('melonuser'); p.expect('root', timeout=60)
     p.sendline('exit'); p.expect(PROMPT, timeout=60)
     print(sh('melon-svc status; ls /var/log'))
-    # NetHack: setgid games (never root), and the shared scores belong to group games
-    # (waits for the answer itself: after the su session above, output and prompts can arrive one command late)
-    p.sendline("echo NH=$(stat -c '%a %U:%G' /usr/lib/nethack/nethack /var/games/nethack /var/games/nethack/record | xargs)")
-    try: p.expect(r'NH=(\d+ \S+ \d+ \S+ \d+ \S+)\r', timeout=60); nh = p.match.group(1)
-    except pexpect.TIMEOUT: nh = 'no answer'
-    nh_ok = nh == '2755 root:games 775 root:games 664 root:games'
-    step('nethack: ' + ('setgid games, shared scores' if nh_ok else f'WRONG {nh[-200:]!r}'))
     # the host side of the guest agent: ask the VM for its OS info, then shut it down from the host
     import socket, json
     try:
@@ -506,4 +471,3 @@ else:
     except Exception as e:
         step(f'guest agent not answering ({e}), powering off from inside')
         p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300); step('powered off')
-    if not nh_ok: sys.exit(1)

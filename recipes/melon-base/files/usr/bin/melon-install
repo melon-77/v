@@ -1,23 +1,36 @@
 #!/bin/sh
-# the quick melon installer.
+# melon-install: the console installer, on both live ISOs. It needs root and runs itself through doas otherwise.
 #
-# Layout (GPT, boots on both BIOS and UEFI):
+# Layout on an erased disk (GPT, boots on both BIOS and UEFI; the 32-bit edition uses MBR):
 #   1  1 MiB   BIOS boot (GRUB core for legacy BIOS)
 #   2  1 GiB   FAT32  -> /boot   (kernel, GRUB, EFI/BOOT/BOOTX64.EFI or BOOTIA32.EFI)
 #   3  rest    XFS    -> /
+# On UEFI, a disk with an EFI system partition and at least 20 GiB unallocated can take melon alongside what is on it.
 #
 # Unattended use (for testing): set MELON_DISK, MELON_HOSTNAME, MELON_ROOTPW, MELON_USER,
-# MELON_USERPW and MELON_YES=1 (and optionally MELON_PROFILE, MELON_WIFI_SSID/MELON_WIFI_PSK,
-# MELON_ALPINE=y to add Alpine's repo as the opt-in tagged repo "@alpine", MELON_ENCRYPT=y with
-# MELON_LUKSPW to encrypt / with LUKS2; /boot stays plain and a small initramfs asks for the passphrase,
-# MELON_NORUST=y to install without anything built with Rust, and whatever depends on it; that earns a wallpaper).
+# MELON_USERPW and MELON_YES=1 (and optionally MELON_PROFILE, MELON_MODE=alongside|erase,
+# MELON_WIFI_SSID/MELON_WIFI_PSK, MELON_ALPINE=y to add Alpine's repo as the opt-in tagged repo "@alpine",
+# MELON_ENCRYPT=y with MELON_LUKSPW to encrypt / with LUKS2; /boot stays plain and a small initramfs asks for
+# the passphrase, MELON_SERIAL=1 for a serial console on the installed system).
 #
-# This is the quick installer. The desktop ISO's advertised installer is Calamares
-# (with the melon gauntlet); this one installs the same thing in a handful of prompts.
+# The desktop ISO also has the graphical installer, Calamares (melon-install-gui); this one installs the
+# same thing in a handful of prompts.
 #   MELON_PROFILE=base     console system
 #   MELON_PROFILE=desktop  everything the desktop ISO installs (KDE Plasma, Wayland, Flatpak, ...)
 set -e
 PATH=/usr/bin
+case ${1:-} in -h|--help) cat <<'EOF'
+usage: melon-install
+
+Installs melon from the live ISO onto a disk. It asks for the disk (erased, or on UEFI next to Windows or
+another system in the disk's unallocated space), what to install (base or desktop), the host name, the
+passwords, a Wi-Fi network, the opt-in @alpine repo and disk encryption (LUKS). Needs root.
+
+Unattended (set as root: doas doesn't pass them on): MELON_DISK MELON_HOSTNAME MELON_ROOTPW MELON_USER
+MELON_USERPW MELON_PROFILE=base|desktop MELON_MODE=alongside|erase MELON_WIFI_SSID MELON_WIFI_PSK
+MELON_ALPINE=y MELON_ENCRYPT=y MELON_LUKSPW MELON_SERIAL=1 MELON_YES=1 (questions with a default take it)
+EOF
+  exit 0 ;; esac
 REPO=${MELON_REPO:-/media/melon/melon/repo}
 TARGET=/mnt/melon
 P=$(printf '\033[1;38;5;212m') B=$(printf '\033[1m') R=$(printf '\033[0m')
@@ -33,33 +46,13 @@ askpw(){ eval "cur=\${$1:-}"; [ -n "$cur" ] && return 0
     printf '%s?%s again: ' "$P" "$R"; stty -echo; read -r b; stty echo; echo
     [ -n "$a" ] && [ "$a" = "$b" ] && break; echo "passwords did not match or were empty"; done; eval "$1=\$a"; }
 
-[ "$(id -u)" = 0 ] || die "needs root"
 SYSIMG=${MELON_SYSIMG:-/media/melon/melon/rootfs.sqfs}
+[ -f "$SYSIMG" ] || die "melon system image not found at $SYSIMG (are you on the live ISO?)"
+# root from here on (passwordless doas for the live desktop's user)
+[ "$(id -u)" = 0 ] || exec doas /usr/bin/melon-install "$@"
 ARCH=$(apk --print-arch)
 case $ARCH in x86) EFI_TARGET=i386-efi EFI_FILE=BOOTIA32.EFI ;; *) EFI_TARGET=x86_64-efi EFI_FILE=BOOTX64.EFI ;; esac
-[ -f "$SYSIMG" ] || die "melon system image not found at $SYSIMG (are you on the live ISO?)"
 
-# theme music, at 30% volume, for as long as this runs
-ICE_PID=
-if [ -f /usr/share/melon/.ice ] && command -v mpg123 >/dev/null; then
-  # play on the card that has the speakers, not the GPU's HDMI audio (card 0 on many laptops)
-  # no sound card (servers, many VMs) is fine: set -e must not end the install here
-  ICE_CARD=$(melon-sound-default 2>/dev/null || true) ICE_PCM=$(melon-sound-default --pcm 2>/dev/null || true)
-  if [ -n "$ICE_CARD" ]; then
-    if amixer -c "$ICE_CARD" sget Master >/dev/null 2>&1; then
-      amixer -c "$ICE_CARD" -q -M sset Master 30% unmute 2>/dev/null || true
-      for c in PCM Speaker Headphone Front; do amixer -c "$ICE_CARD" -q -M sset "$c" 100% unmute 2>/dev/null || true; done
-    else
-      amixer -c "$ICE_CARD" -q -M sset PCM 30% unmute 2>/dev/null || true
-    fi
-    mpg123 -q --loop -1 -a "$ICE_PCM" /usr/share/melon/.ice >/dev/null 2>&1 &
-    ICE_PID=$!
-  fi
-fi
-stop_ice(){ [ -n "$ICE_PID" ] && kill "$ICE_PID" 2>/dev/null; ICE_PID=; }
-trap stop_ice EXIT
-trap 'stop_ice; exit 130' INT TERM
-[ -t 1 ] && [ -z "${MELON_YES:-}" ] && sh /usr/share/melon/.fall
 cat <<EOF
   This puts melon on a whole disk, erasing it, or next to Windows or another system in the disk's
   unallocated space (shrink Windows first, in Windows' Disk Management).
@@ -101,7 +94,6 @@ if ls -d /sys/class/net/*/wireless >/dev/null 2>&1; then
   [ -n "$MELON_WIFI_SSID" ] && askpw MELON_WIFI_PSK "Wi-Fi password"
 fi
 ask MELON_ALPINE "Also offer Alpine's packages as an opt-in @alpine repo (y/n)" n
-ask MELON_NORUST "Remove everything built with Rust, and whatever depends on it (y/n)" n
 ENCRYPT=n
 if command -v cryptsetup >/dev/null; then
   ask MELON_ENCRYPT "Encrypt the system with a passphrase (LUKS) (y/n)" n
@@ -297,14 +289,6 @@ if [ $ENCRYPT = y ]; then
   chroot $TARGET melon-mkinitramfs
 fi
 MELON_ROOT_DEV="$ROOTDEV" MELON_BOOT_DEV="$BOOTP" chroot $TARGET melon-update-grub
-
-case $MELON_NORUST in y|Y|yes)
-  # the reward first (melon-desktop's, from the new system or else this one), so it stays whatever the removal takes
-  if [ -x $TARGET/usr/libexec/melon/melon-rust-free ]; then chroot $TARGET /usr/libexec/melon/melon-rust-free / "$MELON_USER"
-  elif [ -x /usr/libexec/melon/melon-rust-free ]; then /usr/libexec/melon/melon-rust-free $TARGET "$MELON_USER"; fi
-  say "Removing everything built with Rust"
-  /usr/libexec/melon/melon-remove-rust $TARGET || true ;;
-esac
 
 say "Finishing"
 sync

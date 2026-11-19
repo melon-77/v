@@ -21,13 +21,11 @@ fi
 
 BASE="melon-layout linux-headers musl gcc-runtime zlib zstd xz openssl apk-tools busybox ncurses bash runit util-linux
   userspace-rcu inih bsd-compat-headers xfsprogs grub libnl3 expat dbus wpa_supplicant alsa-lib alsa-utils mpg123 kmod
-  opendoas ca-certificates linux-firmware melon-base melon-sounds linux-melon"
+  opendoas ca-certificates linux-firmware melon-base linux-melon"
 PLUMBING="libffi pcre2 glib libcap duktape linux-pam eudev elogind polkit argp-standalone musl-fts musl-obstack elfutils
   sqlite json-c popt device-mapper cryptsetup dosfstools squashfs-tools e2fsprogs bzip2 hunspell attr acl lm-sensors libogg libvorbis
   libtool sound-theme-freedesktop libcanberra icu boost-headers python3 readline keyutils gmp mpfr
   opus flac liblc3 libfreeaptx libsndfile flite lua5.4"
-# programs shipped on both ISOs (mkiso.sh PKGS); nethack needs ncurses and the same Lua tarball as lua5.4
-APPS="nethack"
 # in the package repository only: Cataclysm: DDA's game data is too big for the ISOs
 GAMES="cataclysm-dda"
 SIMPLE=$(python3 $M/scripts/gen-simple-recipes.py)
@@ -39,7 +37,7 @@ RUST="ripgrep"
 RUSTC="rust"
 DESKTOP_LIBS="libbytesize libnvme libatasmart libblockdev udisks2 pulseaudio libdaemon avahi cups qpdf poppler libcupsfilters libppd
   cups-filters modemmanager qrencode zxing-cpp opencv llvm mesa libepoxy xkbcomp xwayland vulkan-loader libvpx x264 libwebp libdmtx ffmpeg gamemode melon-fonts
-  sdl3 sdl3-image sdl3-ttf melon-pinball
+  sdl3 sdl3-image sdl3-ttf
   qemu-guest-agent open-vm-tools hvtools melon-vm-guest"
 # AppStream has Qt bindings (Discover), and Flatpak and the portal build against AppStream: right after Qt
 KDE=$(python3 $M/scripts/gen-kde-recipes.py | sed "s/\bqt6-qtbase\b/qt6-qtbase appstream flatpak xdg-desktop-portal/")
@@ -60,7 +58,7 @@ BUILDTOOLS2="lz4 ninja cmake meson git nasm tcl rsync
 # (scripts/gen-lxqt-recipes.py), with melon's LXQt defaults
 LXQT="fribidi cairo pango libsfdo seatd wlroots labwc libexif libfm-extra menu-cache xdg-user-dirs libxscrnsaver libproc2
   $(python3 $M/scripts/gen-lxqt-recipes.py) melon-lxqt"
-ALL=$(printf '%s\n' $BASE $PLUMBING $DEVTOOLS $BUILDTOOLS $APPS $GAMES $SIMPLE $BUILDTOOLS2 $GETTEXT $RUST $DESKTOP_LIBS $STEP2 $NVIDIA $RUSTC $KDE $INSTALLERS $LXQT | awk '!seen[$0]++')
+ALL=$(printf '%s\n' $BASE $PLUMBING $DEVTOOLS $BUILDTOOLS $GAMES $SIMPLE $BUILDTOOLS2 $GETTEXT $RUST $DESKTOP_LIBS $STEP2 $NVIDIA $RUSTC $KDE $INSTALLERS $LXQT | awk '!seen[$0]++')
 # The 32-bit (i686) edition, for old netbooks and laptops (the owner, 7 October 2026: LXQt as its desktop): the base
 # system, the libraries and services LXQt, SDDM and Calamares need, LLVM and Mesa (no Vulkan), the Qt and KDE Frameworks parts
 # LXQt and the installer use, labwc (wlroots) as the Wayland compositor, LXQt. No Plasma, Flatpak, NVIDIA, Rust or
@@ -77,7 +75,7 @@ if [ "$APK_ARCH" = x86 ]; then
   KDE_X86="extra-cmake-modules plasma-wayland-protocols polkit-qt-1 kf6-kcoreaddons kf6-kconfig kf6-ki18n kf6-kwidgetsaddons
     kf6-kwindowsystem kf6-kguiaddons kf6-kdbusaddons kf6-kcrash kf6-kidletime kf6-solid kf6-breeze-icons layer-shell-qt
     libkscreen sddm"
-  ALL=$(printf '%s\n' $BASE $PLUMBING nethack $SIMPLE_X86 efivar efibootmgr $DESKTOP_LIBS_X86 $QT_X86 $KDE_X86 $LXQT kpmcore calamares \
+  ALL=$(printf '%s\n' $BASE $PLUMBING $SIMPLE_X86 efivar efibootmgr $DESKTOP_LIBS_X86 $QT_X86 $KDE_X86 $LXQT kpmcore calamares \
     calamares-melon melon-desktop | awk '!seen[$0]++' | grep -vx qemu-guest-agent)   # QEMU 11 has no 32-bit x86 hosts
 fi
 # recipes nobody listed yet go at the end (64-bit only)

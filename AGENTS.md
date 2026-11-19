@@ -31,8 +31,8 @@ source by our own scripts and shipped as a signed apk v3 package.
 | compilers, VMs | clang 21 (+ `libclc`, `spirv-llvm-translator`), Go 1.27, gh (`github-cli`), QEMU 11.1 + OVMF (`qemu`, `ovmf`) (`STEP2` in `build-everything.sh`) | package repository only. clang: Mesa's OpenCL C shader compiler on melon; QEMU + OVMF run melon's own install tests on melon; OVMF is Ubuntu 26.04's prebuilt `ovmf-generic` at Ubuntu's paths |
 | NVIDIA | the open driver: nouveau + `linux-firmware-nvidia` (GSP 570.144 from upstream linux-firmware) + NVK (`mesa-nvk`), with zink for OpenGL; or NVIDIA's own kernel driver: `nvidia-open` 615 (open modules + NVIDIA's firmware) | package repository only; `melon-first-boot` asks which one on computers with an NVIDIA card (GTX 16/RTX 20 and newer). NVIDIA's userspace needs glibc: with `nvidia-open` only Flatpak apps (Steam) get NVIDIA's libraries, from Flathub |
 | gaming | Flatpak 1.16 + Flathub, GameMode | Steam is glibc-only, so it can't run natively on musl: `melon-first-boot` offers Steam (and Firefox, VLC, Prism Launcher) from Flathub on first login |
-| game library | SDL3 3.4 + SDL3_image + SDL3_ttf (`sdl3`, `sdl3-image`, `sdl3-ttf`) | for melon's own games; SDL dlopen()s its Wayland/X11/audio backends |
-| apps and games | NetHack 5.0 (both ISOs), melon pinball (desktop ISO; its own repo, a submodule), Cataclysm: DDA and GNU gettext (package repository only) | what goes on an ISO follows the size rule in "Contributing" |
+| game library | SDL3 3.4 + SDL3_image + SDL3_ttf (`sdl3`, `sdl3-image`, `sdl3-ttf`) | package repository only; SDL dlopen()s its Wayland/X11/audio backends |
+| apps and games | Cataclysm: DDA and GNU gettext (package repository only) | what goes on an ISO follows the size rule in "Contributing" |
 
 Owner's config (`CONFIG_*` answers) lives in `docs/config.txt`. Don't change those choices without the owner's approval.
 
@@ -58,18 +58,12 @@ scripts/mkiso.sh        live/installer ISO: rootfs.sqfs (pristine apk-installed 
                         installers) + live.sqfs (small live-session layer) + a small repo of extras (VM guest tools,
                         a few base packages; never a second copy of what rootfs.sqfs already holds)
 scripts/qemu-test.py    headless boot + install + reboot test over the serial console
-scripts/record-installer.py  records the console installer in QEMU as a video (blacks out the intro's title; not on the site)
 recipes/<name>/MELONBUILD   one directory per recipe (see below)
 recipes/<name>/*.patch      applied automatically with patch -p1, in name order
 recipes/<name>/<pkg>.post-install etc.   apk scripts for (sub)package <pkg>
 iso-files/init          live initramfs /init
 branding/               logo (transparent PNGs)
-site/                   the website: index.html, download/, style.css, gauntlet.js (a demo of the installer's gauntlet), distro-finder/,
-                        releases.json (the ISO facts, rendered into the pages by scripts/site-release.py);
-                        scripts/publish-site.sh adds it as a commit on the gh-pages branch (what GitHub Pages serves)
-art/site.py             draws site/assets/melon-pixel.svg (melonfetch's melon) and net.svg
-recipes/calamares-melon/    graphical installer branding + gauntlet (stage 2)
-recipes/melon-pinball/      melon's own pinball game (C++/SDL3); the game is a submodule (game/ = melon-77/melon-pinball)
+recipes/calamares-melon/    graphical installer: Calamares settings, branding, job configs, finishing scripts (stage 2)
 ```
 
 Not in git (see `.gitignore`): `sources/`, `work/`, `tools/`, `sysroot/`, `hosttools/`, `repo/`, `out/`,
@@ -281,8 +275,8 @@ Rebuilding the kernel takes about an hour on 2 cores.
     hash would find melon's own checkout: melon-build exports `GIT_CEILING_DIRECTORIES=$WORK` for every build (clang's
     `--version` had named melon's repo). `-sys` crates build their own static copy of
     a C library for musl targets unless told otherwise (`PCRE2_SYS_STATIC=0` in ripgrep): link melon's. **Every recipe
-    that puts Rust code into a package says `options=(rust)`**: the installers' "remove everything built with Rust"
-    option finds the packages by it (see Installers).
+    that puts Rust code into a package says `options=(rust)`**, so the Rust packages can be found from the recipes
+    (`grep -l 'options=(.*rust' recipes/*/MELONBUILD`).
 
 47. **Flatpak must be built with X11 authorization (`-Dxauth=enabled`, libXau).** Without it, sandboxed X11 apps get
     the host's `DISPLAY` and a path to an Xauthority file that doesn't exist inside the sandbox. Xwayland refuses them
@@ -314,8 +308,8 @@ Rebuilding the kernel takes about an hour on 2 cores.
     is NVIDIA's, shipped unmodified with NVIDIA's licence (the licence's condition for redistributing it). A real test
     needs an NVIDIA card: QEMU can't emulate one. What the build machine checks: the modules' vermagic, `depmod -e`
     against `System.map`, and loading them in a melon VM (`NVRM: No NVIDIA GPU found`, then a clean exit).
-52. **NVK (recipes/mesa-nvk) is Rust**, so it is its own recipe with `options=(rust)` (the rest of Mesa isn't Rust, and
-    "remove everything built with Rust" must not take the whole Mesa). Keep its `pkgver` equal to `mesa`'s. Meson
+52. **NVK (recipes/mesa-nvk) is Rust**, so it is its own recipe with `options=(rust)` (the rest of Mesa isn't Rust and
+    builds without it). Keep its `pkgver` equal to `mesa`'s. Meson
     cross-compiles its Rust through an extra cross file (`rust` with rule 46's flags, `bindgen`, `cbindgen`); bindgen and
     cbindgen are the build machine's (`scripts/host-rust.sh`) and load the build machine's libclang, which needs
     `-resource-dir` to find its own headers (`BINDGEN_EXTRA_CLANG_ARGS`). Mesa's Rust crates come through its meson wraps
@@ -429,18 +423,7 @@ scripts/qemu-test.py desktop-install out/melon-desktop-*-x86_64.iso /tmp/desk.im
 # --offline (any mode): the VM keeps its network card but reaches nothing outside; the installers must still work
 ```
 
-**melon pinball** (`recipes/melon-pinball`; the game itself is the `game/` submodule, github.com/melon-77/melon-pinball:
-change it there, then commit the new submodule commit here with a `pkgrel` bump): its build runs `melon-pinball-physics-test` (launches, flipper and mini
-flipper shots, cradles, the ramp, 450 random balls that must never leave the cabinet) and `melon-pinball-game-test`
-(a Harvest run through the Seed Market, melons and pests acting on the machine, kickback, spinner, magnet, a lost run),
-so a change that breaks the table or the rules fails the package. To look at it without a screen:
-`SDL_VIDEO_DRIVER=offscreen SDL_RENDER_DRIVER=software melon-pinball --screenshot out.png --seconds 30 --play`
-(the demo plays a classic game; add `--harvest` for a run, `--lazy` to lose it quickly; `--shop`, `--packs` and
-`--collection` show those screens; `--golden` the survivor look). The table's geometry lives in the game's `src/table.cpp` and drives
-both the physics and the painted art; after moving anything, check the test's "at rest mid-table" count (a ball that
-can come to rest off the flippers is a trap). Harvest's melons, grafts, pests and seed packs are data in `run.cpp`;
-their effects are in `game.cpp` (`applyMachine` for the physics, `add` and `currentMult` for the scoring). Unlocks
-are variety only (no permanent power) and live in the player's `~/.local/share/melon/pinball/unlocks.txt`.
+The tests run the console installer by name (`melon-install`, with the `MELON_*` variables from "Installers").
 
 Logs go to `logs/qemu-*.log`. The tests use KVM when it really works (`qemu-test.py` asks the kernel with the
 `KVM_GET_API_VERSION` ioctl: WSL2 on Windows 11 does, WSL2 on **Windows 10, or on a CPU Windows can't nest on, creates a
@@ -449,8 +432,8 @@ Logs go to `logs/qemu-*.log`. The tests use KVM when it really works (`qemu-test
 the console `live` install takes 77 s, `disk` and `disk --uefi` about 40 s each, and the desktop ISO boots and takes a login on
 the serial console in 25 s, but the Plasma desktop tests (`desktop`, `desktop-install`) were not usable there (another session saw
 Plasma not start in 15 minutes): run those on a machine with KVM. Use generous timeouts. The ISO's GRUB and the installed system both use
-the serial port, so tests don't need a screen. The test also records the sound card output to
-`logs/audio-capture.wav`, which lets you check that the installer music really plays.
+the serial port, so tests don't need a screen. The VM has an Intel HD Audio card (the `live` and `disk` tests list
+the sound devices the kernel found); QEMU records whatever it plays to `logs/audio-capture.wav`.
 
 ## Running melon in a VM
 
@@ -475,58 +458,25 @@ the serial port, so tests don't need a screen. The test also records the sound c
 
 ## Installers: do not break these product decisions
 
-- **Graphical installer (desktop ISO): Calamares with the gauntlet.** One Calamares view module
-  (`GauntletViewStep`, `gauntlet.qml` in `recipes/calamares-melon/modules/gauntlet/`) in two parts:
-  1. **The install gauntlet:** about 200 very easy questions (`questions.js`), one per screen, shuffled on every run
-     (question order and answer order; attention checks stay after the question they name and show its new number).
-     The Next question button waits a few seconds. A wrong answer sends you back 10 questions, never out of the
-     installer. Calamares' Next button stays locked until the last question.
-  2. **The final trial (optional):** 50 real questions (`trial.js`: the answers are only there as salted md5
-     hashes; the plaintext draft lives outside the repo), shuffled, 90 seconds each. A wrong answer or a timeout
-     sends you back 10; in the last 20 any mistake restarts the finale. Walking away still installs melon.
-  It's deliberately slow, to put off people who are only there for status. Keep it that way. Only passing the trial
-  (the page writes `/run/melon/.trial-passed`) earns the rewards: melon in gold (the `melon-gold` login screen via
-  `/etc/sddm.conf.d/20-survivor.conf`, the MelonGold colours, the `melon-gold` Plasma style, the MelonGold Konsole
-  profile and the golden melon on the lock screen, applied on first login by `melon-survivor-look`, and the gold
-  boot menu, which melon-update-grub picks by the badge), three wallpapers ("the other side" portal, golden rain and
-  the golden melon), an SVG certificate in `~/Pictures` and a melonfetch badge (`/etc/melon/gauntlet-survivor`). The
-  rewards live hidden in melon-desktop (`/usr/share/melon/.rewards`) and `melon-rewards ROOT USER` hands them out
-  (`cal-finish`, and the unlock command below).
+- **Graphical installer (desktop ISO): Calamares.** Its pages are welcome, partitioning, users and summary, then the
+  install and the finished page (`/etc/calamares/settings.conf` in `calamares-melon`). melon is US English and UTC,
+  so there are no locale or keyboard pages (Plasma's settings change both after the install). The live desktop's
+  "Install melon" icon runs `melon-install-gui`, which starts Calamares as root through doas.
 - **melon's look (melon-desktop):** Plasma style `melon`, colours MelonDark, Konsole profile Melon, SDDM theme `melon`
-  (its own QML, `usr/share/sddm/themes/melon`; the gold edition reuses the same `Main.qml` with another
-  `theme.conf`), GRUB theme `usr/share/melon/grub/themes/melon` (the desktop ISO uses it too). The art generators are
-  in `art/` (run from a checkout of the melon-art working directory with its fonts); `art/grubtheme.py` needs
-  `grub-mkfont` (from Ubuntu's grub-common: `apt-get download grub-common` and `dpkg -x` it, no install needed).
-- **Hidden owner commands** work like the console installer: `/etc/profile.d/zz-melon.sh` recognises them by the
-  first 16 hex digits of their name's sha256 and nothing else. The same rules apply: never write their names in any
-  file, comment, commit or test. `59c1a50f2e93bdc1` unlocks every gauntlet reward (`/usr/libexec/melon/.gold`,
-  desktop only; tests call that path). `721b2b05ebcca53c` skips the gauntlet (`/usr/libexec/melon/.pass`, live desktop
-  only): it creates `/run/melon/.gauntlet-skip`, the page then unlocks Calamares' Next, and a skipped gauntlet earns
-  no rewards.
+  (its own QML, `usr/share/sddm/themes/melon`), GRUB theme `usr/share/melon/grub/themes/melon` (the desktop ISO uses
+  it too). The scripts that drew these images (`art/`) are no longer in the tree; git history has them.
 - **Calamares runs melon's own jobs** (`cal-prepare`, `cal-finish` in `calamares-melon`): Calamares'
   users job calls shadow's `useradd`/`usermod`/`groupadd`, which melon doesn't have, so `cal-prepare`
   puts BusyBox-backed shims into the target's `/usr/local/bin` and `cal-finish` removes them.
 - **Live-only packages** (`/usr/share/melon/profiles/live-only`, e.g. `calamares-melon`) are in the
   desktop ISO's system image and both installers remove them from the new system. Both installers make
   the new system's `/etc/apk/world` match the chosen profile.
-- **Console installer: quick and deliberately hidden.** It lives at `/usr/libexec/melon/.cold`. It is started
-  by typing its name in bash, which a `command_not_found_handle` in `/etc/profile.d/zz-melon.sh`
-  recognises **by hash**. The owner decided the name must not be discoverable. Therefore:
-  - do not write the command's name in any file in this repo (docs, comments, commit messages, package
-    names, help text, motd, man pages, shell completion, test scripts);
-  - do not add a file or symlink with that name to `PATH`;
-  - if you need to run it in a test, call `/usr/libexec/melon/.cold` directly.
-  It asks base or desktop and installs exactly what the desktop ISO installs. It plays
-  `/usr/share/melon/.ice` (from the `melon-sounds` package, live ISO only) at 30% volume while it runs.
-  On 8 October 2026 the owner gave it a new name (only its hash is in `zz-melon.sh`; the old name no longer works) and
-  a new song, which also plays under the graphical installer (`melon-install-gui`), and a new intro: `/usr/share/melon/.fall`
-  (replaces the diamond glove) draws a melon rolling off a cliff at dusk in true-colour half blocks, then the title from a 5x7
-  pixel font, so the name is in glyph rows, never as text. Original art, in the mood the owner asked for. The Linux console and
-  most serial terminals have 16 colours, where true colour turns into banded grey, so `.fall` draws a second version of the scene
-  with the 16 console colours (`vpix`) unless `COLORTERM` says `truecolor` or `24bit`; change both when you change the art. The song is `recipes/melon-sounds/ice.mp3`:
-  the owner's file, re-encoded as 128 kb/s MP3 and set to about -12 LUFS so that it is as loud as the old track at the same
-  30% (the original was 10 dB quieter). The file names `.cold` and `.ice` stay as they are, so nothing in the repo spells
-  the name. A new name means a new hash: `printf %s <name> | sha256sum | cut -c1-16`.
+- **Console installer: `melon-install`** (`/usr/bin/melon-install`, in melon-base), on both ISOs and named in the live
+  system's motd. It needs root (started by another user, it runs itself again through doas) and the live ISO's system image.
+  It asks for the disk, base or desktop (the desktop profile installs exactly what the desktop ISO installs), the host
+  name, the root and user passwords, a Wi-Fi network (when there is a Wi-Fi card), the opt-in Alpine repo and LUKS
+  encryption, then partitions, copies `rootfs.sqfs` and installs GRUB. `melon-install --help` lists the unattended
+  variables below.
 - **Dual boot.** On UEFI, when the chosen disk already has an EFI system partition and at least 20 GiB unallocated
   (Windows' Disk Management "Shrink Volume" makes that), the console installer offers `alongside` (the default
   then; `MELON_MODE=alongside|erase`): a 1 GiB FAT32 `/boot` (extended boot loader type) and `/` go into the free
@@ -539,48 +489,15 @@ the serial port, so tests don't need a screen. The test also records the sound c
   menu, checksums of everything Windows owns before and after).
 - Unattended install variables: `MELON_DISK MELON_HOSTNAME MELON_ROOTPW MELON_USER MELON_USERPW
   MELON_PROFILE MELON_YES=1 MELON_SERIAL=1 MELON_WIFI_SSID MELON_WIFI_PSK MELON_ALPINE=y
-  MELON_ENCRYPT=y MELON_LUKSPW MELON_MODE=alongside MELON_NORUST=y`. With `MELON_YES=1`, questions that have a default take it.
-- **"Remove everything built with Rust"** (the owner's decision): a checkbox at the end of the gauntlet (next to the
-  Alpine one) and a question in the console installer (`MELON_NORUST=y`). `melon-remove-rust ROOT` (melon-base) runs
-  `apk del -r` on every installed package from `/usr/share/melon/rust-packages` (mkiso.sh lists the recipes with
-  `options=(rust)`, which includes the `rust` and `cargo` packages), taking everything that depends on them along. **No safeguards, on purpose**: if the desktop
-  needs a Rust package, the desktop goes too. The reward comes first, so it stays whatever the removal takes:
-  `melon-rust-free ROOT USER` (melon-desktop, from `/usr/share/melon/.rewards/rust-free`) installs the
-  "farewell, Ferris" wallpaper (drawn by `art/ferris.py`, which also writes the lossless master `art/ferris.png`), sets
-  it on the user's first Plasma login and leaves the badge `/etc/melon/rust-free`.
+  MELON_ENCRYPT=y MELON_LUKSPW MELON_MODE=alongside`. With `MELON_YES=1`, questions that have a default take it.
 - **Profiles** live in `/usr/share/melon/profiles/` on the live system: `<name>` is the package list,
   `<name>.services` the runit services (`name` enables one, `-name` drops a base service). `mkiso.sh`
   writes them. The desktop profile swaps `mdevd`/`dhcp` for `udevd` and NetworkManager, and the
   installer gives NetworkManager the Wi-Fi network instead of wpa_supplicant.
-- **Other distros' repos are opt-in only.** Both installers offer Alpine as the tagged repo `@alpine`
-  (`melon-repo enable alpine`); apk only uses it for packages asked for as `name@alpine`. Void isn't
+- **Other distros' repos are opt-in only.** The console installer offers Alpine as the tagged repo `@alpine`
+  (`MELON_ALPINE=y` runs `melon-repo enable alpine` in the new system); Calamares doesn't ask, and `melon-repo enable
+  alpine` works on any installed system. apk only uses it for packages asked for as `name@alpine`. Void isn't
   offered (xbps, not apk). Never make a foreign repo untagged or on by default.
-
-## Website
-
-The website is `site/`, published to the `gh-pages` branch by `scripts/publish-site.sh` (GitHub Pages serves that branch at
-`https://melon-77.github.io/melon-os/`). Edit it here and open the pull request against `testing`; never edit `gh-pages`
-by hand. Keep it dependency-free: hand-written HTML and CSS, the three fonts hosted in `site/fonts` (no Google Fonts or
-other third-party requests, which the footer promises), no trackers. Its facts must stay true to the repository:
-versions and sizes come from the latest release, and an edition that isn't published yet says so (the 32-bit LXQt one was "coming" until its signed build, 7 October 2026).
-The ISO facts on the site (release name and date, each ISO's size, SHA-256 and link, which editions are still "coming") are data in
-`site/releases.json`, and `scripts/site-release.py` writes them into the marked regions (`<!-- release:... -->`) of `site/index.html` and
-`site/download/index.html`: never edit those regions by hand. After a release, `scripts/site-release.py update --tag <tag>` reads the
-release's assets from GitHub (sizes and SHA-256 come from there), fills `releases.json` and renders; `scripts/site-release.py check`
-fails when the pages are stale. The 32-bit pre-release is a second release in the same file (`update --tag i686-<date> --editions ...`). Read
-`docs/iso-hosting.md` before moving the files to another host (`scripts/upload-isos.sh`; other hosts go into `mirrors` in `releases.json`).
-`gauntlet.js` is only a taste of the real gauntlet, using easy questions that already appear in
-`recipes/calamares-melon/modules/gauntlet/questions.js`; never copy anything from `trial.js` (not even its questions) into the site, and keep
-the hidden owner commands out of it, as everywhere else. **The install section shows no installer video for now** (the
-owner's decision, 9 October 2026): the console installer's video looked slow (software emulation) and is for an installer
-almost nobody uses, so it came off the site; the video the owner wants there is the graphical installer (Calamares and the
-gauntlet). That one has no recording yet: Plasma doesn't finish starting in QEMU's software emulation (no KVM under
-Windows 10's WSL2), so it has to come from real hardware or a machine with KVM. Show it with the `.video` figure in
-`style.css` (at most 36rem wide), and never let a recording show a hidden owner command being typed.
-`scripts/record-installer.py` still records the console installer (`record`, then `build`). **The intro spells that
-installer's name in big letters, so `build` blacks out those rows in every frame, and only the built file may go into the
-repo or the site**: never commit the raw screenshots or the unmasked video. The pixel melon is generated from `melonfetch`'s own awk drawing
-(`art/site.py`), so change the melon there, not in the SVG.
 
 ## Boot time
 
@@ -662,24 +579,22 @@ is marked Latest, carries every ISO and `SHA256SUMS`,
 has notes written for users (what's new, which file to download, `doas apk upgrade` for installed systems), and the
 release it replaces is retitled "(superseded)" with a link to the new one.
 
-The 32-bit edition has its own **pre-release**, not marked Latest, so the website's download button keeps pointing at
-the 64-bit release: tag `i686-<date>` (`i686-20261007`), title "melon 32-bit (i686) test build, <date>", both i686 ISOs and
-`SHA256SUMS`. The download page lists it next to the 64-bit release (see "Website").
+The 32-bit edition has its own **pre-release**, not marked Latest, so the 64-bit release stays the Latest one: tag
+`i686-<date>` (`i686-20261007`), title "melon 32-bit (i686) test build, <date>", both i686 ISOs and `SHA256SUMS`.
 
 **New ISOs for meaningful changes (the owner's rule, 7 October 2026).** When a change lands that alters what is on an ISO or how it
 installs or boots (kernel, drivers and firmware, installers, the desktop, base packages, boot, hardware support), new ISOs are built,
-tested (see Testing), added to a GitHub release, and **the website is updated in the same sitting**:
+tested (see Testing) and added to a GitHub release:
 
 1. Build and test the ISOs on a machine with the signing key (the owner's computer, or a cloud session the owner has given the key: it can
    sign packages and push the package repo through git).
 2. Create the release (name, notes, every ISO and `SHA256SUMS`), mark it Latest, retitle the one it replaces. **A cloud session can't do
    this step**: GitHub answers 403 "not permitted for this session type" for release creation and asset uploads, so the ISOs go to the
    owner's computer (WSL, or through `/mnt/project-files/releases/<tag>/`) and `gh release create` / `gh release upload` run there.
-3. `scripts/site-release.py update --tag <tag>`, commit `site/`, open the pull request against `testing`, then `scripts/publish-site.sh`
-   (or a pull request into `gh-pages`) once it is merged. An edition with no ISO in the release stays "coming" on its own.
-4. If other file hosts are in use (`docs/iso-hosting.md`), upload with `scripts/upload-isos.sh` and add them to `mirrors` in `site/releases.json`.
 
-A change that touches only recipes in the online repository, docs or the site doesn't need new ISOs.
+Where the ISOs are hosted besides GitHub's release assets is an open decision (`docs/iso-hosting.md`).
+
+A change that touches only recipes in the online repository or docs doesn't need new ISOs.
 
 ## Signing keys and rotation
 
@@ -724,7 +639,7 @@ that is the only place Ubuntu is still needed.
 - **Stage 1 (base): done.** Toolchain, base packages, the console ISO and the quick console installer, BIOS and
   UEFI, LUKS encryption, dual boot next to Windows, VM guest tools.
 - **Stage 2 (desktop): done.** eudev, D-Bus, elogind, polkit, Mesa with LLVM, Qt 6, KDE Frameworks 6, Plasma and
-  KWin on Wayland, SDDM, PipeWire, NetworkManager, Bluetooth, printing, Calamares with the gauntlet, the desktop ISO
+  KWin on Wayland, SDDM, PipeWire, NetworkManager, Bluetooth, printing, Calamares, the desktop ISO
   and the desktop profile for both installers (`qemu-test.py desktop` and `desktop-install`). Open hardware work
   is tracked in GitHub issues: Intel SOF audio, newer linux-firmware, Broadcom Wi-Fi.
 - **32-bit (i686) edition with LXQt: built, signed and published, waiting for real hardware** (resumed by the owner,
@@ -732,8 +647,7 @@ that is the only place Ubuntu is still needed.
   toolchain, the base system, Qt, LXQt and labwc, then both ISOs (BUILDING.md). Both pass their tests on QEMU's Atom
   N270 CPU model: the console ISO (`qemu-test.py live|disk --i686`) and the LXQt desktop ISO
   (`desktop-install --i686`, 2 GB of RAM: install through Calamares, SDDM's greeter on labwc, the LXQt session,
-  printing, the gauntlet's rewards). Not yet on 32-bit: NetHack (its source wasn't reachable from the test machine),
-  the QEMU guest agent. Signed with melon's key and published (7 October 2026): `repo/x86` is on the `packages` branch
+  printing). Not yet on 32-bit: the QEMU guest agent. Signed with melon's key and published (7 October 2026): `repo/x86` is on the `packages` branch
   next to `x86_64` (publish-repo.sh replaces the whole branch, so a machine that built only one architecture must start
   from the branch's current contents); both ISOs rebuilt from scratch on a new build container and retested (the desktop
   test waits 90 s before typing when there is no KVM: the greeter ignores keys for a while on an emulated CPU). When
@@ -757,7 +671,7 @@ that is the only place Ubuntu is still needed.
   (`x86_64-unknown-linux-musl`), from upstream's musl-hosted stage 0 (manifest entries), against melon's LLVM 21
   (shared) and its native gcc; `musl-dynamic-by-default.patch` sets musl's `crt_static_default` to false as Alpine
   and Void do (upstream's own FIXME, compiler-team#422), so `cargo build` on melon links dynamically like melon's
-  own programs. Both packages say `options=(rust)`, so "remove everything built with Rust" takes them off too. Watch
+  own programs. The recipe says `options=(rust)` (rule 46). Watch
   for: RAM (rustc wants 2 to 3 GB per job), the size of `librustc_driver` against GitHub's 100 MB file limit
   (rule in "Package repository"), and `LEAK:` lines.
 - **Self-hosting (building melon on melon): in progress.** Step 1, the build tools as recipes, is done. The first batch (perl,
@@ -803,8 +717,7 @@ that is the only place Ubuntu is still needed.
   Noctalia). The 32-bit desktop ISO carries LXQt instead of Plasma (the owner's decision); LXQt is in the 64-bit
   package repository too, as an online install.
 - **Decided, don't re-propose:** Nix is available but off by default (not on the ISOs, no service, only root trusted);
-  foreign repos stay opt-in and tagged; the gauntlet's rewards are only for people who pass its final trial; melon's
-  own games may live in their own melon-77 repositories as submodules.
+  foreign repos stay opt-in and tagged.
 
 ## Git conventions
 
@@ -812,4 +725,4 @@ that is the only place Ubuntu is still needed.
 - Build outputs and downloaded sources are never committed.
 - If you change a recipe, bump `pkgrel` (or `pkgver`) in the same commit.
 - **Keep the docs true (the owner's rule, 7 October 2026):** when you find a bug or make a significant change, update every
-  `.md` file it touches (README, AGENTS, BUILDING, `docs/`) and the website (`site/`) in the same pull request, so nothing is out of date.
+  `.md` file it touches (README, AGENTS, BUILDING, `docs/`) in the same pull request, so nothing is out of date.

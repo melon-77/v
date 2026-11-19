@@ -19,8 +19,7 @@ depends=(gcc)
 subpackages=(cargo)
 depends_cargo="rust"
 pkgdesc_cargo="Cargo, Rust's package manager and build tool"
-# Written in Rust: the installers' "remove everything built with Rust" option takes rust and cargo off too
-# (melon-remove-rust; mkiso.sh lists this recipe's packages in /usr/share/melon/rust-packages).
+# written in Rust (rule 46)
 options=(rust)
 
 prepare(){

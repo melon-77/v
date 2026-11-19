@@ -1,8 +1,8 @@
 #!/bin/sh
 # Calamares job "finish": everything the console installer does after copying the system, for the
-# partitions Calamares made. Runs on the live system; the new system is mounted at $1, the new user is $2.
+# partitions Calamares made. Runs on the live system; the new system is mounted at $1.
 set -eu
-ROOT=$1 NEWUSER=${2:-}
+ROOT=$1
 PATH=/usr/bin
 REPO=/media/melon/melon/repo
 ARCH=$(apk --print-arch)
@@ -98,20 +98,4 @@ fi
 chroot "$ROOT" grub-install --target=i386-pc --boot-directory=/boot "$disk" 2>&1 | grep -v '^Installing for' || true
 [ -f "$ROOT/boot/grub/grub.cfg" ] || mkdir -p "$ROOT/boot/grub"
 MELON_ROOT_DEV="$rootdev" MELON_BOOT_DEV="$bootdev" chroot "$ROOT" melon-update-grub
-
-# the survivor wallpapers, badge, gold look (login screen, colours, boot menu) and certificate (melon-rewards, from melon-desktop);
-# only for those who went through the final trial (the gauntlet page writes the file), never when it was skipped
-if [ -e /run/melon/.trial-passed ] && [ ! -e /run/melon/.gauntlet-skip ]; then
-  say "gauntlet rewards"
-  /usr/libexec/melon/melon-rewards "$ROOT" "$NEWUSER"
-  MELON_ROOT_DEV="$rootdev" MELON_BOOT_DEV="$bootdev" chroot "$ROOT" melon-update-grub
-fi
-# "remove everything built with Rust" (the checkbox at the end of the gauntlet): its reward first (melon-rust-free,
-# from melon-desktop), so the wallpaper stays whatever the removal takes; then the removal, with no safeguards
-if [ -e /run/melon/.remove-rust ]; then
-  say "rust-free reward"
-  /usr/libexec/melon/melon-rust-free "$ROOT" "$NEWUSER"
-  say "removing everything built with Rust"
-  /usr/libexec/melon/melon-remove-rust "$ROOT" || true
-fi
 say "done"
