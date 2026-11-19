@@ -598,11 +598,17 @@ A change that touches only recipes in the online repository or docs doesn't need
 
 ## Signing keys and rotation
 
-Installed systems trust two keys, both shipped in `/etc/apk/keys` by `apk-tools` (and in `keys/trusted/`):
+Installed systems are meant to trust two keys, both shipped in `/etc/apk/keys` by `apk-tools` (and in `keys/trusted/`):
 
 - `valence-signing.rsa`: the everyday key. Everything is signed with it. Keep it on **one** build machine.
 - `valence-backup.rsa`: the offline backup key. Its private half lives off every build machine (a USB stick
   in a drawer) and is used only for a rotation. Never leave it in `keys/`.
+
+**Valence has no backup key yet** (18 November 2026). Its everyday key was made new on the first Valence build machine
+(Melon's keys are not trusted), and `apk-tools` ships a backup key only when `keys/valence-backup.rsa.pub` exists.
+Before the first release, make one on a machine that is not the build machine (`openssl genrsa`, as in step 1 below),
+commit its `.pub` to `keys/` and `keys/trusted/`, and bump `pkgrel` of `apk-tools`. Until then a lost or leaked
+everyday key can't be rotated the way this section describes.
 
 If `valence-signing.rsa` leaks or is lost:
 
