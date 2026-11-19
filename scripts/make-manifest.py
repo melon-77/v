@@ -65,6 +65,8 @@ URL = {  # upstream downloads (Ubuntu 26.04 has Cataclysm: DDA 0.H, Rust 1.93 an
     'm4-1.4.21.tar.xz': 'https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.xz',
     'bison-3.8.2.tar.xz': 'https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz',
     'gawk-5.4.1.tar.xz': 'https://ftp.gnu.org/gnu/gawk/gawk-5.4.1.tar.xz',
+    'glibc-2.44.tar.xz': 'https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz',
+    'libxcrypt-4.5.2.tar.xz': 'https://github.com/besser82/libxcrypt/releases/download/v4.5.2/libxcrypt-4.5.2.tar.xz',
     'gperf-3.3.tar.gz': 'https://ftp.gnu.org/gnu/gperf/gperf-3.3.tar.gz',
     'bc-1.08.2.tar.gz': 'https://ftp.gnu.org/gnu/bc/bc-1.08.2.tar.gz',
     'texinfo-7.3.tar.xz': 'https://ftp.gnu.org/gnu/texinfo/texinfo-7.3.tar.xz',

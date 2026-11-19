@@ -1,0 +1,12 @@
+#!/bin/sh
+# valence-run PROGRAM [ARGUMENT...]: run a program that was built for Valence, on the build machine.
+#
+# The build machine's own loader and C library are not Valence's (Ubuntu's glibc is older than the one in the
+# sysroot), so a freshly built program is started through Valence's loader with Valence's libraries, both taken
+# from the sysroot. meson and CMake call this for the generators and test programs a build makes and then runs
+# (exe_wrapper in the cross file, CMAKE_CROSSCOMPILING_EMULATOR in the toolchain file); a recipe that runs a
+# built program by hand calls it the same way. PROGRAM is a path to the file: the loader does not search PATH.
+#
+# This is also the one place a second architecture changes: there the wrapper is an emulator.
+if [ -z "${SYSROOT:-}" ] || [ -z "${LDSO:-}" ]; then . "$(dirname "$(readlink -f "$0")")/env.sh"; fi
+exec "$SYSROOT/usr/lib/$LDSO" --library-path "$SYSROOT/usr/lib" "$@"

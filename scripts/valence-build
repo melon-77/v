@@ -60,6 +60,8 @@ ar = '$TARGET-ar'
 strip = '$TARGET-strip'
 llvm-config = '$SYSROOT/usr/bin/llvm-config'
 pkg-config = 'pkg-config'
+# programs built for Valence run through Valence's loader and libraries, not the build machine's (scripts/valence-run)
+exe_wrapper = '$M/scripts/valence-run'
 # Qt's code generators must be the host builds (rule 20); for cross builds meson only finds them here, never on PATH
 moc = '$M/hosttools/qt6/libexec/moc'
 uic = '$M/hosttools/qt6/libexec/uic'
@@ -73,7 +75,7 @@ bwrap = '/usr/bin/bwrap'
 # Rust (scripts/host-rust.sh): for Valence's musl target, linked by Valence's gcc and dynamically against its libc
 rust = ['$M/hosttools/rust/bin/rustc', '--target', '$RUST_TARGET', '-C', 'linker=$TARGET-gcc', '-C', 'target-feature=-crt-static']
 [properties]
-needs_exe_wrapper = false
+needs_exe_wrapper = true
 sys_root = '$SYSROOT'
 pkg_config_libdir = '$PKG_CONFIG_LIBDIR'
 [host_machine]
@@ -96,6 +98,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+set(CMAKE_CROSSCOMPILING_EMULATOR $M/scripts/valence-run)
 EOF
 export CMAKE_TC
 cmake_setup(){ cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TC" -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \

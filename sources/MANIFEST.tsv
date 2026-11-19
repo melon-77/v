@@ -240,7 +240,6 @@ deb/mpclib3_1.3.1.orig.tar.gz	ab642492f5cf882b74aa0cb730cd410a81edcdbec895183ce9
 deb/mpfr4_4.2.2.orig.tar.xz	b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01	apt	mpfr4=4.2.2-3
 deb/mpg123_1.33.3.orig.tar.bz2	6a0c6472dd156e213c2068f40115ebbb73978c2d873e66bae2a250e2d2198d26	apt	mpg123=1.33.3-2
 deb/mtdev_1.1.7.orig.tar.gz	a55bd02a9af4dd266c0042ec608744fff3a017577614c057da09f1f4566ea32c	apt	mtdev=1.1.7-1build1
-deb/musl_1.2.5.orig.tar.gz	a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4	apt	musl=1.2.5-3build1
 deb/nano_8.7.1.orig.tar.xz	76f0dcb248f2e2f1251d4ecd20fd30fb400a360a3a37c6c340e0a52c2d1cdedf	apt	nano=8.7.1-1ubuntu0.1
 deb/ncurses_6.6+20251231.orig.tar.gz	e280541f4f601b8586bec305976c873fd641607f9bc4254bf661034dcccac4e9	apt	ncurses=6.6+20251231-1
 deb/network-manager_1.54.3.orig.tar.bz2	e38d55611af8127e1a2b1a7b4952bded1f61917cbc49d4ee7a272ec3fcd7b51b	apt	network-manager=1.54.3-2ubuntu3.1
@@ -600,7 +599,6 @@ mpc-1.3.1.tar.gz	-	link	deb/mpclib3_1.3.1.orig.tar.gz
 mpfr-4.2.2.tar.xz	-	link	deb/mpfr4_4.2.2.orig.tar.xz
 mpg123-1.33.3.tar.bz2	-	link	deb/mpg123_1.33.3.orig.tar.bz2
 mtdev-1.1.7.tar.gz	-	link	deb/mtdev_1.1.7.orig.tar.gz
-musl-1.2.5.tar.gz	-	link	deb/musl_1.2.5.orig.tar.gz
 musl-fts-1.2.7.tar.gz	49ae567a96dbab22823d045ffebe0d6b14b9b799925e9ca9274d47d26ff482a6	git	https://github.com/void-linux/musl-fts v1.2.7
 musl-obstack-1.2.3.tar.gz	9ffb3479b15df0170eba4480e51723c3961dbe0b461ec289744622db03a69395	git	https://github.com/void-linux/musl-obstack v1.2.3
 nano-8.7.1.tar.xz	-	link	deb/nano_8.7.1.orig.tar.xz
@@ -720,6 +718,8 @@ m4-1.4.21.tar.xz	f25c6ab51548a73a75558742fb031e0625d6485fe5f9155949d6486a2408ab6
 bison-3.8.2.tar.xz	9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2	url	https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz
 flex-2.6.4.tar.gz	e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995	url	https://github.com/westes/flex/releases/download/v2.6.4/flex-2.6.4.tar.gz
 gawk-5.4.1.tar.xz	07f6f7342b7febe4313fc2c2542ad93d64fe20ad8717200109f105a826f5fd37	url	https://ftp.gnu.org/gnu/gawk/gawk-5.4.1.tar.xz
+glibc-2.44.tar.xz	37f600f2bef3c5e8300147059568b2a2e40a7ad6ccc65ce942556d49429cc667	url	https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz
+libxcrypt-4.5.2.tar.xz	71513a31c01a428bccd5367a32fd95f115d6dac50fb5b60c779d5c7942aec071	url	https://github.com/besser82/libxcrypt/releases/download/v4.5.2/libxcrypt-4.5.2.tar.xz
 gperf-3.3.tar.gz	fd87e0aba7e43ae054837afd6cd4db03a3f2693deb3619085e6ed9d8d9604ad8	url	https://ftp.gnu.org/gnu/gperf/gperf-3.3.tar.gz
 bc-1.08.2.tar.gz	ae470fec429775653e042015edc928d07c8c3b2fc59765172a330d3d87785f86	url	https://ftp.gnu.org/gnu/bc/bc-1.08.2.tar.gz
 texinfo-7.3.tar.xz	51f74eb0f51cfa9873b85264dfdd5d46e8957ec95b88f0fb762f63d9e164c72e	url	https://ftp.gnu.org/gnu/texinfo/texinfo-7.3.tar.xz

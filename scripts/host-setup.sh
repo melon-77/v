@@ -5,7 +5,7 @@
 #
 #  1. build dependencies (from Ubuntu, Debian or Devuan, or Valence's own packages on Valence)
 #  2. not on Valence: the Ubuntu 26.04 ("resolute") source archive, where older Valence sources come from
-#  3. let the build host run Valence's musl binaries (build-time generators from earlier packages)
+#  3. (programs built for Valence run through scripts/valence-run; the build machine needs no loader set up for them)
 #  4. host tools the cross builds need: apk, wayland-scanner 1.24, Mesa's mesa_clc, GRUB, Python, Rust, Qt
 set -euo pipefail
 M=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
@@ -63,7 +63,7 @@ valence_deps(){
     python3-markupsafe python3-yaml python3-packaging python3-pexpect ninja cmake meson autoconf automake autoconf-archive libtool libtool-dev gettext gettext-dev
     file xz zstd lz4 bzip2 rsync curl git ca-certificates xorriso mtools dosfstools xfsprogs squashfs-tools qemu ovmf
     kmod dwarves scdoc tcl hwdata publicsuffix dtc glslang spirv-tools spirv-tools-dev libxslt libxml2 appstream itstool nasm bubblewrap
-    ntfs-3g linux-headers bsd-compat-headers llvm llvm-dev clang clang-dev libclc spirv-llvm-translator spirv-llvm-translator-dev
+    ntfs-3g linux-headers llvm llvm-dev clang clang-dev libclc spirv-llvm-translator spirv-llvm-translator-dev
     spirv-headers openssl-dev zlib-dev zstd-dev elfutils-dev expat-dev libffi-dev sqlite-dev ncurses-dev readline-dev
     bzip2-dev xz-dev util-linux-dev libxml2-dev appstream-dev mesa-dev libxkbcommon-dev wayland wayland-dev
     wayland-protocols fontconfig-dev freetype-dev dbus-dev glib-dev libpng-dev libdrm-dev libx11-dev libxext-dev
@@ -110,15 +110,10 @@ SHIM
   fi
 }
 
-if [ "$ID" = valence ]; then valence_deps; else ubuntu_deps
-  step "running Valence's own binaries on the build host (rule 18 in AGENTS.md)"
-  ln -sfn $M/sysroot/usr/lib/libc.so /lib/ld-musl-x86_64.so.1
-  echo $M/sysroot/usr/lib > /etc/ld-musl-x86_64.path
-fi
-# the 32-bit edition (VALENCE_ARCH=x86): no build machine has an i386 musl of its own, so its loader is always the
-# 32-bit sysroot's (Valence's and Ubuntu's kernels run 32-bit programs)
-ln -sfn $M/sysroot-x86/usr/lib/libc.so /lib/ld-musl-i386.so.1
-echo $M/sysroot-x86/usr/lib > /etc/ld-musl-i386.path
+if [ "$ID" = valence ]; then valence_deps; else ubuntu_deps; fi
+# Melon pointed /lib/ld-musl-*.so.1 at the sysroot here, so that programs built for it ran on the build machine. With
+# glibc they run through scripts/valence-run (rule 18 in AGENTS.md); take the old links away where they are left over.
+rm -f /lib/ld-musl-x86_64.so.1 /lib/ld-musl-i386.so.1 /etc/ld-musl-x86_64.path /etc/ld-musl-i386.path
 
 W=$M/work/host-setup; rm -rf $W; mkdir -p $W $M/hosttools/bin
 unset CC CXX CFLAGS CXXFLAGS LDFLAGS PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_PATH
