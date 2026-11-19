@@ -430,11 +430,14 @@ elif mode == 'toram':
     sys.exit(0 if ok else 1)
 else:
     step('waiting for GRUB on the installed disk')
-    p.expect("Valence Linux", timeout=300)
-    step('kernel booting')
+    # The boot menu is hidden on a disk with no other system, and GRUB then prints nothing after its banner. The first
+    # thing an encrypted disk says is the initramfs asking for the passphrase; "Valence Linux" (/etc/issue) only comes
+    # once the root is unlocked. Waiting for the name first, as this did, could never succeed with an encrypted root.
     if luks:
         p.expect('unlocking the encrypted disk', timeout=900); step('initramfs asks for the passphrase')
         p.expect('assphrase', timeout=120); p.sendline('valenceluks'); step('passphrase sent')
+    p.expect("Valence Linux", timeout=900)
+    step('kernel booting')
     p.expect('login:', timeout=900)
     step('login prompt')
     p.sendline('root'); p.expect('assword:'); p.sendline('valenceroot')
