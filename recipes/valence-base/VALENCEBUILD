@@ -1,9 +1,12 @@
 pkgname=valence-base
 pkgver=0.1
-pkgrel=40
+pkgrel=42
 pkgdesc="Valence base system: init scripts, services, configuration and tools"
 license=MIT
-depends=(valence-layout glibc busybox bash runit apk-tools ncurses-terminfo-base util-linux opendoas)
+# The GNU tools provide the commands (ROADMAP.md, "Decided"); BusyBox stays for /bin/sh, the initramfs, the small
+# daemons (getty, udhcpc, mdev, syslogd, klogd, crond, ntpd) and the commands nothing else here provides.
+depends=(valence-layout glibc busybox bash runit apk-tools ncurses-terminfo-base util-linux opendoas
+  coreutils findutils grep sed tar gzip diffutils less procps-ng iproute2 shadow)
 builddir=$srcdir
 options=(keepdirs)
 package(){
