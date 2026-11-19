@@ -27,7 +27,7 @@ Valence stops optimising for the number and optimises for a system that behaves 
 | | |
 |---|---|
 | Init | runit |
-| Packages | apk-tools 3: signed apk v3 packages, built from source recipes |
+| Packages | Signed apk v3 packages, built from source recipes. apk-tools 3 installs them until Valence's own package manager does (phase 9) |
 | Recipes | Melon's APKBUILD-like format. Most of its 442 recipes come over with little change |
 | Toolchain | A cross toolchain built from source (binutils, GCC), then the system rebuilds itself |
 | Kernel | Mainline Linux, generic flavour |
@@ -66,6 +66,11 @@ is plain Calamares and first boot has normal defaults.
 **6. A proper identity.**
 A new name, a logo (a bismuth hopper crystal seen from straight above; the files are in `branding/`), and real
 documentation: how to install, how to update, how to recover, and how to contribute.
+
+**7. Its own package manager, and a folder for every program.**
+On the installed system apk gives way to a package manager written for Valence: fast, with a proper screen to
+watch, and built around one idea from GoboLinux, that every program lives in a folder of its own. The builder,
+the recipes and the signed packages stay as they are. Phase 9 has the design.
 
 ## Roadmap
 
@@ -123,6 +128,28 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   phase 6. Assumed: the 64-bit boards (Pi 3, 4, 5, Zero 2 W), not the 32-bit ones.
   *Done when:* the image boots on a Raspberry Pi 4 to a login prompt, gets a network address, and can `apk add` a
   package; and the same image boots in QEMU as an automatic test.
+
+- [ ] **9. Valence's own package manager, with a folder for every program.**
+  A new package manager for the installed system, in Rust, reading the same signed `.apk` packages and
+  repositories that the builder makes today.
+  *A folder per program*, as in GoboLinux: each package is unpacked into a directory of its own,
+  `/Programs/<name>/<version>`, and those directories are the record of what is installed. Removing a program
+  is removing its folder. The usual tree (`/usr/bin`, `/usr/lib`, ...) is made from the folders, so every program
+  finds its files where it expects them, software that was not built for Valence included.
+  *Speed*: packages download and unpack in parallel, each into its own folder, where nothing can collide. An
+  upgrade touches the running system in one short step at the end, when the usual tree is pointed at the new
+  folders; the old folders stay until they are cleaned up, so going back is the same step in reverse.
+  *Something to watch*: a full-screen view on a terminal, plain lines on a serial console or in a script.
+  In stages: the engine first, on the console system next to apk and measured against apk and xbps; then the
+  installers and the ISO; apk leaves the installed system last. The build machine keeps using apk for its sysroot.
+  *Done when:* a console install and a desktop install made by it pass the QEMU tests; an upgrade that is killed at
+  any point leaves a system that boots; and it installs the base system measurably faster than apk and xbps do
+  on the same machine.
+  Open: its name. Whether the usual tree is made of hard links (programs see ordinary files; nothing needs
+  patching) or of GoboLinux's symbolic links (the folder shows through, and programs that look for their files
+  next to themselves, such as Qt and Python, need fixes). Whether `-dev`, `-doc` and `-lang` parts get folders of
+  their own or live inside the program's folder. And when: before the desktop, the desktop is fitted to the
+  layout once.
 
 ## Not decided yet
 
