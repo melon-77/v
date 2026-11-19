@@ -462,6 +462,35 @@ else:
               'valence-detect-virt; lsmod | grep -E "vmw|vmxnet|pvscsi|virtio|hv_|vbox" ; ls /var/service',
               'sleep 3; sv status /var/service/qemu-ga /var/service/vmtoolsd /var/service/hv_kvp_daemon 2>&1']:
         print(f'$ {c}'); print(sh(c))
+    # The GNU tools own the command names (BusyBox keeps /bin/sh and the commands nothing else provides), and the
+    # passwords the installer set are yescrypt hashes made by shadow's chpasswd.
+    out = sh('for c in ls cp mv cat sort find xargs grep sed tar gzip diff less ps top free pgrep sysctl ip login passwd su '
+             'useradd; do [ -L /usr/bin/$c ] && echo "LINK-$c"; [ -x /usr/bin/$c ] || echo "MISSING-$c"; done; echo tools-$((40+2))')
+    bad = _re.findall(r'(?:LINK|MISSING)-\w+', out)
+    ver = sh('ls --version | head -n1; grep --version | head -n1; sed --version | head -n1; tar --version | head -n1; '
+             'find --version | head -n1; diff --version | head -n1; gzip --version | head -n1; ps --version; ip -V')
+    print(ver)
+    want = ['GNU coreutils', 'GNU grep', 'GNU sed', 'GNU tar', 'GNU findutils', 'GNU diffutils', 'gzip 1.', 'procps-ng', 'iproute2']
+    bad += [w for w in want if w not in ver]
+    hashes = sh("grep -E '^(root|jcole):' /etc/shadow | cut -d: -f1,2 | cut -c1-9")
+    bad += [f'{u} password hash' for u in ('root', 'jcole') if f'{u}:$y$' not in hashes]
+    if 'tools-42' not in out: bad.append('the check itself did not finish')
+    step('GNU tools on the installed system: ' + ('OK' if not bad else 'FAILED: ' + ', '.join(bad)))
+    # Phase 2's "done when": the installed system adds a package from a repository over the network. The repository
+    # is this build's repo/, served by this script (10.0.2.2 is the host in QEMU's user network); less-doc is in it
+    # and on no installed system. Taken out again afterwards, so the next boot of this disk tests the same thing.
+    if not offline:
+        import http.server, threading, functools
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=f'{M}/repo'))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        url = f'http://10.0.2.2:{srv.server_address[1]}/{"x86" if i686 else "x86_64"}/Packages.adb'
+        out = sh(f'apk --repositories-file /dev/null --repository {url} add less-doc; ls /usr/share/man/man1/less.1* && echo added-$((40+2))')
+        print(out)
+        if 'added-42' not in out: bad.append('apk add over the network')
+        step('apk add less-doc from a repository over the network: ' + ('OK' if 'added-42' in out else 'FAILED'))
+        sh('apk del less-doc')
+    if bad:
+        p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300); sys.exit(1)
     # sudo as the normal user: asks for the password once, then remembers it
     p.sendline('su - jcole'); p.expect(r'@valence[\w-]*.*\$ ', timeout=60)
     p.sendline('sudo id -u'); p.expect('assword', timeout=60); p.sendline('valenceuser')
