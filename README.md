@@ -13,13 +13,16 @@ of things: glibc instead of musl, documentation and translations in their own pa
 that orders builds itself, and a Btrfs root with a snapshot before every update. **[ROADMAP.md](ROADMAP.md) is the
 plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
 
-There is one test build, a console ISO, on the repository's Releases page, and no online package repository yet. The
-base system is on glibc: the cross toolchain and the 62 recipes the console ISO is made of build on it, in an order
+Test builds of the console ISO are on the repository's Releases page; there is no online package repository yet. The
+base system is on glibc: the cross toolchain and the 48 recipes the console ISO is made of build on it, in an order
 the builder works out from the recipes, each in a sysroot holding only what its recipe declares (ROADMAP.md has the
 test status). Its documentation is in packages of its own: a fresh install has no man pages, and `apk add docs`
-from a package repository adds them, with `man`, for everything installed. The rest is still as
-inherited from Melon: the XFS root, the desktop and every other recipe beyond the console ISO (not yet rebuilt on
-glibc, with Melon's musl workarounds still in them), the 32-bit edition, and dated status notes that are Melon's
+from a package repository adds them, with `man`, for everything installed. Its root is Btrfs, and apk takes a
+snapshot before every change to the installed packages; the boot menu starts any of them, and a command makes one the
+system again ("Snapshots and rolling back" below). The rest is still as inherited from Melon: the desktop and every
+other recipe beyond the console ISO (not yet rebuilt on glibc, with Melon's musl workarounds still in them; the
+graphical installer is one of them and still makes an XFS root, which has no snapshots), the 32-bit edition, and
+dated status notes that are Melon's
 history. Where this file, `AGENTS.md` and `BUILDING.md` describe those parts, they describe Melon's system. The
 desktop's pictures (wallpaper, splash, login and boot menu backgrounds) are still Melon's too; the logo is Valence's.
 
@@ -36,7 +39,8 @@ A from-scratch, rolling x86_64 distribution:
 | packages | apk-tools 3 (signed apk v3 packages, binary + source recipes) |
 | kernel | Linux 7.0, generic flavour |
 | boot | GRUB 2.14, one ISO and one install that boot on both BIOS and UEFI |
-| root fs | XFS (FAT32 `/boot`) |
+| root fs | Btrfs, with the system, `/home`, `/var/log`, the snapshots and the swap file each in a subvolume of its own (FAT32 `/boot`) |
+| snapshots | apk takes one before every change to the installed packages; the boot menu starts any of them, and `valence-snapshot rollback` makes one the default, the way NixOS's generations work |
 | shell | bash 5.3 |
 | desktop | KDE Plasma 6 on Wayland; Flatpak for Steam and other apps; more desktops as online installs |
 | 32-bit edition | i686 (Pentium M, Pentium 4, Atom netbooks such as the MSI Wind U100) with LXQt on Wayland (labwc); Melon's, not built on glibc, and undecided for Valence (ROADMAP.md) |
@@ -84,6 +88,42 @@ doas otherwise): base or desktop system, a whole disk or next to Windows on UEFI
 
 The ISOs are published as GitHub release assets; `docs/iso-hosting.md` compares other free file hosts (SourceForge,
 Internet Archive, Cloudflare R2). Where else to host them is still open.
+
+## Snapshots and rolling back
+
+The system is on Btrfs, and apk takes a snapshot of it before every change to the installed packages (`apk upgrade`,
+`apk add`, `apk del`). Going back works the way NixOS's generations do: every snapshot is in the boot menu and can be
+started, and one command makes a snapshot the system that starts by default.
+
+**While the system still starts:**
+
+```sh
+sudo valence-snapshot              # the snapshots: number, when, and before what
+sudo valence-snapshot rollback     # back to before the last package change (rollback 12: to snapshot 12)
+sudo reboot                        # it takes effect at the next start
+```
+
+**When it does not start any more:** switch the computer on and press Esc while it starts (next to Windows the boot
+menu shows by itself). Choose "Valence snapshots", then the snapshot from before the update. The system starts as it
+was then, with the kernel that snapshot was taken with, so this also works after a kernel update that does not boot.
+Starting a snapshot changes nothing by itself: restart, and the default system is back. To stay with what you
+started:
+
+```sh
+sudo valence-snapshot rollback     # this system is now the one that starts by default; no restart needed
+```
+
+A snapshot holds `/`: the programs, the settings in `/etc`, the package database and the kernel. It does not hold
+`/home` or `/var/log`, so going back never touches your files, and the logs of what went wrong are still there
+afterwards. A rollback loses nothing either: the system it replaces is kept as a snapshot too (`valence-snapshot`
+lists it as "before rolling back to ..."), and rolling back to that one undoes it. Between starting a snapshot and
+keeping it, and between a rollback and the restart, apk refuses to change packages, because the change would land in
+a system that is about to be put aside.
+
+apk keeps its ten newest snapshots (`KEEP=` in `/etc/valence/snapshot.conf` changes the number, `AUTO=no` there
+switches them off). `sudo valence-snapshot create a note` takes one by hand; it stays until
+`sudo valence-snapshot delete <number>` removes it. A system installed from one of the first two test ISOs has an XFS
+root and no snapshots: only installing again gives it this layout.
 
 ## 32-bit edition (old netbooks)
 

@@ -21,7 +21,7 @@ source by our own scripts and shipped as a signed apk v3 package.
 | documentation | `<pkg>-doc` (man pages, info pages, docs) and `<pkg>-lang` (translations), made by the builder; `docs` and `lang` bring them for everything installed; mandoc 1.14.6 is `man` | not on the ISOs: a fresh install has no documentation files. `apk add docs`, or one `<pkg>-doc`, which brings mandoc. "Recipe format" has the mechanism |
 | kernel | Linux 7.0, `linux-valence` (generic) | config = `x86_64_defconfig` + `recipes/linux-valence/config-valence` |
 | boot | GRUB 2.14, both `i386-pc` and `x86_64-efi` | ISO and installs boot on BIOS **and** UEFI; the installed system's boot menu is hidden (skipped after 1 s, Shift or Esc opens it) unless another system is found, then it shows for 5 s |
-| disks | GPT: 1 MiB BIOS boot, 1 GiB FAT32 `/boot` (also the ESP), XFS `/` | kernel boots with `root=PARTUUID=...`; only encrypted (LUKS) installs have an initramfs (rule 28); dual boot next to Windows on UEFI (see Installers) |
+| disks | GPT: 1 MiB BIOS boot, 1 GiB FAT32 `/boot` (also the ESP), Btrfs for the rest, in subvolumes: `@` is `/`, with `@home`, `@log` (`/var/log`), `@snapshots` (`/.snapshots`) and `@swap` beside it | kernel boots with `root=PARTUUID=... rootflags=subvol=@`; only encrypted (LUKS) installs have an initramfs (rule 28); apk takes a snapshot of `@` before every change, the boot menu starts any snapshot and `valence-snapshot rollback` makes one the default ("Snapshots and rollback"); dual boot next to Windows on UEFI (see Installers) |
 | filesystem | merged `/usr`: `/bin`, `/sbin`, `/usr/sbin` -> `usr/bin`, `/lib` -> `usr/lib`; on x86_64 also `/lib64` -> `usr/lib` and `/usr/lib64` -> `lib` (`valence-layout`) | packages must only ship files under `/usr`, `/etc`, `/var`, `/boot`. All libraries, the loader included, live in `/usr/lib`; `lib64` is only a link, there because the x86_64 ABI names the loader `/lib64/ld-linux-x86-64.so.2` |
 | desktop | KDE Plasma 6.6 on Wayland (KWin, Xwayland), Qt 6.10, SDDM | desktop ISO and desktop profile; list in `scripts/desktop-packages.txt` |
 | 32-bit edition | i686 (`VALENCE_ARCH=x86`, `-march=pentium-m -mfpmath=sse`: SSE2, as Qt 6 needs), LXQt 2.4 on Wayland with labwc 0.20 (wlroots), SDDM, Mesa with LLVM built for the X86 backend only (i915, crocus, r300, r600, nouveau, llvmpipe, softpipe) | **not built on glibc**, and whether Valence keeps this edition is undecided (ROADMAP.md); as inherited from Melon: the owner's decision (7 October 2026): LXQt is the 32-bit desktop, for netbooks such as the MSI Wind U100 (Atom N270, 1–2 GB); drivers for every netbook-era Wi-Fi, Ethernet, graphics and laptop chip in `recipes/linux-valence/config-valence-x86` (the owner: "it should just work"; Broadcom b43 cards still need firmware nobody may redistribute); package list `scripts/desktop-packages-x86.txt`, recipes from `scripts/gen-lxqt-recipes.py` plus `recipes/valence-lxqt` (Valence's LXQt defaults); no Plasma, Flatpak, NVIDIA or QEMU guest agent there (QEMU 11 doesn't build for 32-bit hosts) |
@@ -49,10 +49,13 @@ path (rule 60). The signing key can stay where it is:
 ### State of the glibc switch
 
 Valence's C library was musl, as in Melon, and is now glibc (ROADMAP.md, phase 2). The base system builds on glibc:
-the cross toolchain and the 62 recipes the console ISO is made of, the GNU tools among them (with mandoc, `docs` and
+the cross toolchain and the 48 recipes the console ISO is made of, the GNU tools among them (with mandoc, `docs` and
 `lang` beside them, for its documentation). ROADMAP.md has the test status.
 Not converted yet:
 
+- **The graphical installer still makes an XFS root.** Calamares (`recipes/calamares-valence`, on the desktop ISO) has
+  not been rebuilt, and a system it installs has no snapshots: `valence-snapshot` and apk's hook do nothing on a root
+  that is not the console installer's Btrfs layout. Calamares gets that layout with the desktop (ROADMAP.md, phase 6).
 - **The recipes beyond those** (the desktop, the developer tools, Rust, LLVM, ...) still contain musl workarounds
   and have not been built on glibc. `argp-standalone`, `musl-fts` and `musl-obstack`, and `elfutils`, which uses
   them, will not build as they are.
@@ -309,8 +312,10 @@ Rebuilding the kernel takes about an hour on 2 cores.
     `/etc/valence/encrypted-root` exists; `valence-update-grub` then writes `cryptroot=UUID=<luks>
     root=/dev/mapper/valenceroot` and an `initrd` line. Everything else still boots straight from the kernel.
     The initramfs holds BusyBox, cryptsetup and kmod with the glibc loader and the libraries they need (`/lib64` is a
-    link in it too), and `libgcc_s.so.1`, which glibc loads by name when a thread exits or is cancelled. The live
-    ISO's initramfs (`mkiso.sh`) copies the loader and the libraries BusyBox needs the same way.
+    link in it too), and `libgcc_s.so.1`, which glibc loads by name when a thread exits or is cancelled (rule 64). The
+    live ISO's initramfs (`mkiso.sh`) copies the loader and the libraries BusyBox needs the same way.
+    Its init takes `rootfstype=`, `rootflags=` (the Btrfs subvolume) and `init=` from the kernel command line the way
+    the kernel itself does: the boot menu's snapshot entries name a snapshot and their own init with them.
 30. *(A musl rule, kept so the numbering holds: musl 1.2.4+ hid the `*64` LFS types unless `_LARGEFILE64_SOURCE`
     was defined, so gpgme got `-D_LARGEFILE64_SOURCE`.)*
 31. **apk only replaces a package whose version-release changed** (rule 6). Generated
@@ -546,6 +551,18 @@ Rebuilding the kernel takes about an hour on 2 cores.
     that drops a feature when a library is missing. Give such a feature its explicit switch (`--with-acl`), so that a
     missing `makedepends` is an error; and after rebuilding base packages, compare the packages (dependencies, files,
     sizes) or the file list of `work/liveroot` with the ones from before, which is how all of these were caught.
+64. **glibc loads `libgcc_s.so.1` by name, so no package's `so:` dependencies ever ask for it.** It is needed when a
+    thread exits or is cancelled (cryptsetup in the unlock initramfs, rule 28). The console system had it only
+    because xfsprogs needed libinih, whose C++ half needs libstdc++, which needs libgcc; when Btrfs replaced XFS and
+    xfsprogs left the ISO, libgcc left with it, and `valence-mkinitramfs` would have copied nothing (its `cp` of that
+    file forgives a missing one). `valence-base` now depends on `libgcc`. The comparison of `work/liveroot`'s file
+    list with the one from before (rule 63) is what showed it, before any test ran.
+65. **A POSIX shell function's variables are the whole script's.** `/bin/sh` has no `local`, and `valence-snapshot`'s
+    `prune` looped over `id`, the variable its callers hold the snapshot's number in: every message named the oldest
+    snapshot ("snapshot 1 taken", "Rolled back to snapshot 1") while the right one had been taken or rolled back to.
+    The functions there now prefix their variables (`p_id`, `c_id`, `r_name`). Do the same in any function added to
+    the scripts in `valence-base`, and let a test read numbers back from what the script printed, which is how this
+    one was caught.
 
 To resume a failed long build without unpacking again (for example the kernel):
 `VALENCE_KEEP_SRC=1 scripts/valence-build-recipe linux-valence`. `valence-build` does that by itself (`VALENCE_AUTO_RESUME=1`), but
@@ -576,6 +593,8 @@ scripts/qemu-test.py disk /tmp/disk.img                                   # BIOS
 scripts/qemu-test.py disk /tmp/disk.img --uefi                            # UEFI: same disk
 scripts/qemu-test.py live out/valence-*-x86_64.iso /tmp/disk.img --luks     # install with an encrypted root
 scripts/qemu-test.py disk /tmp/disk.img --luks                            # boot it, typing the passphrase
+scripts/qemu-test.py rollback /tmp/disk.img [--luks] [--uefi]             # on an installed disk: break an update on purpose and go
+                                                                          # back, with the command and from the boot menu (below)
 scripts/qemu-test.py dualboot out/valence-*-x86_64.iso /tmp/dual.img        # install next to a fake Windows (UEFI), Windows untouched
 VALENCE_EDITION=desktop scripts/mkiso.sh                                    # the Plasma live ISO (desktop edition)
 scripts/qemu-test.py desktop out/valence-desktop-*-x86_64.iso              # services ready, Plasma running, a USB stick mounts through
@@ -597,6 +616,23 @@ documentation files. `apk add less-doc` from this build's `repo/`, which the tes
 `man less` and `apropos less` work; `apk add docs` brings the `-doc` part of everything installed, and `man` finds
 pages from eight of those packages; `apk del docs` leaves nothing behind. `--offline` skips the steps that need the
 repository.
+
+`disk` also checks phase 5's layout: `/`, `/home`, `/var/log`, `/.snapshots` and `/swap` are the subvolumes `@`,
+`@home`, `@log`, `@snapshots` and `@swap` of one Btrfs filesystem, mounted with `noatime,compress=zstd:1`; the swap
+file is in use; and each of the three package changes the documentation steps make had a snapshot taken before it,
+which the boot menu lists.
+
+`rollback` is phase 5's "done when", on a disk the `live` test installed. It makes two broken updates itself (real
+packages, version 9999 of an installed one, signed with the repository key and served over HTTP). The first replaces
+`less` with a script: `valence-snapshot rollback` and a restart bring the program and the package database back, while
+what was written to `/home` and `/var/log` after the snapshot stays; apk refuses to change anything between the
+rollback and the restart; the replaced system is deleted after it. The second replaces init with a script that fails
+and overwrites the kernel on `/boot`, as a kernel update gone wrong would: the disk must then not boot. The test
+opens the hidden boot menu with Esc and chooses "Valence snapshots" and the snapshot from before the update: the
+system starts as it was, from a copy of the snapshot and with the snapshot's own kernel, says so at login, and the
+default system is still the broken one. `valence-snapshot rollback` in that session makes it the default at once, and
+the next start, with nothing chosen, is that system. Then `create`, `delete` and `KEEP`. Run it on a plain disk on
+BIOS and on an encrypted one on UEFI (`--luks --uefi`): the encrypted one goes through the snapshot's initramfs.
 
 Logs go to `logs/qemu-*.log`. The tests use KVM when it really works (`qemu-test.py` asks the kernel with the
 `KVM_GET_API_VERSION` ioctl: WSL2 on Windows 11 does, WSL2 on **Windows 10, or on a CPU Windows can't nest on, creates a
@@ -651,7 +687,8 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
   It asks for the disk, base or desktop (the desktop profile installs exactly what the desktop ISO installs), the host
   name, the root and user passwords, a Wi-Fi network (when there is a Wi-Fi card) and LUKS
   encryption, then partitions, copies `rootfs.sqfs` and installs GRUB. `valence-install --help` lists the unattended
-  variables below.
+  variables below. The root it makes is Btrfs in the subvolume layout of "Snapshots and rollback"; the swap file is
+  made with `btrfs filesystem mkswapfile` in `@swap`.
 - **Dual boot.** On UEFI, when the chosen disk already has an EFI system partition and at least 20 GiB unallocated
   (Windows' Disk Management "Shrink Volume" makes that), the console installer offers `alongside` (the default
   then; `VALENCE_MODE=alongside|erase`): a 1 GiB FAT32 `/boot` (extended boot loader type) and `/` go into the free
@@ -673,6 +710,74 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
   command, `VALENCE_ALPINE`, the installer's question, Alpine's keys and the motd line): Alpine's packages are built
   for musl and cannot run on glibc. Void was never offered (xbps, not apk). The owner's rule stands for any repo
   offered later: never make a foreign repo untagged or on by default.
+
+## Snapshots and rollback
+
+ROADMAP.md, phase 5. **The owner's decisions (19 November 2026): rollback is offered both as a command and in the
+boot menu, and it works "however Nix does it".** That is taken as NixOS's behaviour on top of the Btrfs snapshots the
+roadmap asks for, not as Nix's store (which is nearer to phase 9): every state of the system is listed in the boot
+menu and can be started from there without changing the default; a command makes a state the default; nothing is
+lost by going back. Everything is in `valence-base`: `valence-snapshot`, apk's hook, `boot-snapshot`, and the parts
+of `valence-install`, `valence-update-grub`, `valence-mkinitramfs` and `/etc/runit/1` that know about it.
+
+- **The layout** (`valence-install`): one Btrfs filesystem on the root partition, `noatime,compress=zstd:1`, with five
+  subvolumes. `@` is `/`: what a snapshot holds and a rollback replaces. `@home` and `@log` (`/var/log`) are beside
+  it, so a rollback touches neither the user's files nor the logs of what went wrong. `@snapshots` is `/.snapshots`:
+  `<n>/root` is snapshot n, read-only, and `<n>/info` its date, type (`update`, `manual`, `rollback`), text and kernel
+  files. `@swap` holds the swap file, because a subvolume with an active swap file cannot be snapshotted. `/boot`
+  stays FAT32 on its own partition: GRUB never reads Btrfs. Btrfs is built into the kernel (no initramfs, rule 28),
+  and the kernel is told `rootflags=subvol=@`. XFS is still built in, for systems installed from the first test ISOs.
+- **A snapshot before every change.** `/usr/lib/apk/commit_hooks.d/valence-snapshot` is apk's pre-commit hook and
+  runs `valence-snapshot auto`: a read-only snapshot of `/`, named after what apk was asked to do ("before apk add
+  less-doc"). apk runs the hook only when it is about to change something, and not with `--no-scripts` or
+  `--simulate`. If no snapshot can be taken, the hook fails and apk changes nothing (`apk --no-commit-hooks` goes on
+  without one). The hook does nothing, successfully, wherever `/` is not that layout: the live ISO, the image
+  `mkiso.sh` assembles, the installer's target (it does not mount `/.snapshots` there, on purpose), an XFS install.
+  The ten newest `update` snapshots are kept (`KEEP=` in `/etc/valence/snapshot.conf`; `AUTO=no` switches the hook
+  off), the three newest `rollback` ones, and every `manual` one until it is deleted. NixOS keeps every generation
+  until someone collects garbage; on Btrfs that fills the disk quietly, so here the number is bounded.
+- **The kernel is outside Btrfs, so each snapshot keeps its own.** `/boot/vmlinuz-*`, `initramfs-*`, `System.map-*`
+  and `config-*` are copied to `/boot/snapshots/<name>.<first 16 digits of the sha256>`: one copy per different file,
+  however many snapshots use it, removed when the last of them goes. A rollback puts the snapshot's files back on
+  `/boot` and removes kernel files that came later. Without this a rolled-back system would start the new kernel
+  with the old modules.
+- **The boot menu starts a snapshot; it does not roll back.** `valence-update-grub` writes
+  `/boot/grub/snapshots.cfg`, a submenu "Valence snapshots" with an entry per snapshot, newest first, and `grub.cfg`
+  reads it after the systems that start normally (`valence-update-grub --snapshots` rewrites only that file;
+  `valence-snapshot` runs it after every snapshot). An entry starts the snapshot's own kernel (and initramfs, on an
+  encrypted disk) with the read-only snapshot as `/` and `init=/usr/libexec/valence/boot-snapshot
+  valence.snapshot=<n>`. That script makes a writable copy of the snapshot, the subvolume `@trial`, mounts it,
+  `pivot_root`s onto it and starts the normal init there. The system then runs as it was in the snapshot, says so at
+  login (`/etc/profile.d/valence-snapshot.sh`, from `/run/valence/trial`), and `@` has not been touched: the next
+  start is the default system again, and its stage 1 deletes the copy. The menu is hidden on a computer with one
+  system (Esc or Shift opens it), as before.
+- **`valence-snapshot rollback [N]` makes a snapshot the default.** In a system the boot menu started, with no
+  number: that system. `@` is kept as a `rollback` snapshot, then `@trial` and `@` swap names in one
+  `renameat2(RENAME_EXCHANGE)` (`mv --exchange`), so there is an `@` at every moment, and what `@` was is deleted; it
+  takes effect at once, because the running system is now `@`. Otherwise: snapshot N, or without a number the one
+  from before the last package change (after a rollback, the one before the snapshot rolled back to, so repeating it
+  steps further back). `@` is kept as a `rollback` snapshot, a writable copy of N is swapped in as `@`, and the system
+  that was running keeps running, as `@old`, until the restart; stage 1 of the next boot deletes it
+  (`/.snapshots/.cleanup` marks that there is something to delete). NixOS switches a running system at once; a Btrfs
+  root cannot be swapped under running programs, so here it is the next start.
+- **Only `@` takes package changes.** While the system runs from `@trial` or `@old`, the hook fails with a message
+  that says which, and apk changes nothing: the change would be gone, or in the wrong place, after the restart.
+- **A root running under another name says so in its own fstab.** util-linux's `mount -a` compares the subvolume a
+  mounted `/` came from with the `subvol=` of its fstab line, and takes `/` for not mounted when they differ: it
+  would mount the default `@` over the running root. `boot-snapshot` rewrites the copy's line to `subvol=@trial`, a
+  rollback rewrites the running root's to `subvol=@old`, and keeping a started snapshot writes `subvol=@` back
+  (`fstab_root` in `valence-snapshot`). A remount ignores `subvol=`, so stage 1's `mount -o remount,rw /` is fine
+  either way.
+- **The kernel calls a root it mounted itself `/dev/root`** in `/proc/mounts` until something scans the devices
+  ("device path /dev/root changed to /dev/vda3 scanned by mount" in the log). `boot-snapshot` runs before that and
+  takes the device from `root=` on the command line when the name is not a device node; `valence-snapshot` asks for
+  the device of `/.snapshots`, which `mount -a` mounted by UUID.
+- **What is not there.** No space accounting (snapshots hold on to the data of what was replaced; ten of them bound
+  it), no snapshots of `/home`, no graphical front end, and Calamares does not make this layout yet ("State of the
+  glibc switch"). Subvolumes someone creates inside `@` are not part of its snapshots, and stop a replaced `@` from
+  being deleted.
+- **Mine, not the owner's, and listed in ROADMAP.md under "Not decided yet":** ten snapshots kept, `/home` and
+  `/var/log` outside them, zstd level 1 compression, and the name `valence-snapshot`.
 
 ## Boot time
 

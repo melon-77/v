@@ -114,6 +114,10 @@ With the builder that orders builds itself (phase 4, the same day): from an empt
 are on it; the "64" above counted xz and mpg123, which the old list built and nothing on the ISO uses) in 26
 minutes, each in a clean sysroot. Run again, it built nothing, in a few seconds. The six tests took 6
 minutes.
+With the Btrfs root and snapshots (phase 5, the same day): btrfs-progs is new, and xfsprogs, with the two libraries
+only it used, is no longer built for the console ISO, which is now 48 recipes and 408 MB. The kernel was
+rebuilt with Btrfs built in (13 minutes). There are eight console tests now: the two `rollback` ones start the VM
+five times each, and the eight took 13 minutes.
 
 Every time in the paragraphs before "On glibc" is from a musl build.
 

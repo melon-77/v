@@ -4,19 +4,25 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 [Melon Linux](https://github.com/melon-77/melon-os): the same engineering, without the jokes, and with a handful
 of fixes where Melon chose small over sensible.
 
-Status, 19 November 2026: phases 1 to 3 are done. The base system is on glibc 2.44 and its commands are the GNU
-tools: the cross toolchain, the 62 recipes the console ISO is made of and the ISO build. The ISO passes all six console
-tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next to Windows
-on UEFI), and the installed system adds a package from a repository over the network. BusyBox stays for `/bin/sh`,
-the initramfs and the small daemons. Documentation and translations are packages of their own: the builder makes
-`<pkg>-doc` and `<pkg>-lang` from what a recipe installs, no recipe deletes them any more, and a fresh install has
-no documentation files until `apk add docs` (or one `-doc` package) brings them, with `man`. The recipes beyond the
-base (the desktop, the developer tools) have not been rebuilt on glibc, so their `-doc` and `-lang` packages do not
-exist yet. Phase 4's builder is written and in use for the base: from an empty repository, one command built the
-console system in an order worked out from the recipes, each package in a clean sysroot, and a second run built
-nothing. It cannot rebuild the whole repository yet, because the recipes beyond the base do not build on glibc and
-the desktop's generated recipes do not say what they need: that part of phase 4 waits for phase 6. Nothing later
-has started.
+Status, 19 November 2026: phases 1 to 3 and 5 are done. The base system is on glibc 2.44 and its commands are the
+GNU tools: the cross toolchain, the 48 recipes the console ISO is made of and the ISO build. The ISO passes all
+eight console tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next
+to Windows on UEFI, and two rollback tests), and the installed system adds a package from a repository over the
+network. BusyBox stays for `/bin/sh`, the initramfs and the small daemons. Documentation and translations are
+packages of their own: the builder makes `<pkg>-doc` and `<pkg>-lang` from what a recipe installs, no recipe deletes
+them any more, and a fresh install has no documentation files until `apk add docs` (or one `-doc` package) brings
+them, with `man`. The recipes beyond the base (the desktop, the developer tools) have not been rebuilt on glibc, so
+their `-doc` and `-lang` packages do not exist yet. Phase 4's builder is written and in use for the base: from an
+empty repository, one command built the console system in an order worked out from the recipes, each package in a
+clean sysroot, and a second run built nothing. It cannot rebuild the whole repository yet, because the recipes beyond
+the base do not build on glibc and the desktop's generated recipes do not say what they need: that part of phase 4
+waits for phase 6. The console installer makes a Btrfs root in subvolumes, and apk takes a snapshot before every
+change to the installed packages. Going back works the way NixOS's generations do: the boot menu lists every
+snapshot and starts the one chosen, and `valence-snapshot rollback` makes a snapshot the system that starts by
+default. The tests break an update on purpose both ways: one program, undone with the command; and init together
+with the kernel, after which the disk does not boot until the boot menu starts the snapshot from before it. On a
+plain disk on BIOS and on an encrypted one on UEFI. The graphical installer is part of the desktop and still makes
+an XFS root. Nothing later has started.
 
 ## Why it exists
 
@@ -116,14 +122,15 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   scripts and the ordered lists in `build-everything.sh` are gone. Open: the other 388 recipes, which must first
   build on glibc and declare their dependencies (phase 6).
 
-- [ ] **5. Btrfs and snapshots.**
+- [x] **5. Btrfs and snapshots.**
   The installer creates a Btrfs root with subvolumes. Updating takes a snapshot first. Rolling back is
   documented and tested.
   *Done when:* a QEMU test breaks an update on purpose, rolls back, and boots.
 
 - [ ] **6. The desktop.**
   Rebuild the Plasma 6 stack on glibc (Mesa, Qt, KDE Frameworks, Plasma, SDDM, PipeWire, the apps Melon
-  ships). Plain Calamares branding. A normal first boot. The wallpaper, the splash, login and boot menu pictures
+  ships). Plain Calamares branding, and Calamares makes the same Btrfs layout as the console installer (it still
+  makes an XFS root, which has no snapshots). A normal first boot. The wallpaper, the splash, login and boot menu pictures
   and the green and orange colour scheme are still Melon's, and are replaced here.
   *Done when:* the desktop ISO installs in QEMU on BIOS and UEFI and logs in to Plasma through SDDM.
 
@@ -172,7 +179,10 @@ These are open on purpose. Each gets settled before the phase that needs it.
   Melon? (After phase 6.)
 - **Steam.** Native Steam needs 32-bit libraries next to the 64-bit ones, which is a lot of extra packages.
   Until that is worth doing, Steam stays on Flatpak. (After phase 6.)
-- **How rollback is offered.** A command, a boot menu entry, or both. (Phase 5.)
+- **Snapshot details.** apk keeps its ten newest snapshots (NixOS keeps every generation until told to collect
+  garbage); `/home` and `/var/log` are outside them, so going back leaves both alone; the filesystem is compressed
+  with zstd at level 1; the command is called `valence-snapshot`. All were chosen while building phase 5 and are
+  easy to change.
 - **Hosting.** Where the package repository and the ISOs live.
 - **Translations of the base tools.** bash, coreutils, grep and 38 other recipes are built with `--disable-nls`,
   as on Melon, so they build no translations and have no `-lang` package: their messages are English only. Turning
@@ -185,6 +195,10 @@ These are open on purpose. Each gets settled before the phase that needs it.
 
 ## Decided
 
+- **Rollback: both a command and the boot menu, and "however Nix does it"** (19 November 2026). Taken as NixOS's
+  behaviour on Btrfs snapshots: the boot menu lists every snapshot and starts the one chosen, without changing what
+  starts by default; `valence-snapshot rollback` makes a snapshot the default; what a rollback replaces is kept.
+  Not taken as Nix's store, a folder per package with the system assembled from them, which is nearer to phase 9.
 - **Clean builds** (19 November 2026). Every package is built in a sysroot that holds only what its recipe
   declares, so a missing dependency fails the build instead of going unnoticed, and the same recipe gives the same
   package whatever was built before it.
