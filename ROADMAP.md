@@ -4,11 +4,12 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 [Melon Linux](https://github.com/melon-77/melon-os): the same engineering, without the jokes, and with a handful
 of fixes where Melon chose small over sensible.
 
-Status, 18 November 2026: phase 1 is done and phase 2 is half done. The base system is on glibc 2.44: the cross
-toolchain, the 50 recipes of the console ISO and the ISO build, and the ISO passes all six console tests in QEMU
-(install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next to Windows). BusyBox
-still provides the commands; the GNU tools are the second half of phase 2. The recipes beyond the base (the
-desktop, the developer tools) have not been rebuilt on glibc. Nothing later has started.
+Status, 19 November 2026: phases 1 and 2 are done. The base system is on glibc 2.44 and its commands are the GNU
+tools: the cross toolchain, the 64 recipes of the console ISO and the ISO build. The ISO passes all six console
+tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next to Windows
+on UEFI), and the installed system adds a package from a repository over the network. BusyBox stays for `/bin/sh`,
+the initramfs and the small daemons. The recipes beyond the base (the desktop, the developer tools) have not been
+rebuilt on glibc. Nothing later has started.
 
 ## Why it exists
 
@@ -85,7 +86,7 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   `melon-layout`, `linux-melon` and the rest. Leave out everything listed under "The joke layer goes".
   *Done when:* nothing in the tree says "melon" except the credit line, and every recipe still parses.
 
-- [ ] **2. Switch to glibc.**
+- [x] **2. Switch to glibc.**
   `toolchain.sh` builds binutils, GCC and glibc for `x86_64-valence-linux-gnu`. Rebuild the base on it
   (layout, kernel headers, glibc, GCC runtime, zlib, zstd, OpenSSL, apk-tools, the shell and core tools, runit,
   GRUB). Delete the musl-only patches and workarounds as each recipe is rebuilt.

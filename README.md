@@ -14,7 +14,7 @@ that orders builds itself, and a Btrfs root with a snapshot before every update.
 plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
 
 Nothing has been released, and there is no online package repository yet. The base system is on glibc: the cross
-toolchain and the 50 recipes of the console ISO build on it (ROADMAP.md has the test status). The rest is still as
+toolchain and the 64 recipes of the console ISO build on it (ROADMAP.md has the test status). The rest is still as
 inherited from Melon: the XFS root, the desktop and every other recipe beyond the console ISO (not yet rebuilt on
 glibc, with Melon's musl workarounds still in them), the 32-bit edition, and dated status notes that are Melon's
 history. Where this file, `AGENTS.md` and `BUILDING.md` describe those parts, they describe Melon's system. The
@@ -27,7 +27,7 @@ A from-scratch, rolling x86_64 distribution:
 | | |
 |---|---|
 | libc | glibc 2.44 |
-| userland | BusyBox 1.37 for now (the GNU tools replace its commands in the second half of phase 2, ROADMAP.md) |
+| userland | the GNU tools (coreutils, findutils, grep, sed, tar, gzip, diffutils) with less, procps-ng, iproute2 and shadow; BusyBox 1.37 for `/bin/sh`, the initramfs and the small daemons |
 | init | runit 2.3 |
 | packages | apk-tools 3 (signed apk v3 packages, binary + source recipes) |
 | kernel | Linux 7.0, generic flavour |
@@ -59,9 +59,12 @@ source archive's copies of the same tarballs, and new ones come straight from up
 
 ```sh
 scripts/toolchain.sh
-for p in valence-layout linux-headers glibc gcc-runtime libxcrypt zlib zstd openssl apk-tools busybox ncurses bash \
-         runit util-linux userspace-rcu inih xfsprogs grub libnl3 wpa_supplicant alsa-lib alsa-utils \
-         linux-firmware linux-valence valence-base; do scripts/valence-build $p; done
+# the base system (BASE in scripts/build-everything.sh), then what the console ISO adds to it
+for p in valence-layout linux-headers glibc gcc-runtime libxcrypt zlib zstd xz openssl apk-tools busybox ncurses bash \
+         runit util-linux attr acl pcre2 libmnl coreutils findutils grep sed tar gzip diffutils less procps-ng \
+         iproute2 shadow userspace-rcu inih xfsprogs grub libnl3 expat dbus wpa_supplicant alsa-lib alsa-utils \
+         mpg123 kmod opendoas ca-certificates linux-firmware valence-base linux-valence \
+         libffi glib eudev json-c popt device-mapper cryptsetup efivar efibootmgr; do scripts/valence-build $p; done
 scripts/mkiso.sh
 ```
 

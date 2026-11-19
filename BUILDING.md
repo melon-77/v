@@ -105,8 +105,10 @@ On glibc (the same machine and day): the cross toolchain 10 minutes on its own, 
 29 minutes, 13 of them `linux-valence`. The six tests took 12 minutes that evening, but the machine was slower by
 then for reasons outside the build (the musl ISO's install step took 100 s where it had taken 27 s): compare test
 times only within one sitting.
+The GNU tools (19 November 2026) added 14 recipes, about three minutes of building together. The console ISO is now
+64 recipes and 405 MB, and the six tests took six minutes.
 
-Every time above is from a musl build. On glibc the console ISO is 50 recipes; the new times are not recorded here yet.
+Every time above is from a musl build. On glibc the console ISO is 64 recipes; the new times are not recorded here yet.
 
 Sources that fail, and what `fetch-sources.sh` does about it: `ftp.gnu.org` often does not answer (on one run it served nine
 files and then stalled on the tenth for good), and pinned Ubuntu `.deb`s leave the archive pool when Ubuntu updates the package

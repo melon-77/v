@@ -12,7 +12,7 @@ source by our own scripts and shipped as a signed apk v3 package.
 |---|---|---|
 | libc | glibc 2.44 (`recipes/glibc`: `glibc`, `glibc-dev`, `glibc-locales`), with `libxcrypt` 4.5.2 (`libcrypt.so.2`) for `crypt()` | `C.UTF-8` is built in; other locales are made with `localedef` from `glibc-locales`. `ldd`, `getent`, `locale`, `iconv` and `ldconfig` come with `glibc`, which also ships `/etc/nsswitch.conf` and `/etc/ld.so.conf`. glibc no longer has `crypt()`: a recipe that calls it adds `libxcrypt-dev` to `makedepends` (`opendoas`). Only the base system is on glibc so far: see "State of the glibc switch" below |
 | toolchain | GCC 15.2, binutils 2.46 | target triple `x86_64-valence-linux-gnu` (32-bit: `i686-valence-linux-gnu`); built by `scripts/toolchain.sh` (rule 8) |
-| userland | BusyBox 1.37 | applet symlinks created by its post-install script. BusyBox still provides the commands for now; the GNU tools replace them in the second half of phase 2 (ROADMAP.md, "Decided") |
+| userland | the GNU tools: coreutils 9.12, findutils 4.11, grep 3.12, sed 4.10, tar 1.35, gzip 1.15, diffutils 3.12; with less 710, procps-ng 4.0.7, iproute2 7.3 and shadow 4.20 (`login`, `su`, `passwd`, `useradd`). BusyBox 1.37 for the rest | all of them are dependencies of `valence-base`. BusyBox links each of its commands into `/usr/bin` wherever no file exists (its post-install script and trigger); a package that ships the real command replaces the link, and the trigger puts the link back when that package is removed. BusyBox remains `/bin/sh`, the initramfs, the small daemons (getty, udhcpc, mdev, syslogd, klogd, crond, ntpd) and some 250 commands nothing else provides (`vi`, `wget`, `ping`, `hostname`, `adduser`, ...). `shadow` is built without PAM: `/etc/login.defs` governs logins, and new password hashes are yescrypt (see "State of the glibc switch" and rule 61) |
 | shell | bash 5.3 (login shell), BusyBox ash is `/bin/sh` | |
 | privileges | doas (OpenDoas 6.8.2) with a `sudo` command on top | members of `wheel` |
 | init | runit 2.3 | stages in `/etc/runit/{1,2,3}`, services in `/etc/sv`, enabled = symlink in `/var/service`; stays Valence's init (see Roadmap) |
@@ -48,9 +48,10 @@ path (rule 60). The signing key can stay where it is:
 ### State of the glibc switch
 
 Valence's C library was musl, as in Melon, and is now glibc (ROADMAP.md, phase 2). The base system builds on glibc:
-the cross toolchain and the 50 recipes of the console ISO. ROADMAP.md has the test status. Not converted yet:
+the cross toolchain and the 64 recipes of the console ISO, the GNU tools among them. ROADMAP.md has the test status.
+Not converted yet:
 
-- **The recipes beyond those 50** (the desktop, the developer tools, Rust, LLVM, ...) still contain musl workarounds
+- **The recipes beyond those 64** (the desktop, the developer tools, Rust, LLVM, ...) still contain musl workarounds
   and have not been built on glibc. `argp-standalone`, `musl-fts` and `musl-obstack`, and `elfutils`, which uses
   them, will not build as they are.
 - **Recipes that run what they have just built.** `cmake_native`, and the rules and recipe comments that say a
@@ -59,6 +60,16 @@ the cross toolchain and the 50 recipes of the console ISO. ROADMAP.md has the te
 - **Self-hosting.** "Valence as the build machine" in BUILDING.md, rule 53 and `valence_deps` in `host-setup.sh` were
   written for a musl system and are untested on glibc.
 - **The 32-bit edition** has not been built on glibc; whether it stays is undecided (ROADMAP.md).
+- **shadow has no PAM.** The base system has no linux-pam, so `recipes/shadow` is built without it and a console
+  login does not go through PAM (BusyBox's login never did either). When the desktop is converted and linux-pam is
+  in every desktop install, decide whether it moves into the base, and rebuild shadow with it.
+- **Account tools in other recipes.** The console installer uses shadow's `useradd`, `usermod` and `chpasswd`. The
+  install scripts of dbus, polkit, cups, avahi and valence-desktop still call BusyBox's `adduser` and `addgroup`
+  (BusyBox stays installed, so they work). Calamares' `shadow-shim`, BusyBox-backed stand-ins for shadow's tools,
+  is not needed any more and goes when the desktop is converted.
+- **The console installer's copy drops extended attributes.** `valence-install` copies the system with `tar | tar`.
+  GNU tar can carry file capabilities and ACLs (`--xattrs --acls`); nothing in the base has any. Add the options
+  when the desktop, which has file capabilities, is converted.
 
 Where this file describes those parts, it describes them as they were built on Melon.
 
@@ -379,11 +390,13 @@ Rebuilding the kernel takes about an hour on 2 cores.
     upstream's musl-hosted build on valence (`host-rust.sh`); there the build machine's Rust triple equals
     `$RUST_TARGET`, so build scripts' C parts use valence's cross gcc too, and they still run because the build machine
     is valence. Recipes must not assume Ubuntu paths (`/usr/lib/llvm-*`): look for valence's (`/usr/lib`) as well.
-    valence's `tar` is BusyBox's, whose xz decoder stops at a 64 MiB dictionary (Rust's tarballs use 128 MiB: "tar: corrupted
+    valence's `tar` was BusyBox's until the GNU tools arrived (phase 2); GNU tar runs `xz`, which is still BusyBox's
+    unless the `xz` package is installed, and BusyBox's xz decoder stops at a 64 MiB dictionary (Rust's tarballs use 128 MiB: "tar: corrupted
     data"): unpack `.xz` with `untar` (valence-build) or `xz -dc | tar -xf -`, never `tar xJf`. Host Rust programs that dlopen()
     (bindgen loads libclang) must be built with `-C target-feature=-crt-static` there: a static musl program can't dlopen.
     valence's python3 has no pip.
-    `find`, `grep` and `realpath` are BusyBox's too: no `find -uid/-gid` or size suffixes beyond `k`, no `grep --exclude`,
+    `find`, `grep`, `sed`, `diff`, `ln` and `realpath` were BusyBox's too until phase 2, and scripts and recipes still
+    carry the workarounds (harmless with the GNU tools): no `find -uid/-gid` or size suffixes beyond `k`, no `grep --exclude`,
     no `realpath` options, no `ln -r`, no `diff --version` (libvpx's configure asks), and `sed` isn't GNU sed; valence's bison has no `yacc` command (`YACC="bison -y"`).
     Scripts and recipes use what both have (or python3). The build machine's gcc is GCC 15 (C23 by default,
     rule 40: the cross toolchain's in-tree GMP gets `-std=gnu17`), and its cmake is CMake 4
@@ -436,6 +449,10 @@ Rebuilding the kernel takes about an hour on 2 cores.
     (`appendWindowsPath=false`), because a space in it broke `host-rust.sh`; scripts and queues are run by absolute path from
     the Linux disk, never from `/mnt/c`; and on Windows 10 there is no KVM, so QEMU tests are slow software emulation. A signing
     key kept on a USB stick is used in place through `VALENCE_SIGN_KEY` (`valence-build` and `mkiso.sh` read it), never copied.
+61. **TIOCSTI is off** (`dev.tty.legacy_tiocsti = 0` in valence-base's `/etc/sysctl.conf`). shadow's `su` (since 4.20),
+    when root runs it, drops the controlling terminal unless that ioctl is disabled: `su - user` then starts a shell
+    with no job control ("cannot set terminal process group"), and doas and sudo answer "a tty is required". The disk
+    test's `su - jcole` and `sudo id -u` steps are what catch it. `su -c command` has always run without a terminal.
 
 To resume a failed long build without unpacking again (for example the kernel):
 `VALENCE_KEEP_SRC=1 scripts/valence-build linux-valence`. `build-everything.sh` does that by itself (`VALENCE_AUTO_RESUME=1`), but
@@ -688,7 +705,10 @@ linux-firmware (kernel.org), NVIDIA's driver from NVIDIA. Verify every download:
 project signs (the GNU keyring, kernel.org's `.sign` files, the release manager's key), otherwise its published checksum,
 cross-checked against another distribution's recipe (Alpine's APKBUILD, Arch's PKGBUILD); say in the commit how it was
 checked. List the file in `URL` (method `url`) or `GIT` in `scripts/make-manifest.py` and add its row to
-`sources/MANIFEST.tsv` (sha256 checked on every fetch).
+`sources/MANIFEST.tsv` (sha256 checked on every fetch). On a machine that got its sources from
+`fetch-sources.sh`, `make-manifest.py` rewrites rows that have nothing to do with the new file (git archives hash
+differently from machine to machine, and a `deb/` file fetched from Launchpad has no `.dsc` beside it, so its
+row is left out): run it, keep only the new rows, and check that `git diff` shows additions alone.
 
 History: the first build container could only reach the Ubuntu archive and GitHub, so many older recipes still use
 Ubuntu 26.04's `*.orig.tar.*` (the upstream tarballs, repacked by name only; method `apt`) and some firmware and data
