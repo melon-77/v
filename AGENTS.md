@@ -10,9 +10,9 @@ source by our own scripts and shipped as a signed apk v3 package.
 
 | Piece | Choice | Notes |
 |---|---|---|
-| libc | musl 1.2.5 | + CVE-2025-26519 iconv patches |
-| toolchain | GCC 15.2, binutils 2.46 | target triple `x86_64-valence-linux-musl` |
-| userland | BusyBox 1.37 | applet symlinks created by its post-install script |
+| libc | glibc 2.44 (`recipes/glibc`: `glibc`, `glibc-dev`, `glibc-locales`), with `libxcrypt` 4.5.2 (`libcrypt.so.2`) for `crypt()` | `C.UTF-8` is built in; other locales are made with `localedef` from `glibc-locales`. `ldd`, `getent`, `locale`, `iconv` and `ldconfig` come with `glibc`, which also ships `/etc/nsswitch.conf` and `/etc/ld.so.conf`. glibc no longer has `crypt()`: a recipe that calls it adds `libxcrypt-dev` to `makedepends` (`opendoas`). Only the base system is on glibc so far: see "State of the glibc switch" below |
+| toolchain | GCC 15.2, binutils 2.46 | target triple `x86_64-valence-linux-gnu` (32-bit: `i686-valence-linux-gnu`); built by `scripts/toolchain.sh` (rule 8) |
+| userland | BusyBox 1.37 | applet symlinks created by its post-install script. BusyBox still provides the commands for now; the GNU tools replace them in the second half of phase 2 (ROADMAP.md, "Decided") |
 | shell | bash 5.3 (login shell), BusyBox ash is `/bin/sh` | |
 | privileges | doas (OpenDoas 6.8.2) with a `sudo` command on top | members of `wheel` |
 | init | runit 2.3 | stages in `/etc/runit/{1,2,3}`, services in `/etc/sv`, enabled = symlink in `/var/service`; stays Valence's init (see Roadmap) |
@@ -21,16 +21,16 @@ source by our own scripts and shipped as a signed apk v3 package.
 | kernel | Linux 7.0, `linux-valence` (generic) | config = `x86_64_defconfig` + `recipes/linux-valence/config-valence` |
 | boot | GRUB 2.14, both `i386-pc` and `x86_64-efi` | ISO and installs boot on BIOS **and** UEFI; the installed system's boot menu is hidden (skipped after 1 s, Shift or Esc opens it) unless another system is found, then it shows for 5 s |
 | disks | GPT: 1 MiB BIOS boot, 1 GiB FAT32 `/boot` (also the ESP), XFS `/` | kernel boots with `root=PARTUUID=...`; only encrypted (LUKS) installs have an initramfs (rule 28); dual boot next to Windows on UEFI (see Installers) |
-| filesystem | merged `/usr`: `/bin`, `/sbin`, `/usr/sbin` -> `usr/bin`, `/lib` -> `usr/lib` | packages must only ship files under `/usr`, `/etc`, `/var`, `/boot` |
+| filesystem | merged `/usr`: `/bin`, `/sbin`, `/usr/sbin` -> `usr/bin`, `/lib` -> `usr/lib`; on x86_64 also `/lib64` -> `usr/lib` and `/usr/lib64` -> `lib` (`valence-layout`) | packages must only ship files under `/usr`, `/etc`, `/var`, `/boot`. All libraries, the loader included, live in `/usr/lib`; `lib64` is only a link, there because the x86_64 ABI names the loader `/lib64/ld-linux-x86-64.so.2` |
 | desktop | KDE Plasma 6.6 on Wayland (KWin, Xwayland), Qt 6.10, SDDM | desktop ISO and desktop profile; list in `scripts/desktop-packages.txt` |
-| 32-bit edition | i686 (`VALENCE_ARCH=x86`, `-march=pentium-m -mfpmath=sse`: SSE2, as Qt 6 needs), LXQt 2.4 on Wayland with labwc 0.20 (wlroots), SDDM, Mesa with LLVM built for the X86 backend only (i915, crocus, r300, r600, nouveau, llvmpipe, softpipe) | the owner's decision (7 October 2026): LXQt is the 32-bit desktop, for netbooks such as the MSI Wind U100 (Atom N270, 1–2 GB); drivers for every netbook-era Wi-Fi, Ethernet, graphics and laptop chip in `recipes/linux-valence/config-valence-x86` (the owner: "it should just work"; Broadcom b43 cards still need firmware nobody may redistribute); package list `scripts/desktop-packages-x86.txt`, recipes from `scripts/gen-lxqt-recipes.py` plus `recipes/valence-lxqt` (Valence's LXQt defaults); no Plasma, Flatpak, NVIDIA or QEMU guest agent there (QEMU 11 doesn't build for 32-bit hosts) |
+| 32-bit edition | i686 (`VALENCE_ARCH=x86`, `-march=pentium-m -mfpmath=sse`: SSE2, as Qt 6 needs), LXQt 2.4 on Wayland with labwc 0.20 (wlroots), SDDM, Mesa with LLVM built for the X86 backend only (i915, crocus, r300, r600, nouveau, llvmpipe, softpipe) | **not built on glibc**, and whether Valence keeps this edition is undecided (ROADMAP.md); as inherited from Melon: the owner's decision (7 October 2026): LXQt is the 32-bit desktop, for netbooks such as the MSI Wind U100 (Atom N270, 1–2 GB); drivers for every netbook-era Wi-Fi, Ethernet, graphics and laptop chip in `recipes/linux-valence/config-valence-x86` (the owner: "it should just work"; Broadcom b43 cards still need firmware nobody may redistribute); package list `scripts/desktop-packages-x86.txt`, recipes from `scripts/gen-lxqt-recipes.py` plus `recipes/valence-lxqt` (Valence's LXQt defaults); no Plasma, Flatpak, NVIDIA or QEMU guest agent there (QEMU 11 doesn't build for 32-bit hosts) |
 | desktop plumbing | D-Bus, elogind, polkit, PipeWire + WirePlumber, NetworkManager, BlueZ, CUPS, UDisks2 | console profile keeps `dhcp` + wpa_supplicant |
 | graphics | Mesa 26.0 with LLVM: radeonsi/RADV, iris/ANV, nouveau, llvmpipe; zink (OpenGL on Vulkan) | |
 | developer tools | gcc 15.2 + g++, binutils 2.46, make 4.4.1, pkgconf, patch (`gcc`, `g++`, `binutils`, `make`, `pkgconf`, `patch`) | built cross-native with the cross toolchain's settings (PIE, SSP); in the package repository only, not on the ISOs; `valence-first-boot` offers them on first login (default no) |
 | build tools | perl 5.44, m4, bison, flex, gawk, gperf, GNU bc, texinfo, autoconf 2.73, automake 1.19, autoconf-archive, file; cmake 4.4, meson 1.12, ninja 1.13, git 2.56, nasm 3.01, tcl 8.6, rsync 3.5, lz4; xorriso, mtools, scdoc, itstool, dtc, pahole (`dwarves`), rpcgen (`rpcsvc-proto`), the Public Suffix List, Python's mako, Jinja2, pyparsing, PyYAML, packaging, pexpect and libxml2 bindings (`python3-*`) (`BUILDTOOLS`, `BUILDTOOLS2` in `build-everything.sh`) | what Valence's recipes need to build on Valence itself (self-hosting, see Roadmap); package repository only. gawk and GNU bc take over BusyBox's `awk`/`bc`/`dc` links; BusyBox's `/usr/bin` trigger puts them back when those packages go |
 | compilers, VMs | clang 21 (+ `libclc`, `spirv-llvm-translator`), Go 1.27, gh (`github-cli`), QEMU 11.1 + OVMF (`qemu`, `ovmf`) (`STEP2` in `build-everything.sh`) | package repository only. clang: Mesa's OpenCL C shader compiler on Valence; QEMU + OVMF run Valence's own install tests on Valence; OVMF is Ubuntu 26.04's prebuilt `ovmf-generic` at Ubuntu's paths |
-| NVIDIA | the open driver: nouveau + `linux-firmware-nvidia` (GSP 570.144 from upstream linux-firmware) + NVK (`mesa-nvk`), with zink for OpenGL; or NVIDIA's own kernel driver: `nvidia-open` 615 (open modules + NVIDIA's firmware) | package repository only; `valence-first-boot` asks which one on computers with an NVIDIA card (GTX 16/RTX 20 and newer). NVIDIA's userspace needs glibc: with `nvidia-open` only Flatpak apps (Steam) get NVIDIA's libraries, from Flathub |
-| gaming | Flatpak 1.16 + Flathub, GameMode | Steam is glibc-only, so it can't run natively on musl: `valence-first-boot` offers Steam (and Firefox, VLC, Prism Launcher) from Flathub on first login |
+| NVIDIA | the open driver: nouveau + `linux-firmware-nvidia` (GSP 570.144 from upstream linux-firmware) + NVK (`mesa-nvk`), with zink for OpenGL; or NVIDIA's own kernel driver: `nvidia-open` 615 (open modules + NVIDIA's firmware) | package repository only; `valence-first-boot` asks which one on computers with an NVIDIA card (GTX 16/RTX 20 and newer). With `nvidia-open`, only Flatpak apps (Steam) get NVIDIA's userspace libraries, from Flathub. On Melon that was the only way, because those libraries need glibc; on glibc the system itself could use them, but Valence has no package of them and none of this has been tested on glibc |
+| gaming | Flatpak 1.16 + Flathub, GameMode | `valence-first-boot` offers Steam (and Firefox, VLC, Prism Launcher) from Flathub on first login. Steam is built for glibc, so on Melon Flatpak was the only way to run it; on glibc a native Steam is possible but untested, and it also needs 32-bit libraries (undecided, ROADMAP.md) |
 | game library | SDL3 3.4 + SDL3_image + SDL3_ttf (`sdl3`, `sdl3-image`, `sdl3-ttf`) | package repository only; SDL dlopen()s its Wayland/X11/audio backends |
 | apps and games | Cataclysm: DDA and GNU gettext (package repository only) | what goes on an ISO follows the size rule in "Contributing" |
 
@@ -41,17 +41,34 @@ To build on another machine (Ubuntu 24.04 or WSL2, Debian or Devuan through the 
 location; recipes use `$M`. Never write a machine's absolute path into a script or recipe. A checkout's `tools/` and
 `sysroot/` are tied to its path (the cross compiler has `--with-sysroot=<checkout>/sysroot` built in): **two sessions must
 not share one checkout** (one switching branches under the other's build). Give each its own `git worktree` with its own
-toolchain, sysroot and `repo/` ("Windows + WSL2 build machine" in `BUILDING.md` says how). Run scripts by their absolute path:
-`toolchain.sh` changes directory and then looks for `toolchain-finish.sh` next to `$0`. The signing key can stay where it is:
+toolchain, sysroot and `repo/` ("Windows + WSL2 build machine" in `BUILDING.md` says how). Run scripts by their absolute
+path (rule 60). The signing key can stay where it is:
 `VALENCE_SIGN_KEY=/path/to/valence-signing.rsa` is honoured by `valence-build` and `mkiso.sh`.
+
+### State of the glibc switch
+
+Valence's C library was musl, as in Melon, and is now glibc (ROADMAP.md, phase 2). The base system builds on glibc:
+the cross toolchain and the 50 recipes of the console ISO. ROADMAP.md has the test status. Not converted yet:
+
+- **The recipes beyond those 50** (the desktop, the developer tools, Rust, LLVM, ...) still contain musl workarounds
+  and have not been built on glibc. `argp-standalone`, `musl-fts` and `musl-obstack`, and `elfutils`, which uses
+  them, will not build as they are.
+- **Recipes that run what they have just built.** `cmake_native`, and the rules and recipe comments that say a
+  freshly built program runs directly on the build machine "(rule 18)" (the clang, LLVM, perl, Go and Rust recipes
+  among them), describe Melon's mechanism. Those recipes need `scripts/valence-run` (rule 18) when they are converted.
+- **Self-hosting.** "Valence as the build machine" in BUILDING.md, rule 53 and `valence_deps` in `host-setup.sh` were
+  written for a musl system and are untested on glibc.
+- **The 32-bit edition** has not been built on glibc; whether it stays is undecided (ROADMAP.md).
+
+Where this file describes those parts, it describes them as they were built on Melon.
 
 ## Repository layout
 
 ```
-scripts/env.sh          paths: M, TARGET, TOOLS, SYSROOT, SRC, WORK, REPO
-scripts/toolchain.sh    cross toolchain, part 1 (binutils, headers, gcc stage 1)
-scripts/toolchain-finish.sh  part 2 (musl, full gcc)
+scripts/env.sh          paths: M, TARGET, TOOLS, SYSROOT, SRC, WORK, REPO; LDSO, the loader's file name
+scripts/toolchain.sh    cross toolchain: binutils, kernel headers, GCC and glibc, in one resumable script (rule 8)
 scripts/valence-build     build ONE recipe -> signed .apk(s) in repo/x86_64, reindex, install into sysroot
+scripts/valence-run     start a program built for Valence on the build machine, through the sysroot's loader (rule 18)
 scripts/build-all.sh    build a list of recipes in order, logs to logs/pkg-<name>.log
 scripts/check-order.sh  every makedepends is built before the recipe that needs it (build-everything.sh runs it first)
 scripts/mkiso.sh        live/installer ISO: rootfs.sqfs (pristine apk-installed system, copied to disk by the
@@ -102,15 +119,19 @@ Things the builder gives you:
 - Triggers: `triggers_<x>=(dir ...)` plus a `<pkg>.trigger` script; apk runs the script (with the changed
   directories as arguments) after any transaction that touches those directories, and when `<pkg>` itself is
   installed. Use them for caches other packages feed, e.g. `recipes/shared-mime-info`.
-- `cmake_native <args>` configures CMake as a native build with Valence's compilers and sysroot, so generators the build
-  makes (LLVM's tablegens) run here (rule 18); `recipes/llvm`, `recipes/clang`. `cmake_setup` is the cross build.
+- `cmake_setup <args>` is the CMake cross build. The programs such a build (or a meson build) makes and then runs
+  start through `scripts/valence-run` (rule 18); a recipe that runs a built program by hand calls
+  `$M/scripts/valence-run PROGRAM ARGS...` itself.
+- `cmake_native <args>` configures CMake as a native build with Valence's compilers and sysroot, so that generators
+  the build makes (LLVM's tablegens) are started directly; `recipes/libclc` and `recipes/spirv-llvm-translator` call
+  it. That is Melon's mechanism and is not converted: on glibc such programs need the wrapper (rule 18).
 - `py_install <name> <dirs...>` installs pure-Python modules into python3's site-packages with a small `.dist-info`
   (`recipes/python3-mako`). Modules with C parts need their build system (`recipes/python3-libxml2`).
 - `options=('!strip')` skips stripping. `options=(keepdirs)` keeps empty directories.
 - After packaging, files in `/bin`, `/sbin`, `/lib`, `/usr/sbin` are folded into `/usr/bin` and `/usr/lib`,
   `.la` files are deleted, and ELF files are stripped.
-- `so:` provides/depends are generated from SONAME/NEEDED. musl's `libc.so` has no SONAME, so the musl
-  recipe declares `so:libc.so` by hand. Keep it that way.
+- `so:` provides/depends are generated from SONAME/NEEDED. glibc's libraries carry a SONAME (`libc.so.6`), so the
+  glibc recipe declares none by hand.
 
 Build one package: `scripts/valence-build <recipe>`. Build several: `scripts/build-all.sh a b c`.
 Rebuilding the kernel takes about an hour on 2 cores.
@@ -122,19 +143,28 @@ Rebuilding the kernel takes about an hour on 2 cores.
 2. **Host tools must not see the sysroot.** Anything built with the host compiler (kernel `scripts/`,
    `certs/extract-cert`, GRUB's firmware code) must run with `PKG_CONFIG_SYSROOT_DIR`, `PKG_CONFIG_LIBDIR`,
    `CFLAGS` and `LDFLAGS` unset (see `_kmake` in the kernel recipe and `_tgt` in the GRUB recipe).
-   Otherwise it links against musl's libcrypto and fails with "invalid ELF header".
+   Otherwise it links against the sysroot's libcrypto, which is built for Valence and not for the build machine (on
+   Melon that failed with "invalid ELF header").
 3. **GRUB firmware code gets `TARGET_CFLAGS=-Os` and empty `CFLAGS/LDFLAGS`.** Our `-fno-plt` produces GOT
    references that make `moddep.lst` fail.
 4. **ncurses is built without a separate libtinfo.** `libtinfo.so` is a symlink to `libncursesw.so`.
    A split tinfo breaks readline and bash with `--as-needed`.
-5. **musl has no `sys/cdefs.h`.** Add `bsd-compat-headers` to `makedepends` for software that includes it.
+5. *(A musl rule, kept so the numbering holds: `bsd-compat-headers` for `sys/cdefs.h`. glibc has `sys/cdefs.h` and
+   `sys/queue.h`, and that recipe is gone.)*
 6. **The sysroot upgrades with `apk add --upgrade`.** Bump `pkgrel` whenever you change a recipe, or
    the change won't reach the sysroot or users.
 7. **Install scripts must not create config files that another package ships.** apk would then keep the
    script's version and write the package's as `*.apk-new`. See `recipes/bash/bash.post-install`.
-8. **GCC's target libraries install to `tools/x86_64-valence-linux-musl/lib64`**, not `lib`.
-9. Anything that runs cross-built binaries on the build host needs `/lib/ld-musl-x86_64.so.1`
-   (a symlink to `sysroot/usr/lib/libc.so`).
+8. **GCC's 64-bit target libraries install to `tools/x86_64-valence-linux-gnu/lib`**, not `lib64` (which is only a
+   link on Valence). `scripts/toolchain.sh` is one script, and it builds in the order a glibc cross toolchain needs:
+   binutils, the kernel's headers, the compiler alone, glibc's headers and start files, GCC's headers again plus
+   libgcc, glibc, then the rest of GCC. Each step leaves a stamp in `work/toolchain`, so an interrupted run resumes;
+   delete `work/toolchain` to start over. Two traps, both explained in the script's comments: GCC makes its own
+   `<limits.h>` before glibc's header exists, so `PATH_MAX` goes missing unless GCC's headers are made again once
+   glibc's are installed (`rm b-gcc/gcc/stmp-int-hdrs`); and glibc's parallel `make all` can race on
+   `linkobj/libc_pic.a`, so `make lib` runs first (`recipes/glibc` does the same). libstdc++ keeps its symbol
+   versions (`--disable-symvers` was dropped), and libquadmath is built.
+9. Anything that runs cross-built binaries on the build host starts them through `scripts/valence-run` (rule 18).
 10. **Module handling uses kmod, not BusyBox.** BusyBox's `depmod -b` produced a modules.dep that
     `modprobe` couldn't resolve, so no drivers loaded. The kernel package runs `depmod -a` (kmod) in its
     post-install, and `kmod` is a dependency of `linux-valence`.
@@ -154,13 +184,20 @@ Rebuilding the kernel takes about an hour on 2 cores.
     FAT `/boot` dirty.
 17. **`sudo` is a small front end for doas** (`recipes/opendoas/sudo`). Rules live in `/etc/doas.conf`
     (`permit persist :wheel`). New users get their shell setup from `/etc/skel`.
-18. **Valence binaries run on the build host.** `/lib/ld-musl-x86_64.so.1` points at the sysroot's `libc.so`
-    and `/etc/ld-musl-x86_64.path` lists `sysroot/usr/lib` (same for `i386` in 32-bit builds), so
-    build-time generators from earlier packages (glib-compile-resources, kconfig_compiler, ...) just run.
-    Meson's cross file sets `needs_exe_wrapper=false` for the same reason.
-    **On a valence build machine, never do this:** there the loader is the system's own musl, and pointing it at the
-    sysroot swaps libc under every program. `host-setup.sh` only writes `/etc/ld-musl-x86_64.path` with the system's
-    directories first and `sysroot/usr/lib` last (BUILDING.md, "valence as the build machine").
+18. **Programs built for Valence start through `scripts/valence-run` on the build machine.**
+    `scripts/valence-run PROGRAM ARGS...` starts a program with the sysroot's loader and libraries
+    (`$SYSROOT/usr/lib/$LDSO --library-path $SYSROOT/usr/lib`; `env.sh` exports `LDSO`). PROGRAM is a path to the
+    file: the loader does not search `PATH`. The reason: the build machine's glibc (2.39 on Ubuntu 24.04) is older
+    than Valence's, and a program started directly would get the build machine's loader and libraries.
+    `valence-build` gives the wrapper to meson (`exe_wrapper` and `needs_exe_wrapper = true` in the cross file) and to
+    CMake (`CMAKE_CROSSCOMPILING_EMULATOR` in the toolchain file); a recipe that runs a built program by hand must
+    call it through `$M/scripts/valence-run`. Autoconf builds are cross builds and don't run test programs: their
+    answers are in `scripts/config.site` (rule 25). A second architecture (the planned 64-bit ARM edition) swaps the
+    wrapper for an emulator.
+    Melon instead pointed `/lib/ld-musl-x86_64.so.1` and `/etc/ld-musl-x86_64.path` at the sysroot, so that such
+    programs just ran. That is gone: `host-setup.sh` removes those links, `MUSL_LDSO` became `LDSO`, and `MUSL_ARCH`
+    is gone (recipes test `$APK_ARCH`). Recipes that are not converted yet still assume it ("State of the glibc
+    switch").
 19. **`meson_setup` drops `-D` options the project doesn't have** (`scripts/meson-filter-opts.py`) and
     unsets the `PKG_CONFIG_*` variables for native lookups. Upstream renames options often; a stale
     option must not fail the whole build.
@@ -175,10 +212,9 @@ Rebuilding the kernel takes about an hour on 2 cores.
 22. **Edit scripts that may be running (`valence-build`, `mkiso.sh`, queue scripts) through a temporary file
     and `mv`.** bash reads scripts while running them, so an in-place edit corrupts a running build.
 23. **Never type keys or checksums from memory.** The Flathub key is downloaded from Flathub's own
-    `.flatpakrepo` at first use; Alpine's public keys in `valence-base` were fetched from Alpine's aports
-    and checked against the sha512sums in Alpine's `alpine-keys` APKBUILD.
-24. **musl ships `libc.musl-<arch>.so.1`** (a symlink to the loader), the library name Alpine binaries link
-    against. That's what lets opt-in `@alpine` packages run on valence.
+    `.flatpakrepo` at first use.
+24. *(A musl rule, kept so the numbering holds: `libc.musl-<arch>.so.1` let Alpine's packages run on Melon. They are
+    built for musl and cannot run on glibc, and the opt-in Alpine repository is removed.)*
 25. **Cross autoconf answers live in `scripts/config.site`** (`CONFIG_SITE`). Without them `AC_FUNC_MALLOC`
     assumes a broken malloc and the library ends up with undefined `rpl_malloc` (libndp).
 26. **`msgfmt` needs `GETTEXTDATADIRS`** pointing at the sysroot's `/usr/share/gettext` to find the ITS
@@ -191,8 +227,11 @@ Rebuilding the kernel takes about an hour on 2 cores.
 28. **Only encrypted installs have an initramfs.** `valence-mkinitramfs` builds it when
     `/etc/valence/encrypted-root` exists; `valence-update-grub` then writes `cryptroot=UUID=<luks>
     root=/dev/mapper/valenceroot` and an `initrd` line. Everything else still boots straight from the kernel.
-30. **musl 1.2.4+ hides the `*64` LFS types** (`off64_t`, `ino64_t`) unless `_LARGEFILE64_SOURCE` is
-    defined. Add `-D_LARGEFILE64_SOURCE` to the recipe's CFLAGS (gpgme), as Alpine does.
+    The initramfs holds BusyBox, cryptsetup and kmod with the glibc loader and the libraries they need (`/lib64` is a
+    link in it too), and `libgcc_s.so.1`, which glibc loads by name when a thread exits or is cancelled. The live
+    ISO's initramfs (`mkiso.sh`) copies the loader and the libraries BusyBox needs the same way.
+30. *(A musl rule, kept so the numbering holds: musl 1.2.4+ hid the `*64` LFS types unless `_LARGEFILE64_SOURCE`
+    was defined, so gpgme got `-D_LARGEFILE64_SOURCE`.)*
 31. **The builder's `apk add --upgrade` only reinstalls a package whose version-release changed.** Generated
     recipes take their `pkgrel` from the `PKGREL` table in `scripts/gen-simple-recipes.py`.
 29. **Two build queues may run at once** for the same arch: `valence-build` takes `flock repo/<arch>/.lock`
@@ -229,9 +268,9 @@ Rebuilding the kernel takes about an hour on 2 cores.
     substitution. Probes that may find nothing (no sound card, no network) need `|| true` inside the `$( )`.
 40. **GCC 15 compiles C23 by default**, where `void f()` means "no arguments". Old code and old configure tests
     that call such functions with arguments fail ("too many arguments to function"): build them with
-    `CFLAGS="$CFLAGS -std=gnu17"` (gmp). Old `config.sub` files don't know `*-linux-musl`: copy the build host's
-    (`/usr/share/misc/config.sub`, `config.guess`) as libcanberra and libatasmart do. Tools a build runs on the
-    build machine come from `CC_FOR_BUILD=gcc` when the project supports it.
+    `CFLAGS="$CFLAGS -std=gnu17"` (gmp). Old `config.sub` files don't know `*-linux-musl`, so on Melon recipes copied
+    the build host's (`/usr/share/misc/config.sub`, `config.guess`); libcanberra and libatasmart, not converted yet,
+    still do. Tools a build runs on the build machine come from `CC_FOR_BUILD=gcc` when the project supports it.
 41. **Absolute symlinks in `usr/lib` and `usr/include`** (`libfoo.so -> /usr/lib/libfoo.so.1`) point into the
     build machine's own `/usr` from the sysroot, so the linker can't find the library. valence-build makes them
     relative when packaging; a package built before that needs a pkgrel bump to reach the sysroot (rule 31).
@@ -268,7 +307,7 @@ Rebuilding the kernel takes about an hour on 2 cores.
     stay. The desktop-install test fails if anything under `/usr` or `/etc` belongs to `nobody`.
 46. **Rust recipes cross-compile with the build machine's Rust** (`scripts/host-rust.sh` puts upstream's release
     binaries in `hosttools/rust`, with the standard library for `$RUST_TARGET`). valence-build points cargo at
-    `x86_64-unknown-linux-musl`, links with valence's gcc and passes `-C target-feature=-crt-static -C link-self-contained=no` in
+    `$RUST_TARGET`, links with valence's gcc and passes `-C target-feature=-crt-static -C link-self-contained=no` in
     `RUSTFLAGS` (never `CARGO_TARGET_<triple>_RUSTFLAGS`, which cargo merges with a project's own `.cargo/config.toml`, and
     ripgrep's turns static linking back on): Rust's musl targets link statically by default, and valence's programs share its libc. Build scripts and proc-macros run on the build
     machine; their C parts get the build machine's gcc from the triple-named variables (`CC_x86_64_unknown_linux_gnu`,
@@ -280,19 +319,27 @@ Rebuilding the kernel takes about an hour on 2 cores.
     a C library for musl targets unless told otherwise (`PCRE2_SYS_STATIC=0` in ripgrep): link valence's. **Every recipe
     that puts Rust code into a package says `options=(rust)`**, so the Rust packages can be found from the recipes
     (`grep -l 'options=(.*rust' recipes/*/VALENCEBUILD`).
+    **Not converted to glibc.** `RUST_TARGET` in `env.sh` is now `x86_64-unknown-linux-gnu`, but no Rust recipe has
+    been built on glibc. What this rule says about static linking (`-crt-static`, the `-sys` crates' own copies) was
+    written for Rust's musl target, `x86_64-unknown-linux-musl`, the one `host-rust.sh` still installs a standard
+    library for. And the target's triple is now the build machine's too, so the triple-named variables above no
+    longer tell the two apart.
 
 47. **Flatpak must be built with X11 authorization (`-Dxauth=enabled`, libXau).** Without it, sandboxed X11 apps get
     the host's `DISPLAY` and a path to an Xauthority file that doesn't exist inside the sandbox. Xwayland refuses them
     ("Authorization required, but no authorization protocol specified") and they never open a window: Steam and VLC
     "refused to launch". The desktop-install test checks that `/usr/bin/flatpak` links libXau.
 
-48. **A configure that must run its test programs can run as if native** (rule 18): perl's `Configure` gets `-Dcc=$CC`
+48. **A configure that must run its test programs can run as if native** (rule 18 as it was on Melon, see the end
+    of this rule): perl's `Configure` gets `-Dcc=$CC`
     and the sysroot's `libpth`/`usrinc`, and the recipe strips the sysroot and the triple from the installed
     `Config.pm` afterwards, so modules built on valence use `gcc` and `/usr`. The same trick compiles `file`'s magic
     database with the `file` just built. Perl's MakeMaker writes the directory of every library it finds into the
     module's RPATH through `LD_RUN_PATH`: `make LD_RUN_PATH=` keeps the sysroot out (a `LEAK:` line otherwise).
     CMake's own `try_run` checks run the same way: `-DCMAKE_CROSSCOMPILING_EMULATOR=/usr/bin/env` (recipes/cmake).
     A library built without a SONAME (perl's, Tcl's) gets one on its link line, or the `so:` dependency on it can't be met.
+    Running as if native is Melon's mechanism: there a program built for the target ran directly on the build machine.
+    perl, `file` and cmake have not been built on glibc, and need `scripts/valence-run` (rule 18) when they are converted.
 
 49. **Valence's llvm-dev keeps only five static archives** (LLVMSupport, LLVMDemangle, LLVMTableGen, -Basic, -Common): the
     rest (about 1 GB) would pass GitHub's file limit, and everything links the shared libLLVM. Tablegen tools always link
@@ -304,6 +351,8 @@ Rebuilding the kernel takes about an hour on 2 cores.
     builds with `CC=gcc`, a wrapper that runs valence's cross compiler, so Go on valence calls plain `gcc`. Go programs in
     recipes (recipes/github-cli) build with valence's own `go` from the sysroot; their modules are downloaded in
     `prepare()` into `sources/gomod`, checked against `go.sum` and sum.golang.org, and the build runs with `GOPROXY=off`.
+    Running the sysroot's `go` on the build machine is Melon's mechanism: on glibc it needs `scripts/valence-run`
+    (rule 18), and the Go recipes are not converted yet.
 51. **NVIDIA's kernel modules fit one exact kernel.** `nvidia-open` is built against Valence's kernel source with the exact
     `/boot/config-valence` (a full kernel build, for `Module.symvers`, which NVIDIA's configure checks read) and depends on
     that `linux-valence` version-release: **every linux-valence version or pkgrel change needs an nvidia-open pkgrel bump
@@ -318,19 +367,22 @@ Rebuilding the kernel takes about an hour on 2 cores.
     `-resource-dir` to find its own headers (`BINDGEN_EXTRA_CLANG_ARGS`). Mesa's Rust crates come through its meson wraps
     (pinned by hash) into `sources/mesa-packagecache`.
 
-53. **On Valence, the build machine's triple is not Valence's.** `gcc -dumpmachine` on Valence prints `x86_64-valence-linux-musl`,
+53. **On Valence, the build machine's triple is not Valence's.** `gcc -dumpmachine` on Valence prints `x86_64-valence-linux-gnu`,
     the cross toolchain's own target, so binutils and gcc would configure themselves as native compilers and autoconf
-    would see `--build` equal to `--host`. `env.sh` sets `BUILD_TRIPLE` (`x86_64-pc-linux-musl` on valence, gcc's own
+    would see `--build` equal to `--host`. `env.sh` sets `BUILD_TRIPLE` (`x86_64-pc-linux-gnu` on valence, gcc's own
     answer elsewhere): `valence-build` passes it as `--build`, and `toolchain.sh` gives binutils and gcc
-    `--build`/`--host` from `TOOLCHAIN_HOST_FLAGS` (empty on Ubuntu, so Ubuntu builds don't change). Programs built
-    for the Ubuntu host (`tools/`, `hosttools/`) don't run on valence (no glibc): rebuild them there. Host Rust is
+    `--build`/`--host` from `TOOLCHAIN_HOST_FLAGS` (empty on Ubuntu, so Ubuntu builds don't change).
+    **The rest of this rule was written when Valence was a musl system and is untested on glibc** ("State of the glibc
+    switch"). Its musl parts no longer describe Valence: a build machine without glibc, upstream's musl-hosted Rust,
+    static musl programs that can't dlopen. Programs built for the Ubuntu host (`tools/`, `hosttools/`) didn't run on
+    valence (it had no glibc): rebuild them there. Host Rust is
     upstream's musl-hosted build on valence (`host-rust.sh`); there the build machine's Rust triple equals
     `$RUST_TARGET`, so build scripts' C parts use valence's cross gcc too, and they still run because the build machine
     is valence. Recipes must not assume Ubuntu paths (`/usr/lib/llvm-*`): look for valence's (`/usr/lib`) as well.
     valence's `tar` is BusyBox's, whose xz decoder stops at a 64 MiB dictionary (Rust's tarballs use 128 MiB: "tar: corrupted
     data"): unpack `.xz` with `untar` (valence-build) or `xz -dc | tar -xf -`, never `tar xJf`. Host Rust programs that dlopen()
     (bindgen loads libclang) must be built with `-C target-feature=-crt-static` there: a static musl program can't dlopen.
-    valence's `/usr/include` lacks `sys/cdefs.h` without `bsd-compat-headers` (rule 5), and its python3 has no pip.
+    valence's python3 has no pip.
     `find`, `grep` and `realpath` are BusyBox's too: no `find -uid/-gid` or size suffixes beyond `k`, no `grep --exclude`,
     no `realpath` options, no `ln -r`, no `diff --version` (libvpx's configure asks), and `sed` isn't GNU sed; valence's bison has no `yacc` command (`YACC="bison -y"`).
     Scripts and recipes use what both have (or python3). The build machine's gcc is GCC 15 (C23 by default,
@@ -351,11 +403,11 @@ Rebuilding the kernel takes about an hour on 2 cores.
     recipes/qemu and qemu-guest-agent use the host Python (`hosttools/python` keeps ensurepip) and put setuptools
     and wheel (PyPI wheels in `sources/`) next to QEMU's own in `python/wheels`, where its offline "tooling" group
     looks for them.
-54. **i686 needs SSE2 and `libssp_nonshared.a`.** The 32-bit toolchain targets `-march=pentium-m -mfpmath=sse`
-    (`GCC_ARCH`/`GCC_FPMATH` in `env.sh`): Qt 6 refuses to build without SSE2, and Alpine's x86 does the same. With
-    `--enable-default-ssp`, position-independent i386 code calls the hidden `__stack_chk_fail_local`, which musl
-    doesn't provide: `toolchain-finish.sh` and the musl recipe build `libssp_nonshared.a`, and
-    `patches/gcc-i686/ssp-nonshared.patch` makes gcc link it (Alpine's way). Without it libatomic's configure fails.
+54. **i686 needs SSE2.** The 32-bit toolchain targets `-march=pentium-m -mfpmath=sse`
+    (`GCC_ARCH`/`GCC_FPMATH` in `env.sh`): Qt 6 refuses to build without SSE2, and Alpine's x86 does the same. The
+    second half of this rule was for musl, which doesn't provide `__stack_chk_fail_local`: `libssp_nonshared.a` from
+    `toolchain-finish.sh` and the musl recipe, and `patches/gcc-i686/ssp-nonshared.patch`. All three are gone.
+    The 32-bit edition has not been built on glibc (whether it stays is undecided, ROADMAP.md).
 55. **No text relocations on i686.** BusyBox's SHA-NI assembly (`CONFIG_SHA1_HWACCEL`, `CONFIG_SHA256_HWACCEL`) isn't
     position-independent on i386: the PIE BusyBox got a TEXTREL and every applet segfaulted at start. The recipe
     switches those off on i386. After a new 32-bit package, check `readelf -d` for `TEXTREL`.
@@ -479,7 +531,7 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
 - **Console installer: `valence-install`** (`/usr/bin/valence-install`, in valence-base), on both ISOs and named in the live
   system's motd. It needs root (started by another user, it runs itself again through doas) and the live ISO's system image.
   It asks for the disk, base or desktop (the desktop profile installs exactly what the desktop ISO installs), the host
-  name, the root and user passwords, a Wi-Fi network (when there is a Wi-Fi card), the opt-in Alpine repo and LUKS
+  name, the root and user passwords, a Wi-Fi network (when there is a Wi-Fi card) and LUKS
   encryption, then partitions, copies `rootfs.sqfs` and installs GRUB. `valence-install --help` lists the unattended
   variables below.
 - **Dual boot.** On UEFI, when the chosen disk already has an EFI system partition and at least 20 GiB unallocated
@@ -493,16 +545,16 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
   `bootmgr` on an NTFS partition (BIOS). Test: `qemu-test.py dualboot` (a fake Windows disk, persistent UEFI boot
   menu, checksums of everything Windows owns before and after).
 - Unattended install variables: `VALENCE_DISK VALENCE_HOSTNAME VALENCE_ROOTPW VALENCE_USER VALENCE_USERPW
-  VALENCE_PROFILE VALENCE_YES=1 VALENCE_SERIAL=1 VALENCE_WIFI_SSID VALENCE_WIFI_PSK VALENCE_ALPINE=y
+  VALENCE_PROFILE VALENCE_YES=1 VALENCE_SERIAL=1 VALENCE_WIFI_SSID VALENCE_WIFI_PSK
   VALENCE_ENCRYPT=y VALENCE_LUKSPW VALENCE_MODE=alongside`. With `VALENCE_YES=1`, questions that have a default take it.
 - **Profiles** live in `/usr/share/valence/profiles/` on the live system: `<name>` is the package list,
   `<name>.services` the runit services (`name` enables one, `-name` drops a base service). `mkiso.sh`
   writes them. The desktop profile swaps `mdevd`/`dhcp` for `udevd` and NetworkManager, and the
   installer gives NetworkManager the Wi-Fi network instead of wpa_supplicant.
-- **Other distros' repos are opt-in only.** The console installer offers Alpine as the tagged repo `@alpine`
-  (`VALENCE_ALPINE=y` runs `valence-repo enable alpine` in the new system); Calamares doesn't ask, and `valence-repo enable
-  alpine` works on any installed system. apk only uses it for packages asked for as `name@alpine`. Void isn't
-  offered (xbps, not apk). Never make a foreign repo untagged or on by default.
+- **No other distro's repository is offered.** Melon's opt-in Alpine repository is removed (the `valence-repo`
+  command, `VALENCE_ALPINE`, the installer's question, Alpine's keys and the motd line): Alpine's packages are built
+  for musl and cannot run on glibc. Void was never offered (xbps, not apk). The owner's rule stands for any repo
+  offered later: never make a foreign repo untagged or on by default.
 
 ## Boot time
 
@@ -646,6 +698,9 @@ that is the only place Ubuntu is still needed.
 
 ## Roadmap
 
+The stages and status notes in this section are Melon's, kept as its history: Valence's plan is `ROADMAP.md`. Of what
+is listed here, only the base system has been rebuilt on glibc ("State of the glibc switch" above).
+
 - **Stage 1 (base): done.** Toolchain, base packages, the console ISO and the quick console installer, BIOS and
   UEFI, LUKS encryption, dual boot next to Windows, VM guest tools.
 - **Stage 2 (desktop): done.** eudev, D-Bus, elogind, polkit, Mesa with LLVM, Qt 6, KDE Frameworks 6, Plasma and
@@ -677,7 +732,8 @@ that is the only place Ubuntu is still needed.
 - **Rust:** recipes can be written in Rust (rule 46; ripgrep is the first), and Valence has its own `rust` and `cargo`
   packages (`recipes/rust`, rustc 1.98.1 built from source, in the package repository only, not on the ISOs). Built
   and tested on the build machine (29 September 2026): cargo builds and runs a program with a crates.io dependency on
-  Valence. `codegen-tests = false` in its `bootstrap.toml`, because Valence's llvm ships no FileCheck. It builds cross-native with build = host = target = musl
+  Valence. `codegen-tests = false` in its `bootstrap.toml`, because Valence's llvm ships no FileCheck. The recipe is
+  still Melon's, not converted to glibc: it builds cross-native with build = host = target = musl
   (`x86_64-unknown-linux-musl`), from upstream's musl-hosted stage 0 (manifest entries), against Valence's LLVM 21
   (shared) and its native gcc; `musl-dynamic-by-default.patch` sets musl's `crt_static_default` to false as Alpine
   and Void do (upstream's own FIXME, compiler-team#422), so `cargo build` on Valence links dynamically like Valence's
@@ -694,9 +750,9 @@ that is the only place Ubuntu is still needed.
   pexpect driving a shell). **Step 2 is done too:** clang 21 with libclc and the SPIR-V translator (Mesa's
   `mesa_clc` and `vtn_bindgen2` build on Valence from Mesa's source and turn OpenCL C into valid SPIR-V), QEMU 11.1 with
   libslirp and OVMF (Valence's own `qemu-test.py live`, `disk` and `disk --uefi` pass when run inside Valence with Valence's
-  QEMU, Python and pexpect), Go 1.27 (cgo on by default with Valence's gcc) and gh. Claude Code installs on Valence with
-  Anthropic's own installer, which picks its musl build (README, "Developer tools"); it isn't packaged, as it isn't open
-  source. Step 3: build Valence on Valence (`build-everything.sh` inside a Valence system, the recipes' remaining build-machine
+  QEMU, Python and pexpect), Go 1.27 (cgo on by default with Valence's gcc) and gh. On Melon, Claude Code installed with
+  Anthropic's own installer, which picked its musl build; that is not tested on glibc yet (README, "Developer tools").
+  It isn't packaged, as it isn't open source. Step 3: build Valence on Valence (`build-everything.sh` inside a Valence system, the recipes' remaining build-machine
   tools such as Mesa's `hosttools/bin` and the host Qt and Rust replaced by Valence's own), run the test suite there, and
   compare the packages with the WSL-built ones.
 - **NVIDIA (the owner: both drivers, 29 September 2026): built, waiting for a test on real hardware** by a contributor

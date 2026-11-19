@@ -32,3 +32,4 @@ CONFIG_PACKAGE_HOSTING="later"
 CONFIG_ISO_SIZE_LIMIT="4g"
 # Notes from the owner: offer existing repos (Alpine, Void) as an option in the installer; aim for a
 # desktop ISO under 2 GB if at all possible; speed and efficiency are the main goal.
+# (Valence no longer offers Alpine's repo: Alpine's packages are built for musl, and Valence is on glibc.)

@@ -72,8 +72,7 @@ build 19041 or newer.
        for e in ~/valence/sources/*; do [ "${e##*/}" = MANIFEST.tsv ] || ln -sfn "$e" sources/; done   # shared downloads
        ln -sfn ~/valence/hosttools hosttools                                                            # shared host tools
        git --git-dir=$HOME/valence/.git archive origin/packages x86_64 | tar -x -C repo                 # its own copy of the online repo
-       echo ~/valence-r2/sysroot/usr/lib >> /etc/ld-musl-x86_64.path                                    # rule 18: the loader must find this tree's libraries
-       /root/valence-r2/scripts/toolchain.sh      # its own cross toolchain (about 15 minutes with 12 jobs); absolute path
+       /root/valence-r2/scripts/toolchain.sh      # its own cross toolchain; absolute path
 
    Then `valence-build` the recipes you changed: it installs their `makedepends` from `repo/x86_64`, but a dev package's
    private requires (kmod-dev needs zlib, zstd, xz, openssl) are not apk dependencies, so first `apk add` the base and
@@ -102,6 +101,12 @@ Valence's first build, on an HP Victus 15 (i5-12450H, 12 threads, 32 GB, the sam
 (12 jobs each) the toolchain took 18 minutes and the host Qt 31. The 39 recipes of the console ISO then took 32 minutes,
 14 of them `linux-valence`; the console ISO 7 seconds; the six console tests (`live`, `disk`, `disk --uefi`, `live --luks`,
 `disk --luks`, `dualboot`) five minutes together, without KVM.
+On glibc (the same machine and day): the cross toolchain 10 minutes on its own, the 50 recipes of the console ISO
+29 minutes, 13 of them `linux-valence`. The six tests took 12 minutes that evening, but the machine was slower by
+then for reasons outside the build (the musl ISO's install step took 100 s where it had taken 27 s): compare test
+times only within one sitting.
+
+Every time above is from a musl build. On glibc the console ISO is 50 recipes; the new times are not recorded here yet.
 
 Sources that fail, and what `fetch-sources.sh` does about it: `ftp.gnu.org` often does not answer (on one run it served nine
 files and then stalled on the tenth for good), and pinned Ubuntu `.deb`s leave the archive pool when Ubuntu updates the package
@@ -123,8 +128,9 @@ sha256 in `sources/MANIFEST.tsv`, whichever server it came from.
 and continues an interrupted one. Logs are in `logs/` (`logs/pkg-<name>.log` per package). The ISOs
 land in `out/`. `scripts/publish-repo.sh` then puts the packages online for installed systems.
 
-The build runs as root because packages are installed into `sysroot/` with their real owners and
-because an Ubuntu host needs `/lib/ld-musl-x86_64.so.1` (see AGENTS.md, rule 18).
+The build runs as root because packages are installed into `sysroot/` with their real owners.
+Programs built for Valence start on the build machine through `scripts/valence-run` (AGENTS.md, rule 18): nothing is set
+up in the build machine's own `/lib` for them, and `host-setup.sh` removes the `/lib/ld-musl-*.so.1` links Melon made.
 
 ## Debian or Devuan as the build machine
 
@@ -134,13 +140,19 @@ older Valence sources still come from Ubuntu's source archive, and lists any pac
 instead of stopping (paste that warning line if you get one). Without `sudo`, run the commands as root (`su -`).
 
 **Moving from another build machine (Valence, Ubuntu, WSL):** copy `keys/`, `sources/`, `repo/` and `sysroot/` into the
-new checkout, but not `tools/`, `hosttools/` or `work/`: they hold programs built for the old machine (Valence's are linked
-against musl, Ubuntu's against another glibc). `host-setup.sh` rebuilds the host tools and `build-everything.sh` the
-cross toolchain before it carries on with the packages; finished packages in `repo/` are not built again.
+new checkout, but not `tools/`, `hosttools/` or `work/`: they hold programs built for the old machine and linked against
+its C library. A `repo/` or `sysroot/` from before the switch to glibc holds musl builds: don't carry those over
+(`build-everything.sh` skips a package whose version-release is already in `repo/`). `host-setup.sh` rebuilds the host
+tools and `build-everything.sh` the cross toolchain before it carries on with the packages; finished packages in
+`repo/` are not built again.
 
 ## Valence as the build machine
 
-Valence builds itself. On a Valence install (desktop or console profile), starting with no checkout:
+**Untested on glibc.** This section, rule 53 in AGENTS.md and `valence_deps` in `host-setup.sh` were written when Valence
+was a musl system (Melon built itself this way). Nothing here has been run since the switch to glibc, and the build
+tools it installs from Valence's own repository have not been rebuilt on glibc either.
+
+On a Valence install (desktop or console profile), starting with no checkout:
 
 1. `doas apk upgrade`, then `doas apk add git` (git is in the online repository, not on the ISOs).
 2. `git clone -b testing https://github.com/melon-77/v ~/valence`, then `cd ~/valence`.
@@ -161,16 +173,19 @@ What's different from an Ubuntu build machine:
   otherwise `build-everything.sh` carries on where it stopped.
 - **Moving from an Ubuntu or WSL build machine:** keep `keys/`, `sources/`, `repo/` and `sysroot/`, but delete
   `tools/` and `hosttools/` (except `hosttools/bin/apk`, which `host-setup.sh` replaces anyway): they hold programs
-  built against Ubuntu's glibc, which Valence doesn't have. `host-setup.sh` rebuilds the host tools, and
-  `build-everything.sh` rebuilds the cross toolchain (about an hour or two) before carrying on with the packages,
-  skipping every package already in `repo/`.
-- The loader is Valence's own: `/lib/ld-musl-x86_64.so.1` is never pointed at the sysroot (AGENTS.md, rule 18).
-  `/etc/ld-musl-x86_64.path` lists the system's library directories first and the sysroot's last.
+  built on the Ubuntu machine against its glibc (Valence had none when this was written). `host-setup.sh` rebuilds the
+  host tools, and `build-everything.sh` rebuilds the cross toolchain (about an hour or two) before carrying on with
+  the packages, skipping every package already in `repo/`.
+- Programs from the sysroot start through `scripts/valence-run`, as on an Ubuntu build machine (AGENTS.md, rule 18):
+  the system's own loader and libraries are never pointed at the sysroot.
 - Keep the build machine's own packages up to date from the online repository, and don't upgrade it from packages it
-  just built until they pass the QEMU tests: a broken gcc or musl on the build machine stops it from fixing itself.
+  just built until they pass the QEMU tests: a broken gcc or glibc on the build machine stops it from fixing itself.
   Keep a Valence live USB around for that case.
 
 ## The 32-bit (i686) edition
+
+The 32-bit edition has not been built on glibc, and whether Valence keeps it is undecided (ROADMAP.md). The steps below
+are untested since the switch.
 
 The same checkout builds the 32-bit edition next to the 64-bit one; its files go to `tools-x86/`, `sysroot-x86/`,
 `work-x86/` and `repo/x86/`, so the two never mix:
@@ -182,7 +197,8 @@ system, Qt and the LXQt desktop (not Plasma, Flatpak or the NVIDIA drivers), the
 `out/valence-desktop-*-i686.iso`. Logs carry `-x86` in their names (`logs/everything-x86-1.log`). Test with
 `scripts/qemu-test.py ... --i686`: it runs `qemu-system-i386` with an Atom N270 CPU. The build machine runs i686
 programs from the sysroot during the build, so its kernel needs 32-bit support (`CONFIG_IA32_EMULATION`, on in
-Ubuntu, Debian, Devuan and Valence); `host-setup.sh` points `/lib/ld-musl-i386.so.1` at `sysroot-x86`. Disk: the
+Ubuntu, Debian, Devuan and Valence); they start through `scripts/valence-run` with the loader in `sysroot-x86`
+(`ld-linux.so.2`; AGENTS.md, rule 18). Disk: the
 finished 32-bit tree takes about 6 GB (toolchain, sysroot, packages, work), more while LLVM and Qt build; keep
 20 GB free.
 

@@ -13,10 +13,12 @@ of things: glibc instead of musl, documentation and translations in their own pa
 that orders builds itself, and a Btrfs root with a snapshot before every update. **[ROADMAP.md](ROADMAP.md) is the
 plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
 
-Nothing has been released, and there is no online package repository yet. Until a phase lands, the rest of this file,
-`AGENTS.md` and `BUILDING.md` describe the system as it was inherited from Melon: musl, XFS, and dated status notes
-that are Melon's history. The desktop's pictures (wallpaper, splash, login and boot menu backgrounds) are still
-Melon's too; the logo is Valence's.
+Nothing has been released, and there is no online package repository yet. The base system is on glibc: the cross
+toolchain and the 50 recipes of the console ISO build on it (ROADMAP.md has the test status). The rest is still as
+inherited from Melon: the XFS root, the desktop and every other recipe beyond the console ISO (not yet rebuilt on
+glibc, with Melon's musl workarounds still in them), the 32-bit edition, and dated status notes that are Melon's
+history. Where this file, `AGENTS.md` and `BUILDING.md` describe those parts, they describe Melon's system. The
+desktop's pictures (wallpaper, splash, login and boot menu backgrounds) are still Melon's too; the logo is Valence's.
 
 ## What it is
 
@@ -24,22 +26,23 @@ A from-scratch, rolling x86_64 distribution:
 
 | | |
 |---|---|
-| libc | musl 1.2.5 |
-| userland | BusyBox 1.37 |
+| libc | glibc 2.44 |
+| userland | BusyBox 1.37 for now (the GNU tools replace its commands in the second half of phase 2, ROADMAP.md) |
 | init | runit 2.3 |
 | packages | apk-tools 3 (signed apk v3 packages, binary + source recipes) |
 | kernel | Linux 7.0, generic flavour |
 | boot | GRUB 2.14, one ISO and one install that boot on both BIOS and UEFI |
 | root fs | XFS (FAT32 `/boot`) |
 | shell | bash 5.3 |
-| desktop | KDE Plasma 6 on Wayland; Flatpak for Steam and other glibc apps; more desktops as online installs |
-| 32-bit edition | i686 (Pentium M, Pentium 4, Atom netbooks such as the MSI Wind U100) with LXQt on Wayland (labwc) |
+| desktop | KDE Plasma 6 on Wayland; Flatpak for Steam and other apps; more desktops as online installs |
+| 32-bit edition | i686 (Pentium M, Pentium 4, Atom netbooks such as the MSI Wind U100) with LXQt on Wayland (labwc); Melon's, not built on glibc, and undecided for Valence (ROADMAP.md) |
 
 ## Layout
 
 ```
-scripts/toolchain.sh   builds the x86_64-valence-linux-musl cross toolchain (binutils 2.46, GCC 15.2, musl)
+scripts/toolchain.sh   builds the x86_64-valence-linux-gnu cross toolchain (binutils 2.46, GCC 15.2, glibc 2.44)
 scripts/valence-build    builds one recipe into signed .apk packages and reindexes the repo
+scripts/valence-run    runs a program built for Valence on the build machine, through the sysroot's loader
 scripts/mkiso.sh       assembles the hybrid BIOS/UEFI live ISO from the repo
 recipes/<pkg>/VALENCEBUILD   package recipes (APKBUILD-like)
 iso-files/init         live initramfs init
@@ -56,14 +59,15 @@ source archive's copies of the same tarballs, and new ones come straight from up
 
 ```sh
 scripts/toolchain.sh
-for p in valence-layout linux-headers musl gcc-runtime zlib zstd openssl apk-tools busybox ncurses bash runit \
-         util-linux userspace-rcu inih xfsprogs grub libnl3 wpa_supplicant alsa-lib alsa-utils \
+for p in valence-layout linux-headers glibc gcc-runtime libxcrypt zlib zstd openssl apk-tools busybox ncurses bash \
+         runit util-linux userspace-rcu inih xfsprogs grub libnl3 wpa_supplicant alsa-lib alsa-utils \
          linux-firmware linux-valence valence-base; do scripts/valence-build $p; done
 scripts/mkiso.sh
 ```
 
 The build machine can be Ubuntu 24.04 (or WSL2, also on Windows 10: see BUILDING.md for its traps), Debian or Devuan, or **Valence itself**: `scripts/host-setup.sh`
-notices which one it runs on and installs the build tools with `apt` or with Valence's own `apk`. `BUILDING.md` has
+notices which one it runs on and installs the build tools with `apt` or with Valence's own `apk`. Building on Valence
+itself was set up when it was a musl system and is untested on glibc. `BUILDING.md` has
 them all, including what to keep and what to rebuild when moving a build machine.
 
 Packages are signed with `keys/valence-signing.rsa` (not committed; generate your own with
@@ -80,6 +84,9 @@ The ISOs are published as GitHub release assets; `docs/iso-hosting.md` compares 
 Internet Archive, Cloudflare R2). Where else to host them is still open.
 
 ## 32-bit edition (old netbooks)
+
+This is Melon's 32-bit edition as inherited. It has not been built on glibc, and whether Valence keeps it is undecided
+(ROADMAP.md).
 
 Valence also builds for 32-bit PCs with SSE2 (Pentium M, Pentium 4, Intel Atom: the MSI Wind U100 and similar netbooks).
 Its desktop is **LXQt** on Wayland with the labwc compositor, lighter than Plasma and comfortable in 1–2 GB of RAM,
@@ -101,7 +108,9 @@ sudo apk add clang go cmake meson git github-cli
 sudo apk add qemu ovmf                  # virtual machines with KVM, BIOS and UEFI
 ```
 
-**Claude Code** runs on Valence. Anthropic's installer recognises musl and installs its musl build for your user:
+**Claude Code** is not packaged; it installs with Anthropic's own installer. On Melon the installer recognised musl
+and installed its musl build for your user, with the commands below. Valence is now a glibc system, where software
+prebuilt for glibc can run on the system itself; the installer has not been tested on it yet:
 
 ```sh
 sudo apk add bash curl ca-certificates libgcc libstdc++ ripgrep
@@ -121,5 +130,6 @@ the milestones of stage 1 and when the main daemons started, to 10 ms.
 
 **NVIDIA graphics:** on a computer with an NVIDIA card (GTX 16/RTX 20 and newer), `valence-first-boot` offers the open
 driver (`sudo apk add linux-firmware-nvidia mesa-nvk`: nouveau with NVK, the desktop and games use the card) or NVIDIA's
-own kernel driver (`sudo apk add nvidia-open`: Flatpak games get NVIDIA's libraries from Flathub; the desktop can't use
-them, as they need glibc). Restart after installing either.
+own kernel driver (`sudo apk add nvidia-open`: Flatpak games get NVIDIA's libraries from Flathub). Restart after
+installing either. On Melon the desktop couldn't use NVIDIA's libraries, as they need glibc; on glibc it could, but
+Valence has no package of them, and neither driver has been tested on glibc.

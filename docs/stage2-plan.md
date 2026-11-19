@@ -5,8 +5,9 @@ Built from the owner's answers in `docs/desktop-config.txt`. Decisions made with
 - **Firefox:** ship the desktop ISO first with Firefox from Flathub (offered on first boot). Build a
   native Valence Firefox afterwards and swap it in. Native Firefox needs Rust, clang and Node for Valence,
   and about 25 GB of free disk, which is more than the usual build container has.
-- **Other distros' repos:** Alpine is offered as an **opt-in, tagged** repo (`@alpine`) from the installer.
-  apk only uses it for packages requested as `name@alpine`. Void isn't offered: it uses xbps, not apk.
+- **Other distros' repos:** none on Valence. Melon offered Alpine as an **opt-in, tagged** repo (`@alpine`) from the
+  installer; Valence removed it with the switch to glibc, because Alpine's packages are built for musl. Void was
+  never offered: it uses xbps, not apk.
 - **Updates hosting:** decided later. For now packages come from the ISO.
 - **Size:** the hard limit is 4 GB, the goal is under 2 GB. Speed and efficiency come first.
 
@@ -26,7 +27,7 @@ Built from the owner's answers in `docs/desktop-config.txt`. Decisions made with
 | Audio | PipeWire + WirePlumber |
 | Network | NetworkManager + wpa_supplicant (D-Bus build) |
 | Look | Valence dark (Breeze + green/orange accents), Noto fonts + Hack, bottom panel; logo on wallpaper, splash, SDDM, GRUB theme, launcher icon |
-| Installers | Calamares. The console installer (`valence-install`) gets the desktop profile. Both: dual boot, optional LUKS encryption, zram + swap file, US/English/UTC; the console installer also offers the optional Alpine repo |
+| Installers | Calamares. The console installer (`valence-install`) gets the desktop profile. Both: dual boot, optional LUKS encryption, zram + swap file, US/English/UTC |
 
 ## Build layers (in order)
 
