@@ -10,6 +10,9 @@ mkdir -p $S/deb $S/firmware $S/fonts $S/git
 [ -f $S/MANIFEST.tsv ] || { echo "sources/MANIFEST.tsv is missing" >&2; exit 1; }
 fail=0
 ok(){ [ -f "$S/$1" ] && [ "$2" = - -o "$(sha256sum "$S/$1" | cut -d' ' -f1)" = "$2" ]; }
+# get <file> <url>: a download that gives up when the server stalls (under 1 kB/s for a minute). Without the limit,
+# a server that accepts the connection and then sends nothing (ftp.gnu.org did) holds the whole run for good.
+get(){ curl -fsSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o "$1" "$2"; }
 
 while IFS=$'\t' read -r path sum method arg; do
   case $path in '#'*|'') continue ;; esac
@@ -22,10 +25,15 @@ while IFS=$'\t' read -r path sum method arg; do
       ( cd $S/deb && apt-get source --download-only -q "$arg" >/dev/null 2>&1 )
       if ! ok "$path" "$sum"; then   # an older version the archive no longer lists: Launchpad keeps every file
         # (the file store's path keeps the version's epoch, e.g. print-manager/6:6.6.4-0ubuntu1; older uploads took it without)
-        curl -fsSL -o "$S/$path" "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/$src/$ver/$file" ||
-          curl -fsSL -o "$S/$path" "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/$src/${ver#*:}/$file" || true
+        get "$S/$path" "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/$src/$ver/$file" ||
+          get "$S/$path" "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/$src/${ver#*:}/$file" || true
       fi ;;
-    pool|url)  curl -fsSL -o "$S/$path" "$arg" || true ;;
+    pool)   # a pinned .deb leaves the archive pool when Ubuntu updates the package; Launchpad keeps every file
+      get "$S/$path" "$arg" || get "$S/$path" "https://launchpad.net/ubuntu/+archive/primary/+files/$file" || true ;;
+    url)    # GNU's own server often doesn't answer; kernel.org mirrors it (the sha256 is checked below either way)
+      get "$S/$path" "$arg" || case $arg in
+        https://ftp.gnu.org/gnu/*) get "$S/$path" "https://mirrors.kernel.org/gnu/${arg#https://ftp.gnu.org/gnu/}" || true ;;
+      esac ;;
     inner) set -- $arg; tar -xOf "$S/$1" "$2" > "$S/$path" 2>/dev/null || true ;;
     git)
       set -- $arg; repo=$1 tag=$2; name=${file%.tar.*}
