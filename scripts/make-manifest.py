@@ -82,6 +82,10 @@ URL = {  # upstream downloads (Ubuntu 26.04 has Cataclysm: DDA 0.H, Rust 1.93 an
     # mandoc publishes no signature. On 19 November 2026 mandoc.bsd.lv did not resolve at any resolver; the tarball came
     # from Void's and FreeBSD's source mirrors (identical), and is the file Arch and Void pin by sha256 and Alpine by sha512.
     'mandoc-1.14.6.tar.gz': 'https://mandoc.bsd.lv/snapshots/mandoc-1.14.6.tar.gz',
+    # Btrfs (phase 5). kernel.org's .tar.sign, made over the uncompressed tar by David Sterba's key
+    # F2B4 1200 C54E FB30 380C 1756 C565 D5F9 D76D 583B (the fingerprint in Arch's PKGBUILD; the key itself from
+    # kernel.org's pgpkeys repository), and the sha256 is the one in kernel.org's signed sha256sums.asc.
+    'btrfs-progs-v7.3.tar.xz': 'https://www.kernel.org/pub/linux/kernel/people/kdave/btrfs-progs/btrfs-progs-v7.3.tar.xz',
     'glibc-2.44.tar.xz': 'https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz',
     'libxcrypt-4.5.2.tar.xz': 'https://github.com/besser82/libxcrypt/releases/download/v4.5.2/libxcrypt-4.5.2.tar.xz',
     'gperf-3.3.tar.gz': 'https://ftp.gnu.org/gnu/gperf/gperf-3.3.tar.gz',
