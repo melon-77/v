@@ -5,14 +5,18 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 of fixes where Melon chose small over sensible.
 
 Status, 19 November 2026: phases 1 to 3 are done. The base system is on glibc 2.44 and its commands are the GNU
-tools: the cross toolchain, the 64 recipes of the console ISO and the ISO build. The ISO passes all six console
+tools: the cross toolchain, the 62 recipes the console ISO is made of and the ISO build. The ISO passes all six console
 tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next to Windows
 on UEFI), and the installed system adds a package from a repository over the network. BusyBox stays for `/bin/sh`,
 the initramfs and the small daemons. Documentation and translations are packages of their own: the builder makes
 `<pkg>-doc` and `<pkg>-lang` from what a recipe installs, no recipe deletes them any more, and a fresh install has
 no documentation files until `apk add docs` (or one `-doc` package) brings them, with `man`. The recipes beyond the
 base (the desktop, the developer tools) have not been rebuilt on glibc, so their `-doc` and `-lang` packages do not
-exist yet. Nothing later has started.
+exist yet. Phase 4's builder is written and in use for the base: from an empty repository, one command built the
+console system in an order worked out from the recipes, each package in a clean sysroot, and a second run built
+nothing. It cannot rebuild the whole repository yet, because the recipes beyond the base do not build on glibc and
+the desktop's generated recipes do not say what they need: that part of phase 4 waits for phase 6. Nothing later
+has started.
 
 ## Why it exists
 
@@ -108,6 +112,9 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   The dependency-ordered builder replaces the queue, retry and resume scripts.
   *Done when:* one command rebuilds the whole repository from empty with no order written down anywhere, and a
   second run with nothing changed builds nothing.
+  *So far (19 November 2026):* true for the console system, 65 recipes. The queue, retry, resume and build-all
+  scripts and the ordered lists in `build-everything.sh` are gone. Open: the other 388 recipes, which must first
+  build on glibc and declare their dependencies (phase 6).
 
 - [ ] **5. Btrfs and snapshots.**
   The installer creates a Btrfs root with subvolumes. Updating takes a snapshot first. Rolling back is
@@ -165,8 +172,6 @@ These are open on purpose. Each gets settled before the phase that needs it.
   Melon? (After phase 6.)
 - **Steam.** Native Steam needs 32-bit libraries next to the 64-bit ones, which is a lot of extra packages.
   Until that is worth doing, Steam stays on Flatpak. (After phase 6.)
-- **Clean builds.** Whether `valence-build` builds each package in a fresh chroot, so a missing dependency
-  fails the build instead of going unnoticed. (Phase 4.)
 - **How rollback is offered.** A command, a boot menu entry, or both. (Phase 5.)
 - **Hosting.** Where the package repository and the ISOs live.
 - **Translations of the base tools.** bash, coreutils, grep and 38 other recipes are built with `--disable-nls`,
@@ -180,6 +185,9 @@ These are open on purpose. Each gets settled before the phase that needs it.
 
 ## Decided
 
+- **Clean builds** (19 November 2026). Every package is built in a sysroot that holds only what its recipe
+  declares, so a missing dependency fails the build instead of going unnoticed, and the same recipe gives the same
+  package whatever was built before it.
 - **Core tools: the GNU tools on the installed system** (18 November 2026). coreutils, findutils, grep, sed, tar,
   gzip, diffutils, less, procps, iproute2 and shadow take over the command names, the way gawk and bc already do.
   BusyBox stays installed for the initramfs and for the small daemons the services run (getty, DHCP, mdev, the

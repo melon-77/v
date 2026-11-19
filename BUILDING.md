@@ -74,13 +74,12 @@ build 19041 or newer.
        git --git-dir=$HOME/valence/.git archive origin/packages x86_64 | tar -x -C repo                 # its own copy of the online repo
        /root/valence-r2/scripts/toolchain.sh      # its own cross toolchain; absolute path
 
-   Then `valence-build` the recipes you changed: it installs their `makedepends` from `repo/x86_64`, but a dev package's
-   private requires (kmod-dev needs zlib, zstd, xz, openssl) are not apk dependencies, so first `apk add` the base and
-   plumbing packages of `build-everything.sh` and their `-dev` packages into `sysroot/` (see `BASE` and `PLUMBING` there).
-   A KDE recipe (`breeze`) has no `makedepends` at all: the full build relies on every earlier package being in the sysroot.
-   So `apk add` (with `--root sysroot --keys-dir keys/trusted --repository repo/x86_64/Packages.adb`) the Qt and KDE packages
-   that `python3 scripts/gen-kde-recipes.py` lists before it, their `-dev` packages, and the X11 and XCB client libraries
-   (`libx*`, `xcb*`; KF6 WindowSystem's CMake config needs X11). The packages in the online repository were built on a
+   Then `scripts/valence-build <recipe>` the recipes you changed. It builds what they need first, if the copied
+   repository lacks it or lacks its record (copy `repo/<arch>/.state` too), and sets the sysroot up for each build
+   from the recipe's own `makedepends` (clean builds, AGENTS.md "Recipe format"); a `-dev` package's pkg-config
+   requirements are apk dependencies now, so they come along. That works for the base. A KDE recipe (`breeze`) still
+   has no `makedepends` at all (Melon's full build relied on every earlier package being in the one sysroot), so it
+   cannot be built this way until the generator gives it some (AGENTS.md, "State of the glibc switch"). The packages in the online repository were built on a
    machine whose checkout was `/home/hi/valence`, and some of their CMake files name that path (`KF6::WindowSystem` includes
    `/home/hi/valence/sysroot/usr/include`: "includes non-existent path"). Until you have rebuilt those packages yourself, let the
    path resolve: `mkdir -p /home/hi/valence && ln -s ~/valence-r2/sysroot /home/hi/valence/sysroot && ln -s ~/valence/hosttools /home/hi/valence/hosttools`.
@@ -108,10 +107,15 @@ times only within one sitting.
 The GNU tools (19 November 2026) added 14 recipes, about three minutes of building together. The console ISO is now
 64 recipes and 405 MB, and the six tests took six minutes.
 Splitting out the documentation (phase 3, the same day) rebuilt 41 of them in 11 minutes, glibc and GRUB among them,
-and added mandoc, `docs` and `lang` to the base list: 67 recipes are built, 64 of them are on the ISO, which is still
-405 MB. The six tests took 6 minutes with the new documentation steps.
+and added mandoc, `docs` and `lang`. The ISO is still 405 MB. The six tests took 6 minutes with the new
+documentation steps.
+With the builder that orders builds itself (phase 4, the same day): from an empty repository and a sysroot as
+`toolchain.sh` leaves it, `scripts/valence-build --edition console` built the 65 recipes the console ISO needs (62
+are on it; the "64" above counted xz and mpg123, which the old list built and nothing on the ISO uses) in 26
+minutes, each in a clean sysroot. Run again, it built nothing, in a few seconds. The six tests took 6
+minutes.
 
-Every time above is from a musl build. On glibc the console ISO is 64 recipes; the new times are not recorded here yet.
+Every time in the paragraphs before "On glibc" is from a musl build.
 
 Sources that fail, and what `fetch-sources.sh` does about it: `ftp.gnu.org` often does not answer (on one run it served nine
 files and then stalled on the tenth for good), and pinned Ubuntu `.deb`s leave the archive pool when Ubuntu updates the package
@@ -147,7 +151,7 @@ instead of stopping (paste that warning line if you get one). Without `sudo`, ru
 **Moving from another build machine (Valence, Ubuntu, WSL):** copy `keys/`, `sources/`, `repo/` and `sysroot/` into the
 new checkout, but not `tools/`, `hosttools/` or `work/`: they hold programs built for the old machine and linked against
 its C library. A `repo/` or `sysroot/` from before the switch to glibc holds musl builds: don't carry those over
-(`build-everything.sh` skips a package whose version-release is already in `repo/`). `host-setup.sh` rebuilds the host
+(`valence-build` skips a recipe whose record in `repo/<arch>/.state/` matches the recipe as it is now: copy `repo/` with that hidden directory, or everything is built again). `host-setup.sh` rebuilds the host
 tools and `build-everything.sh` the cross toolchain before it carries on with the packages; finished packages in
 `repo/` are not built again.
 

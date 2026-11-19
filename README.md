@@ -14,7 +14,8 @@ that orders builds itself, and a Btrfs root with a snapshot before every update.
 plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
 
 There is one test build, a console ISO, on the repository's Releases page, and no online package repository yet. The
-base system is on glibc: the cross toolchain and the 64 recipes of the console ISO build on it (ROADMAP.md has the
+base system is on glibc: the cross toolchain and the 62 recipes the console ISO is made of build on it, in an order
+the builder works out from the recipes, each in a sysroot holding only what its recipe declares (ROADMAP.md has the
 test status). Its documentation is in packages of its own: a fresh install has no man pages, and `apk add docs`
 from a package repository adds them, with `man`, for everything installed. The rest is still as
 inherited from Melon: the XFS root, the desktop and every other recipe beyond the console ISO (not yet rebuilt on
@@ -44,7 +45,7 @@ A from-scratch, rolling x86_64 distribution:
 
 ```
 scripts/toolchain.sh   builds the x86_64-valence-linux-gnu cross toolchain (binutils 2.46, GCC 15.2, glibc 2.44)
-scripts/valence-build    builds one recipe into signed .apk packages and reindexes the repo
+scripts/valence-build    builds packages into signed .apk files, in the order their recipes' dependencies give, each in a clean sysroot
 scripts/valence-run    runs a program built for Valence on the build machine, through the sysroot's loader
 scripts/mkiso.sh       assembles the hybrid BIOS/UEFI live ISO from the repo
 recipes/<pkg>/VALENCEBUILD   package recipes (APKBUILD-like)
@@ -62,12 +63,7 @@ source archive's copies of the same tarballs, and new ones come straight from up
 
 ```sh
 scripts/toolchain.sh
-# the base system (BASE in scripts/build-everything.sh), then what the console ISO adds to it
-for p in valence-layout linux-headers glibc gcc-runtime libxcrypt zlib zstd xz openssl apk-tools busybox ncurses bash \
-         runit util-linux attr acl pcre2 libmnl coreutils findutils grep sed tar gzip diffutils less procps-ng \
-         iproute2 shadow mandoc docs lang userspace-rcu inih xfsprogs grub libnl3 expat dbus wpa_supplicant alsa-lib alsa-utils \
-         mpg123 kmod opendoas ca-certificates linux-firmware valence-base linux-valence \
-         libffi glib eudev json-c popt device-mapper cryptsetup efivar efibootmgr; do scripts/valence-build $p; done
+scripts/valence-build --edition console   # the console system and all it needs, in the order the recipes give
 scripts/mkiso.sh
 ```
 

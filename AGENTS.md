@@ -28,8 +28,8 @@ source by our own scripts and shipped as a signed apk v3 package.
 | desktop plumbing | D-Bus, elogind, polkit, PipeWire + WirePlumber, NetworkManager, BlueZ, CUPS, UDisks2 | console profile keeps `dhcp` + wpa_supplicant |
 | graphics | Mesa 26.0 with LLVM: radeonsi/RADV, iris/ANV, nouveau, llvmpipe; zink (OpenGL on Vulkan) | |
 | developer tools | gcc 15.2 + g++, binutils 2.46, make 4.4.1, pkgconf, patch (`gcc`, `g++`, `binutils`, `make`, `pkgconf`, `patch`) | built cross-native with the cross toolchain's settings (PIE, SSP); in the package repository only, not on the ISOs; `valence-first-boot` offers them on first login (default no) |
-| build tools | perl 5.44, m4, bison, flex, gawk, gperf, GNU bc, texinfo, autoconf 2.73, automake 1.19, autoconf-archive, file; cmake 4.4, meson 1.12, ninja 1.13, git 2.56, nasm 3.01, tcl 8.6, rsync 3.5, lz4; xorriso, mtools, scdoc, itstool, dtc, pahole (`dwarves`), rpcgen (`rpcsvc-proto`), the Public Suffix List, Python's mako, Jinja2, pyparsing, PyYAML, packaging, pexpect and libxml2 bindings (`python3-*`) (`BUILDTOOLS`, `BUILDTOOLS2` in `build-everything.sh`) | what Valence's recipes need to build on Valence itself (self-hosting, see Roadmap); package repository only. gawk and GNU bc take over BusyBox's `awk`/`bc`/`dc` links; BusyBox's `/usr/bin` trigger puts them back when those packages go |
-| compilers, VMs | clang 21 (+ `libclc`, `spirv-llvm-translator`), Go 1.27, gh (`github-cli`), QEMU 11.1 + OVMF (`qemu`, `ovmf`) (`STEP2` in `build-everything.sh`) | package repository only. clang: Mesa's OpenCL C shader compiler on Valence; QEMU + OVMF run Valence's own install tests on Valence; OVMF is Ubuntu 26.04's prebuilt `ovmf-generic` at Ubuntu's paths |
+| build tools | perl 5.44, m4, bison, flex, gawk, gperf, GNU bc, texinfo, autoconf 2.73, automake 1.19, autoconf-archive, file; cmake 4.4, meson 1.12, ninja 1.13, git 2.56, nasm 3.01, tcl 8.6, rsync 3.5, lz4; xorriso, mtools, scdoc, itstool, dtc, pahole (`dwarves`), rpcgen (`rpcsvc-proto`), the Public Suffix List, Python's mako, Jinja2, pyparsing, PyYAML, packaging, pexpect and libxml2 bindings (`python3-*`) | what Valence's recipes need to build on Valence itself (self-hosting, see Roadmap); package repository only. gawk and GNU bc take over BusyBox's `awk`/`bc`/`dc` links; BusyBox's `/usr/bin` trigger puts them back when those packages go |
+| compilers, VMs | clang 21 (+ `libclc`, `spirv-llvm-translator`), Go 1.27, gh (`github-cli`), QEMU 11.1 + OVMF (`qemu`, `ovmf`) | package repository only. clang: Mesa's OpenCL C shader compiler on Valence; QEMU + OVMF run Valence's own install tests on Valence; OVMF is Ubuntu 26.04's prebuilt `ovmf-generic` at Ubuntu's paths |
 | NVIDIA | the open driver: nouveau + `linux-firmware-nvidia` (GSP 570.144 from upstream linux-firmware) + NVK (`mesa-nvk`), with zink for OpenGL; or NVIDIA's own kernel driver: `nvidia-open` 615 (open modules + NVIDIA's firmware) | package repository only; `valence-first-boot` asks which one on computers with an NVIDIA card (GTX 16/RTX 20 and newer). With `nvidia-open`, only Flatpak apps (Steam) get NVIDIA's userspace libraries, from Flathub. On Melon that was the only way, because those libraries need glibc; on glibc the system itself could use them, but Valence has no package of them and none of this has been tested on glibc |
 | gaming | Flatpak 1.16 + Flathub, GameMode | `valence-first-boot` offers Steam (and Firefox, VLC, Prism Launcher) from Flathub on first login. Steam is built for glibc, so on Melon Flatpak was the only way to run it; on glibc a native Steam is possible but untested, and it also needs 32-bit libraries (undecided, ROADMAP.md) |
 | game library | SDL3 3.4 + SDL3_image + SDL3_ttf (`sdl3`, `sdl3-image`, `sdl3-ttf`) | package repository only; SDL dlopen()s its Wayland/X11/audio backends |
@@ -49,10 +49,11 @@ path (rule 60). The signing key can stay where it is:
 ### State of the glibc switch
 
 Valence's C library was musl, as in Melon, and is now glibc (ROADMAP.md, phase 2). The base system builds on glibc:
-the cross toolchain and the 64 recipes of the console ISO, the GNU tools among them. ROADMAP.md has the test status.
+the cross toolchain and the 62 recipes the console ISO is made of, the GNU tools among them (with mandoc, `docs` and
+`lang` beside them, for its documentation). ROADMAP.md has the test status.
 Not converted yet:
 
-- **The recipes beyond those 64** (the desktop, the developer tools, Rust, LLVM, ...) still contain musl workarounds
+- **The recipes beyond those** (the desktop, the developer tools, Rust, LLVM, ...) still contain musl workarounds
   and have not been built on glibc. `argp-standalone`, `musl-fts` and `musl-obstack`, and `elfutils`, which uses
   them, will not build as they are.
 - **Recipes that run what they have just built.** `cmake_native`, and the rules and recipe comments that say a
@@ -72,6 +73,12 @@ Not converted yet:
   GNU tar can carry file capabilities and ACLs (`--xattrs --acls`); nothing in the base has any. Add the options
   when the desktop, which has file capabilities, is converted.
 
+- **What the recipes beyond the base need.** A build gets only what its recipe declares (clean builds). The base's
+  recipes do declare it; three did not, and were fixed (rule 63). Nobody has checked the others, and the generated
+  KDE recipes declare nothing at all: `gen-kde-recipes.py` writes no `makedepends`, because Melon relied on build
+  order and one shared sysroot. Each needs its `makedepends` when it is converted; until then `valence-build`
+  builds them in an order that means nothing. `scripts/valence-build -n` finds one recipe that names a package
+  nothing makes (libclc: `musl-dev`), and no recipes that need each other.
 - **Docs and translations beyond the base.** No recipe deletes them any more (361 recipes changed, 247 of them
   through the generators), but only the base has been rebuilt: the others make their `-doc` and `-lang` packages
   the first time they are built on glibc. Watch then for two packages shipping the same page, for a program that
@@ -85,10 +92,12 @@ Where this file describes those parts, it describes them as they were built on M
 ```
 scripts/env.sh          paths: M, TARGET, TOOLS, SYSROOT, SRC, WORK, REPO; LDSO, the loader's file name
 scripts/toolchain.sh    cross toolchain: binutils, kernel headers, GCC and glibc, in one resumable script (rule 8)
-scripts/valence-build     build ONE recipe -> signed .apk(s) in repo/x86_64, reindex, install into sysroot
+scripts/valence-build   build packages in the order the recipes' own dependencies give, and only what changed: every
+                        recipe, the ones named (with what they need), or an edition (--edition console|desktop)
+scripts/valence-build-recipe   the step it runs for each: ONE recipe -> signed .apk(s) in repo/x86_64, built in a
+                        sysroot that holds what the recipe declares and nothing else; reindex
+scripts/console-packages.txt   what the console system is made of (mkiso.sh and --edition console read it)
 scripts/valence-run     start a program built for Valence on the build machine, through the sysroot's loader (rule 18)
-scripts/build-all.sh    build a list of recipes in order, logs to logs/pkg-<name>.log
-scripts/check-order.sh  every makedepends is built before the recipe that needs it (build-everything.sh runs it first)
 scripts/mkiso.sh        live/installer ISO: rootfs.sqfs (pristine apk-installed system, copied to disk by the
                         installers) + live.sqfs (small live-session layer) + a small repo of extras (VM guest tools,
                         a few base packages; never a second copy of what rootfs.sqfs already holds)
@@ -109,7 +118,7 @@ Not in git (see `.gitignore`): `sources/`, `work/`, `tools/`, `sysroot/`, `hostt
 
 ## Recipe format (VALENCEBUILD)
 
-A bash fragment sourced by `scripts/valence-build`. Minimal example:
+A bash fragment sourced by `scripts/valence-build-recipe`. Minimal example:
 
 ```bash
 pkgname=zlib
@@ -120,7 +129,7 @@ license=Zlib
 url=https://zlib.net
 source=(zlib-1.3.1.tar.gz)   # file names inside $SRC (sources/), or files in the recipe dir
 subpackages=(zlib-dev)       # -dev has a default split function; -doc and -lang are made without being listed
-makedepends=()               # packages installed into the sysroot before building
+makedepends=()               # what the build needs: with the build base, the only packages in its sysroot
 depends=()                   # runtime deps; so: deps are added automatically from ELF NEEDED
 build(){ ./configure --prefix=/usr --libdir=/usr/lib --shared >/dev/null; make -j$JOBS >/dev/null; }
 package(){ make DESTDIR=$pkgdir install >/dev/null; }
@@ -167,8 +176,43 @@ Things the builder gives you:
   `.la` files are deleted, and ELF files are stripped.
 - `so:` provides/depends are generated from SONAME/NEEDED. glibc's libraries carry a SONAME (`libc.so.6`), so the
   glibc recipe declares none by hand.
+- `pc:` provides/depends are generated from pkg-config files the same way: a package provides `pc:<module>` for
+  every `.pc` file it ships, and depends on the modules their `Requires` and `Requires.private` lines name. So
+  `makedepends=(glib-dev)` brings pcre2-dev, libffi-dev, zlib-dev and util-linux-dev with it, because glib's `.pc`
+  files ask for them. A header that includes another library's header without pkg-config saying so needs
+  `depends_<x>_dev` by hand.
 
-Build one package: `scripts/valence-build <recipe>`. Build several: `scripts/build-all.sh a b c`.
+### Building: the order, clean sysroots, and what counts as built
+
+`scripts/valence-build NAME...` builds the recipes or packages named and whatever they need first; with no name it
+builds every recipe; `--edition console` (or `desktop`) builds what that ISO is made of. `-n` shows what it would
+build and why, `--order` prints the order, `-f` builds the named ones even if nothing changed, `-x` stops at the
+first failure (otherwise it carries on with everything that does not need the failed recipe, and lists at the end
+what failed and what waited for it). Each recipe's output is in `logs/pkg-<recipe>.log`.
+
+- **No list says in which order recipes are built.** A recipe is built after the recipes that make its
+  `makedepends` and the build base, and after the recipes that make whatever those packages depend on (declared
+  `depends`, and a `-dev` package's main package), since apk installs all of that into the build's sysroot. Recipes
+  that need each other are reported and nothing is built.
+- **Clean builds (the owner's decision, 19 November 2026).** `valence-build-recipe` sets the sysroot up for every
+  build: the build base (`BUILD_BASE` there: `glibc-dev libgcc libstdc++`) and the recipe's `makedepends`, with the
+  packages those depend on, and no other package. apk works out the difference from the last build's sysroot
+  (`apk upgrade --available` on a rewritten world file), so only what differs is unpacked or removed. A library the
+  recipe does not name is not there: the build fails, or configure reports the feature as off. Name every library a
+  recipe uses in `makedepends`, and give optional features their explicit switch (rule 63).
+- **`options=(bootstrap)`** marks the recipes the build base is made from (`valence-layout`, `linux-headers`, `glibc`,
+  `gcc-runtime`). They are built first, on the C library `toolchain.sh` put into the sysroot, which is left as it
+  is for them; `valence-build` refuses to start if a package of the build base comes from a recipe without it.
+- **What counts as built.** `repo/<arch>/.state/<recipe>` records the recipe's fingerprint (every file in its
+  directory), the builder's `BUILD_EPOCH`, the version and the package files. A recipe is built when that record is
+  missing, when the fingerprint or the epoch differs, or when one of the files is gone. Run the same command twice
+  and the second run builds nothing. Bump `BUILD_EPOCH` in `valence-build-recipe` when a change to it alters what
+  packages contain: every recipe is then built again. Recipes that depend on a rebuilt recipe are **not** rebuilt
+  by themselves; bump their `pkgrel` when they have to be (a library's SONAME changed).
+- **One build at a time** in a checkout (rule 29).
+
+`scripts/valence-build-recipe <recipe>` runs the one step by hand: the recipe is built whatever its record says, and
+recorded as built "by hand", so `valence-build` builds it again the next time.
 Rebuilding the kernel takes about an hour on 2 cores.
 
 ## Hard-won rules (each one broke the build once)
@@ -186,8 +230,10 @@ Rebuilding the kernel takes about an hour on 2 cores.
    A split tinfo breaks readline and bash with `--as-needed`.
 5. *(A musl rule, kept so the numbering holds: `bsd-compat-headers` for `sys/cdefs.h`. glibc has `sys/cdefs.h` and
    `sys/queue.h`, and that recipe is gone.)*
-6. **The sysroot upgrades with `apk add --upgrade`.** Bump `pkgrel` whenever you change a recipe, or
-   the change won't reach the sysroot or users.
+6. **Bump `pkgrel` whenever you change a recipe**, or the change won't reach users: apk only replaces a package
+   whose version-release changed. (The build's own sysroot no longer depends on that: it is set up with
+   `apk upgrade --available`, which also replaces a package rebuilt under the same version. `valence-build` says
+   so when a recipe changed and its version did not.)
 7. **Install scripts must not create config files that another package ships.** apk would then keep the
    script's version and write the package's as `*.apk-new`. See `recipes/bash/bash.post-install`.
 8. **GCC's 64-bit target libraries install to `tools/x86_64-valence-linux-gnu/lib`**, not `lib64` (which is only a
@@ -244,7 +290,7 @@ Rebuilding the kernel takes about an hour on 2 cores.
     (moc, uic, rcc, ...) and `bwrap` there.
 21. **Never kill build processes with `pkill -f <pattern>`** when your own shell's command line contains
     the pattern: it kills your shell too. Find the PID and kill that.
-22. **Edit scripts that may be running (`valence-build`, `mkiso.sh`, queue scripts) through a temporary file
+22. **Edit scripts that may be running (`valence-build-recipe`, `mkiso.sh`) through a temporary file
     and `mv`.** bash reads scripts while running them, so an in-place edit corrupts a running build.
 23. **Never type keys or checksums from memory.** The Flathub key is downloaded from Flathub's own
     `.flatpakrepo` at first use.
@@ -267,12 +313,15 @@ Rebuilding the kernel takes about an hour on 2 cores.
     ISO's initramfs (`mkiso.sh`) copies the loader and the libraries BusyBox needs the same way.
 30. *(A musl rule, kept so the numbering holds: musl 1.2.4+ hid the `*64` LFS types unless `_LARGEFILE64_SOURCE`
     was defined, so gpgme got `-D_LARGEFILE64_SOURCE`.)*
-31. **The builder's `apk add --upgrade` only reinstalls a package whose version-release changed.** Generated
+31. **apk only replaces a package whose version-release changed** (rule 6). Generated
     recipes take their `pkgrel` from the `PKGREL` table in `scripts/gen-simple-recipes.py`, plus `REBUILD`, which is
     added to every recipe that generator writes (`gen-kde-recipes.py` has the same pair; `gen-lxqt-recipes.py` one
     number for all).
-29. **Two build queues may run at once** for the same arch: `valence-build` takes `flock repo/<arch>/.lock`
-    around sysroot installs and reindexing, and writes packages under a temporary name first.
+29. **One build at a time per checkout and architecture.** Every build sets the sysroot up for itself (clean
+    builds), so two at once would pull it out from under each other: `valence-build-recipe` holds
+    `work/.build.lock` and refuses to start a second one. For builds side by side, use a second checkout
+    (`git worktree`, BUILDING.md). Packages are still written under a temporary name first, and the index is
+    rebuilt under `flock repo/<arch>/.lock`.
 
 32. **pkg-config puts the sysroot in front of path *variables*** (`xkb_base`, `dridriverdir`, dbus and polkit
     dirs, ...). Builds then either install under `/home/.../sysroot/...` (valence-build moves those files back and
@@ -455,13 +504,14 @@ Rebuilding the kernel takes about an hour on 2 cores.
     miscompiled ... start address is 0x9074 instead of 0x9000" (i386-pc). `recipes/grub` and `scripts/hostgrub.sh`
     preset `ax_cv_check_ldflags___Wl___image_base_0x400000=no`.
 57. **Generated recipes are edited in their generator.** `gen-simple-recipes.py`, `gen-kde-recipes.py` and
-    `gen-lxqt-recipes.py` rewrite their recipes at every `build-everything.sh` start, so an edit made only in
+    `gen-lxqt-recipes.py` rewrite their recipes at every `valence-build` start, so an edit made only in
     `recipes/<name>/VALENCEBUILD` is silently undone (qtdeclarative's "no PCH on x86" was). Change the generator, run it,
     and commit both. Per-arch options go inside the arguments as `$([ "$APK_ARCH" != x86 ] || echo ...)`. On x86,
     qt6-qtdeclarative builds without precompiled headers: with them its build tree passed 11 GB and filled the disk.
-58. **A failed package unpacks fresh on the next pass.** A CMake cache from a run that failed remembers what wasn't
+58. **A failed package unpacks fresh on the next run.** A CMake cache from a run that failed remembers what wasn't
     there yet (Qt's `HAVE_EGL=false` before Mesa existed) and keeps failing after the dependency is built:
-    `build-everything.sh` deletes `work/pkg/<name>/.prepared` of each failed package between passes.
+    `valence-build` deletes `work/pkg/<name>/.prepared` of a package that failed. One that was interrupted keeps it
+    and carries on in its source tree.
 59. **SDDM's greeter on labwc (valence-lxqt) is an xdg-shell window that labwc makes full screen.** With SDDM's
     default layer-shell integration under labwc the greeter came up as a small box on a black screen.
     `/etc/sddm.conf.d/15-lxqt.conf` sets `QT_WAYLAND_SHELL_INTEGRATION=xdg-shell` for the greeter and starts labwc with
@@ -488,26 +538,32 @@ Rebuilding the kernel takes about an hour on 2 cores.
 63. **A recipe says which optional libraries it uses.** zstd's makefile turns on `.gz`, `.xz` and `.lz4` support
     for whichever of zlib, liblzma and liblz4 it finds in the sysroot. First built before xz, it had no liblzma;
     rebuilt after it (a `pkgrel` bump that changed nothing else), it linked liblzma and pulled xz's library onto the
-    ISO. `recipes/zstd` passes `HAVE_ZLIB=1 HAVE_LZMA=0 HAVE_LZ4=0`. The sysroot only grows, so a rebuild can find
-    more than the first build did (ROADMAP.md, "Clean builds"). After rebuilding base packages, compare the file
-    list of `work/liveroot` with the one from before: that comparison is what caught this.
+    ISO. `recipes/zstd` passes `HAVE_ZLIB=1 HAVE_LZMA=0 HAVE_LZ4=0`. That was with one sysroot shared by every
+    build. Since clean builds a library the recipe does not name is simply absent, and the first clean build of the
+    base showed three more recipes that had been living off the shared sysroot: open-vm-tools (configure stops
+    without `crypt()`: libxcrypt-dev), shadow (ACL support quietly off without attr-dev's header) and xfsprogs
+    (`xfs_io` linked libdevmapper when it found one). What remains possible is the quiet kind: a configure script
+    that drops a feature when a library is missing. Give such a feature its explicit switch (`--with-acl`), so that a
+    missing `makedepends` is an error; and after rebuilding base packages, compare the packages (dependencies, files,
+    sizes) or the file list of `work/liveroot` with the ones from before, which is how all of these were caught.
 
 To resume a failed long build without unpacking again (for example the kernel):
-`VALENCE_KEEP_SRC=1 scripts/valence-build linux-valence`. `build-everything.sh` does that by itself (`VALENCE_AUTO_RESUME=1`), but
+`VALENCE_KEEP_SRC=1 scripts/valence-build-recipe linux-valence`. `valence-build` does that by itself (`VALENCE_AUTO_RESUME=1`), but
 only while the recipe and its patches are the ones the tree was unpacked with (`work/pkg/<name>/.prepared` holds their
 checksum): after a fix to the recipe, the package unpacks fresh so the new patches and `prepare()` run.
 
-The build container can be reclaimed while idle, which kills background builds. `scripts/resume.sh`
-restarts the host Qt build and the Qt/KF6/Plasma queue (`scripts/queue-4.sh`); finished host Qt modules
-and packages already in the repo (`VALENCE_SKIP_BUILT=1`) are skipped.
+The build container can be reclaimed while idle, which kills background builds: run the same command again
+(`scripts/valence-build ...` or `scripts/build-everything.sh`). What is built is skipped, and the package that
+was compiling carries on.
 
 After an unclean shutdown (WSL restart, power loss), files written in the last minutes can be empty or
 truncated. Before resuming: look for empty packages (`find repo -name '*.apk' -size 0`; the builder skips
 nothing that is empty, but a truncated `.apk` still blocks reindexing), delete `work/pkg/<name>/.prepared`
 of the package that was compiling so it unpacks fresh, and check `git fsck` (empty objects in `.git/objects`
 can be restored with `git fetch` once they are moved aside). A package that fails to install into the sysroot
-(a file conflict) stays in the sysroot's world file and breaks every later `apk add` there: remove it with the
-builder's apk command and `del <pkg>` (see `sysroot_add` in valence-build) before rebuilding. `apk verify` needs an absolute `--keys-dir`:
+(a file conflict) fails every build that needs it, with apk's message in that build's log: fix the recipe that
+ships the clashing file. The sysroot itself needs no repair, because every build writes its world file anew
+(`apk_sysroot` in valence-build-recipe). `apk verify` needs an absolute `--keys-dir`:
 a relative one is resolved against `/` and reports every package as UNTRUSTED.
 
 ## Testing (required before you commit a change that affects boot or install)
