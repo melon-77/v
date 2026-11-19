@@ -68,7 +68,7 @@ ROWS = [
  ('libndp','1.9','libndp_1.9.orig.tar.gz','libndp-1.9','auto','',"--disable-static CFLAGS=\"$CFLAGS -Wno-error=incompatible-pointer-types\"",''),
  ('libyaml','0.2.5','libyaml_0.2.5.orig.tar.gz','libyaml-0.2.5','auto','',"--disable-static",''),
  # i686: its BLAKE3 SIMD assembly is x86-64 only (it picks it for any x86), so the portable C code there
- ('libfyaml','0.9.4','libfyaml_0.9.4.orig.tar.gz','pantoniou-libfyaml-deb1ec7','cmake','',"-DBUILD_SHARED_LIBS=ON -DENABLE_NETWORK=OFF -DBUILD_TESTING=OFF $([ \"$MUSL_ARCH\" != i386 ] || echo -DENABLE_PORTABLE_TARGET=ON)",''),
+ ('libfyaml','0.9.4','libfyaml_0.9.4.orig.tar.gz','pantoniou-libfyaml-deb1ec7','cmake','',"-DBUILD_SHARED_LIBS=ON -DENABLE_NETWORK=OFF -DBUILD_TESTING=OFF $([ \"$APK_ARCH\" != x86 ] || echo -DENABLE_PORTABLE_TARGET=ON)",''),
  ('libpsl','0.21.2','libpsl_0.21.2.orig.tar.xz','libpsl-0.21.2','meson','',"-Dtests=false -Ddocs=false -Druntime=no -Dbuiltin=true -Dpsl_file=/usr/share/publicsuffix/public_suffix_list.dat",''),
  ('nghttp2','1.68.0','nghttp2_1.68.0.orig.tar.gz','nghttp2-1.68.0','cmake','openssl-dev zlib-dev',"-DENABLE_LIB_ONLY=ON -DENABLE_STATIC_LIB=OFF -DBUILD_STATIC_LIBS=OFF",''),
  ('curl','8.18.0','curl_8.18.0.orig.tar.gz','curl-8.18.0','auto','openssl-dev zlib-dev zstd-dev nghttp2-dev libpsl-dev',"--disable-static --with-openssl --with-nghttp2 --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --without-libidn2 --without-brotli --disable-manual --disable-ldap --enable-ipv6",''),
@@ -116,7 +116,7 @@ ROWS = [
  ('dosfstools','4.2','dosfstools_4.2.orig.tar.gz','dosfstools-4.2','auto','',"--enable-compat-symlinks --without-udev",''),
  ('nano','8.7.1','nano_8.7.1.orig.tar.xz','nano-8.7.1','auto','ncurses-dev',"--disable-nls --enable-utf8 --disable-libmagic --sysconfdir=/etc",''),
  # VM guest support
- ('libtirpc','1.3.7','libtirpc_1.3.7.orig.tar.bz2','libtirpc-1.3.7','auto','bsd-compat-headers',"--disable-static --disable-gssapi",''),
+ ('libtirpc','1.3.7','libtirpc_1.3.7.orig.tar.bz2','libtirpc-1.3.7','auto','',"--disable-static --disable-gssapi",''),
 ]
 
 # pkgrel for recipes whose build changed without a version change (rule 6 in AGENTS.md)

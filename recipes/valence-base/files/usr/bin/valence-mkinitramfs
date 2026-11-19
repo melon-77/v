@@ -19,15 +19,16 @@ build_one(){ kver=$1
   out=/boot/initramfs-$flav.img
   W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
   mkdir -p $W/usr/bin $W/usr/lib $W/dev $W/proc $W/sys $W/run $W/newroot $W/etc
-  ln -s usr/bin $W/bin; ln -s usr/bin $W/sbin; ln -s usr/lib $W/lib
+  ln -s usr/bin $W/bin; ln -s usr/bin $W/sbin; ln -s usr/lib $W/lib; ln -s usr/lib $W/lib64
   cp /usr/bin/busybox $W/usr/bin/; for a in sh mount umount switch_root mkdir sleep cat echo mdev ls stty findfs seq; do ln -s busybox $W/usr/bin/$a; done
-  # dynamic binaries and the libraries they need
-  for b in /usr/bin/cryptsetup /usr/bin/kmod; do
+  # dynamic binaries and the libraries they need; ldd lists the loader too, which programs ask for as /lib64/ld-linux-*
+  for b in /usr/bin/busybox /usr/bin/cryptsetup /usr/bin/kmod; do
     cp $b $W/usr/bin/
     ldd $b 2>/dev/null | awk '/=>/{print $3} !/=>/{print $1}' | grep '^/' | while read -r l; do
       cp -L "$l" $W/usr/lib/ 2>/dev/null || true; done
   done
-  cp -L /usr/lib/ld-musl-*.so.1 $W/usr/lib/ 2>/dev/null || true
+  # glibc loads libgcc_s by name when a thread exits or is cancelled; nothing links against it, so ldd doesn't list it
+  cp -L /usr/lib/libgcc_s.so.1 $W/usr/lib/ 2>/dev/null || true
   for m in modprobe insmod; do ln -s kmod $W/usr/bin/$m; done
   # modules: device-mapper, dm-crypt and the ciphers LUKS2 defaults to, plus USB/HID input for the passphrase
   mkdir -p $W$kdir

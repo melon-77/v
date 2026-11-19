@@ -10,7 +10,6 @@ url=https://gcc.gnu.org
 source=(gcc-15.2.0.tar.xz)
 makedepends=(gmp-dev mpfr-dev mpc-dev zlib-dev zstd-dev)
 # i686: link musl's libssp_nonshared.a like the cross toolchain (scripts/toolchain.sh)
-prepare(){ [ "$MUSL_ARCH" != i386 ] || patch -p1 -s < $M/patches/gcc-i686/ssp-nonshared.patch; }
 depends=(binutils musl-dev libgcc libatomic libgomp)
 subpackages=(g++)
 depends_g__="gcc libstdc++-dev"

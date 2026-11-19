@@ -19,8 +19,8 @@ fi
 [ -d $SYSROOT/lib/apk/db ] || $M/hosttools/bin/apk --root $SYSROOT --arch $APK_ARCH --initdb --keys-dir $M/keys/trusted \
   --repositories-file /dev/null add >/dev/null 2>&1 || true
 
-BASE="valence-layout linux-headers musl gcc-runtime zlib zstd xz openssl apk-tools busybox ncurses bash runit util-linux
-  userspace-rcu inih bsd-compat-headers xfsprogs grub libnl3 expat dbus wpa_supplicant alsa-lib alsa-utils mpg123 kmod
+BASE="valence-layout linux-headers glibc gcc-runtime libxcrypt zlib zstd xz openssl apk-tools busybox ncurses bash runit util-linux
+  userspace-rcu inih xfsprogs grub libnl3 expat dbus wpa_supplicant alsa-lib alsa-utils mpg123 kmod
   opendoas ca-certificates linux-firmware valence-base linux-valence"
 PLUMBING="libffi pcre2 glib libcap duktape linux-pam eudev elogind polkit argp-standalone musl-fts musl-obstack elfutils
   sqlite json-c popt device-mapper cryptsetup dosfstools squashfs-tools e2fsprogs bzip2 hunspell attr acl lm-sensors libogg libvorbis

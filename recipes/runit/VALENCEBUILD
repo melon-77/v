@@ -9,7 +9,8 @@ builddir=$srcdir/admin/runit-2.3.0/src
 build(){
   echo "$CC $CFLAGS" > conf-cc
   echo "$CC $LDFLAGS" > conf-ld
-  # probe programs run on the build host through the musl loader in /lib
+  # the Makefile compiles small probe programs and runs them where it stands: on the build machine, with its own
+  # C library (they use nothing newer than it has)
   make -j1
 }
 package(){

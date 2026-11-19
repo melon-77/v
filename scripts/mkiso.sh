@@ -13,7 +13,7 @@ ROOT=$WORK/liveroot LIVE=$WORK/livelayer ISO=$WORK/iso INITRD=$WORK/initrd
 DATE=$(date -u +%Y%m%d)   # UTC: WSL keeps Windows' time zone, which gave ISOs the day before's date
 ISOARCH=$([ $VALENCE_ARCH = x86 ] && echo i686 || echo x86_64)
 OUTISO=$M/out/valence-$DATE-$ISOARCH.iso
-PKGS=${PKGS:-"valence-base linux-valence linux-firmware wpa_supplicant xfsprogs grub zstd openssl ca-certificates cryptsetup ncurses-terminfo musl-utils alsa-utils kmod efibootmgr"}
+PKGS=${PKGS:-"valence-base linux-valence linux-firmware wpa_supplicant xfsprogs grub zstd openssl ca-certificates cryptsetup ncurses-terminfo alsa-utils kmod efibootmgr"}
 # leave out optional packages that haven't been built for this architecture yet (with a warning)
 _p=; for x in $PKGS; do
   if ls $M/repo/$APK_ARCH/$x-[0-9]*.apk >/dev/null 2>&1; then _p="$_p $x"; else echo "warning: $x is not built for $APK_ARCH, left out"; fi
@@ -96,7 +96,6 @@ cat > $LIVE/etc/motd <<'MOTD'
     valence-svc list    list services
     valence-wifi        list Wi-Fi networks;  valence-wifi "Name" "password"  to connect
     (wired networks connect by themselves within a few seconds; ip addr shows the address)
-    valence-repo enable alpine    opt-in Alpine packages (apk add <name>@alpine)
 
 MOTD
 
@@ -109,16 +108,19 @@ mkdir -p $ISO/valence/repo/$APK_ARCH
 # (the desktop packages themselves are NOT copied here: they are already in rootfs.sqfs, which the installers copy, and
 # a second copy cost about 460 MB on the ISO and on every installed system; anything else comes from the online repo)
 # always carry the small, commonly wanted extras so an offline install can still add them
-extras="valence-base bash busybox musl apk-tools"
+extras="valence-base bash busybox glibc apk-tools"
 # guest tools, which the installers add when they run inside a VM
 ls $M/repo/$APK_ARCH/valence-vm-guest-[0-9]*.apk >/dev/null 2>&1 && extras="$extras valence-vm-guest"
 apkx fetch --recursive --output $ISO/valence/repo/$APK_ARCH $extras >/dev/null
 ( cd $ISO/valence/repo/$APK_ARCH && $APK --keys-dir $M/keys/trusted --sign-key "${VALENCE_SIGN_KEY:-$M/keys/valence-signing.rsa}" mkndx -d "Valence $DATE" -o Packages.adb *.apk )
 
 step "initramfs"
-mkdir -p $INITRD/bin $INITRD/lib $INITRD/dev
+mkdir -p $INITRD/bin $INITRD/usr/lib $INITRD/dev
+ln -s usr/lib $INITRD/lib; ln -s usr/lib $INITRD/lib64
 cp $ROOT/usr/bin/busybox $INITRD/bin/busybox; ln -s busybox $INITRD/bin/sh
-cp $ROOT/usr/lib/libc.so $INITRD/lib/$MUSL_LDSO
+# busybox is a dynamic program: it needs the loader (it asks for it as /lib64/$LDSO) and the libraries it names
+cp -L $ROOT/usr/lib/$LDSO $INITRD/usr/lib/
+for l in $($TARGET-readelf -d $ROOT/usr/bin/busybox | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do cp -L $ROOT/usr/lib/$l $INITRD/usr/lib/; done
 cp $M/iso-files/init $INITRD/init
 (cd $INITRD && find . | cpio -o -H newc --quiet | zstd -q -19 > $ISO/boot/initramfs.img)
 

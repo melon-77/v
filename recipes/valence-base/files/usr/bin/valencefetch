@@ -74,7 +74,7 @@ gpu=; for c in /sys/class/drm/card[0-9]; do [ -r $c/device/vendor ] || continue
 pkgs=$(apk info 2>/dev/null | wc -l)
 svcs=$(ls /var/service 2>/dev/null | wc -l)
 running=$(for s in /var/service/*; do sv status "$s" 2>/dev/null; done | grep -c '^run:')
-musl=$(/usr/lib/libc.so 2>&1 | sed -n 's/^Version //p')
+glibc=$(/usr/lib/libc.so.6 2>/dev/null | sed -n '1s/.*version \([0-9.]*[0-9]\).*/\1/p')
 sh_name=$(basename "${SHELL:-/bin/sh}"); [ "$sh_name" = bash ] && sh_name="bash ${BASH_VERSION%%(*}"
 bat=; for b in /sys/class/power_supply/BAT*; do [ -r $b/capacity ] && bat="$(cat $b/capacity)% ($(cat $b/status 2>/dev/null | tr 'A-Z' 'a-z'))"; done
 wifi=; for w in /sys/class/net/*/wireless; do [ -d "$w" ] && wifi=$(basename "$(dirname "$w")"); done
@@ -91,7 +91,7 @@ $(L host "${host:-unknown}")
 $(L kernel "$(uname -r)")
 $(L uptime "$up")
 $(L init "runit  ${D}${running}/${svcs} services up${R}")
-$(L libc "musl ${musl}")
+$(L libc "glibc ${glibc}")
 $(L pkgs "$pkgs ${D}(apk)${R}")
 $(L shell "$sh_name")
 $(L cpu "${cpu:-unknown} ${D}× ${cores}${R}")

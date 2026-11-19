@@ -1,6 +1,6 @@
 pkgname=open-vm-tools
 pkgver=13.0.10
-pkgrel=1
+pkgrel=2
 pkgdesc="VMware guest tools: screen auto-resize (resolutionKMS), time sync, clean shutdown, shared folders (vmhgfs-fuse)"
 license=LGPL-2.1-or-later
 url=https://github.com/vmware/open-vm-tools
@@ -10,7 +10,12 @@ makedepends=(glib-dev libtirpc-dev fuse3-dev openssl-dev libdrm-dev eudev-dev li
 # The musl patches come from Alpine's open-vm-tools package (aports, community/open-vm-tools).
 # No X11 desktop helper (vmware-user): the Plasma session is Wayland, where resizing goes through
 # vmwgfx and vmtoolsd's resolutionKMS plugin.
-prepare(){ cd open-vm-tools; autoreconf -fi >/dev/null 2>&1; }
+prepare(){ cd open-vm-tools; autoreconf -fi >/dev/null 2>&1
+  # GLib makes g_free a macro when the C library has C23's free_sized (glibc 2.43 and newer), and the macro may call
+  # g_free_sized instead. glib_stubs.c stands in for GLib in a library that is linked without it: it has to define
+  # the function itself (in parentheses, which keeps the macro away) and the sized one as well.
+  sed -i 's/^void g_free(void \*p) { free(p); }$/void (g_free)(void *p) { free(p); }\nvoid g_free_sized(void *p, size_t s) { free(p); }/' lib/rpcChannel/glib_stubs.c
+  grep -q '^void (g_free)' lib/rpcChannel/glib_stubs.c; }
 build(){
   cd open-vm-tools
   export CUSTOM_PROCPS_NAME=procps CFLAGS="$CFLAGS -Wno-unused-but-set-variable -D_GNU_SOURCE" CXXFLAGS="$CXXFLAGS -std=gnu++11"

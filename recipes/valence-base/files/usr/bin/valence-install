@@ -9,7 +9,7 @@
 #
 # Unattended use (for testing): set VALENCE_DISK, VALENCE_HOSTNAME, VALENCE_ROOTPW, VALENCE_USER,
 # VALENCE_USERPW and VALENCE_YES=1 (and optionally VALENCE_PROFILE, VALENCE_MODE=alongside|erase,
-# VALENCE_WIFI_SSID/VALENCE_WIFI_PSK, VALENCE_ALPINE=y to add Alpine's repo as the opt-in tagged repo "@alpine",
+# VALENCE_WIFI_SSID/VALENCE_WIFI_PSK,
 # VALENCE_ENCRYPT=y with VALENCE_LUKSPW to encrypt / with LUKS2; /boot stays plain and a small initramfs asks for
 # the passphrase, VALENCE_SERIAL=1 for a serial console on the installed system).
 #
@@ -24,11 +24,11 @@ usage: valence-install
 
 Installs Valence from the live ISO onto a disk. It asks for the disk (erased, or on UEFI next to Windows or
 another system in the disk's unallocated space), what to install (base or desktop), the host name, the
-passwords, a Wi-Fi network, the opt-in @alpine repo and disk encryption (LUKS). Needs root.
+passwords, a Wi-Fi network and disk encryption (LUKS). Needs root.
 
 Unattended (set as root: doas doesn't pass them on): VALENCE_DISK VALENCE_HOSTNAME VALENCE_ROOTPW VALENCE_USER
 VALENCE_USERPW VALENCE_PROFILE=base|desktop VALENCE_MODE=alongside|erase VALENCE_WIFI_SSID VALENCE_WIFI_PSK
-VALENCE_ALPINE=y VALENCE_ENCRYPT=y VALENCE_LUKSPW VALENCE_SERIAL=1 VALENCE_YES=1 (questions with a default take it)
+VALENCE_ENCRYPT=y VALENCE_LUKSPW VALENCE_SERIAL=1 VALENCE_YES=1 (questions with a default take it)
 EOF
   exit 0 ;; esac
 REPO=${VALENCE_REPO:-/media/valence/valence/repo}
@@ -93,7 +93,6 @@ if ls -d /sys/class/net/*/wireless >/dev/null 2>&1; then
   ask VALENCE_WIFI_SSID "Wi-Fi network name (empty to skip)" ""
   [ -n "$VALENCE_WIFI_SSID" ] && askpw VALENCE_WIFI_PSK "Wi-Fi password"
 fi
-ask VALENCE_ALPINE "Also offer Alpine's packages as an opt-in @alpine repo (y/n)" n
 ENCRYPT=n
 if command -v cryptsetup >/dev/null; then
   ask VALENCE_ENCRYPT "Encrypt the system with a passphrase (LUKS) (y/n)" n
@@ -264,7 +263,6 @@ if [ "${VALENCE_SERIAL:-0}" = 1 ]; then   # serial console, for headless machine
   SVCS="$SVCS getty-ttyS0"
 fi
 for s in $SVCS; do if [ -d $TARGET/etc/sv/$s ]; then ln -sfn /etc/sv/$s $TARGET/var/service/$s; fi; done
-case $VALENCE_ALPINE in y|Y|yes) say "Adding Alpine as the opt-in @alpine repo"; chroot $TARGET valence-repo enable alpine >/dev/null || true ;; esac
 
 if [ $MODE = alongside ]; then
   # its own folder on the shared EFI partition and an entry in the firmware's boot menu (efibootmgr, through
