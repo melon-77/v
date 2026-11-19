@@ -13,8 +13,10 @@ of things: glibc instead of musl, documentation and translations in their own pa
 that orders builds itself, and a Btrfs root with a snapshot before every update. **[ROADMAP.md](ROADMAP.md) is the
 plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
 
-Nothing has been released, and there is no online package repository yet. The base system is on glibc: the cross
-toolchain and the 64 recipes of the console ISO build on it (ROADMAP.md has the test status). The rest is still as
+There is one test build, a console ISO, on the repository's Releases page, and no online package repository yet. The
+base system is on glibc: the cross toolchain and the 64 recipes of the console ISO build on it (ROADMAP.md has the
+test status). Its documentation is in packages of its own: a fresh install has no man pages, and `apk add docs`
+from a package repository adds them, with `man`, for everything installed. The rest is still as
 inherited from Melon: the XFS root, the desktop and every other recipe beyond the console ISO (not yet rebuilt on
 glibc, with Melon's musl workarounds still in them), the 32-bit edition, and dated status notes that are Melon's
 history. Where this file, `AGENTS.md` and `BUILDING.md` describe those parts, they describe Melon's system. The
@@ -28,6 +30,7 @@ A from-scratch, rolling x86_64 distribution:
 |---|---|
 | libc | glibc 2.44 |
 | userland | the GNU tools (coreutils, findutils, grep, sed, tar, gzip, diffutils) with less, procps-ng, iproute2 and shadow; BusyBox 1.37 for `/bin/sh`, the initramfs and the small daemons |
+| documentation | man pages, info pages and docs are in `<package>-doc`, translations in `<package>-lang`; installing `docs` or `lang` brings them for everything installed; `man` is mandoc |
 | init | runit 2.3 |
 | packages | apk-tools 3 (signed apk v3 packages, binary + source recipes) |
 | kernel | Linux 7.0, generic flavour |
@@ -62,7 +65,7 @@ scripts/toolchain.sh
 # the base system (BASE in scripts/build-everything.sh), then what the console ISO adds to it
 for p in valence-layout linux-headers glibc gcc-runtime libxcrypt zlib zstd xz openssl apk-tools busybox ncurses bash \
          runit util-linux attr acl pcre2 libmnl coreutils findutils grep sed tar gzip diffutils less procps-ng \
-         iproute2 shadow userspace-rcu inih xfsprogs grub libnl3 expat dbus wpa_supplicant alsa-lib alsa-utils \
+         iproute2 shadow mandoc docs lang userspace-rcu inih xfsprogs grub libnl3 expat dbus wpa_supplicant alsa-lib alsa-utils \
          mpg123 kmod opendoas ca-certificates linux-firmware valence-base linux-valence \
          libffi glib eudev json-c popt device-mapper cryptsetup efivar efibootmgr; do scripts/valence-build $p; done
 scripts/mkiso.sh

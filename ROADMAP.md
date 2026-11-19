@@ -4,12 +4,15 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 [Melon Linux](https://github.com/melon-77/melon-os): the same engineering, without the jokes, and with a handful
 of fixes where Melon chose small over sensible.
 
-Status, 19 November 2026: phases 1 and 2 are done. The base system is on glibc 2.44 and its commands are the GNU
+Status, 19 November 2026: phases 1 to 3 are done. The base system is on glibc 2.44 and its commands are the GNU
 tools: the cross toolchain, the 64 recipes of the console ISO and the ISO build. The ISO passes all six console
 tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next to Windows
 on UEFI), and the installed system adds a package from a repository over the network. BusyBox stays for `/bin/sh`,
-the initramfs and the small daemons. The recipes beyond the base (the desktop, the developer tools) have not been
-rebuilt on glibc. Nothing later has started.
+the initramfs and the small daemons. Documentation and translations are packages of their own: the builder makes
+`<pkg>-doc` and `<pkg>-lang` from what a recipe installs, no recipe deletes them any more, and a fresh install has
+no documentation files until `apk add docs` (or one `-doc` package) brings them, with `man`. The recipes beyond the
+base (the desktop, the developer tools) have not been rebuilt on glibc, so their `-doc` and `-lang` packages do not
+exist yet. Nothing later has started.
 
 ## Why it exists
 
@@ -95,7 +98,7 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   *Done when:* the console ISO boots in QEMU on BIOS and on UEFI, installs, and the installed system can
   `apk add` a package.
 
-- [ ] **3. Split `-doc` and `-lang`.**
+- [x] **3. Split `-doc` and `-lang`.**
   Teach the builder to move man pages, info pages and docs into `<pkg>-doc`, and locales into `<pkg>-lang`.
   Remove the delete lines from the 304 recipes that have them.
   *Done when:* a base install has no docs and is no bigger for it, and installing a `-doc` package makes
@@ -166,6 +169,13 @@ These are open on purpose. Each gets settled before the phase that needs it.
   fails the build instead of going unnoticed. (Phase 4.)
 - **How rollback is offered.** A command, a boot menu entry, or both. (Phase 5.)
 - **Hosting.** Where the package repository and the ISOs live.
+- **Translations of the base tools.** bash, coreutils, grep and 38 other recipes are built with `--disable-nls`,
+  as on Melon, so they build no translations and have no `-lang` package: their messages are English only. Turning
+  it on is a rebuild of those recipes. (Before phase 7.)
+- **The man-page reader.** mandoc for now: one small package, which the `-doc` packages bring in. The usual
+  alternative is man-db with groff, about 15 MB, which is what Arch and Debian use.
+- **Documentation on the ISO.** The ISO's own package repository carries only a few extras, so `apk add docs` needs
+  the online repository. All 38 `-doc` packages of the base and mandoc together are about 5 MB.
 - **Website**, and the font for the wordmark (the current one is a stand-in).
 
 ## Decided

@@ -18,6 +18,7 @@ source by our own scripts and shipped as a signed apk v3 package.
 | init | runit 2.3 | stages in `/etc/runit/{1,2,3}`, services in `/etc/sv`, enabled = symlink in `/var/service`; stays Valence's init (see Roadmap) |
 | devices | eudev 3.2 on the desktop profile (`udevd` service), BusyBox mdev (`mdevd` service) on the console profile | the desktop profile swaps `mdevd` for `udevd`; see rule 44 |
 | packages | apk-tools 3.0.8 | repo index `Packages.adb`, signed with `keys/valence-signing.rsa` |
+| documentation | `<pkg>-doc` (man pages, info pages, docs) and `<pkg>-lang` (translations), made by the builder; `docs` and `lang` bring them for everything installed; mandoc 1.14.6 is `man` | not on the ISOs: a fresh install has no documentation files. `apk add docs`, or one `<pkg>-doc`, which brings mandoc. "Recipe format" has the mechanism |
 | kernel | Linux 7.0, `linux-valence` (generic) | config = `x86_64_defconfig` + `recipes/linux-valence/config-valence` |
 | boot | GRUB 2.14, both `i386-pc` and `x86_64-efi` | ISO and installs boot on BIOS **and** UEFI; the installed system's boot menu is hidden (skipped after 1 s, Shift or Esc opens it) unless another system is found, then it shows for 5 s |
 | disks | GPT: 1 MiB BIOS boot, 1 GiB FAT32 `/boot` (also the ESP), XFS `/` | kernel boots with `root=PARTUUID=...`; only encrypted (LUKS) installs have an initramfs (rule 28); dual boot next to Windows on UEFI (see Installers) |
@@ -71,6 +72,12 @@ Not converted yet:
   GNU tar can carry file capabilities and ACLs (`--xattrs --acls`); nothing in the base has any. Add the options
   when the desktop, which has file capabilities, is converted.
 
+- **Docs and translations beyond the base.** No recipe deletes them any more (361 recipes changed, 247 of them
+  through the generators), but only the base has been rebuilt: the others make their `-doc` and `-lang` packages
+  the first time they are built on glibc. Watch then for two packages shipping the same page, for a program that
+  reads its own files from `usr/share/doc` at run time (it needs `options=(keepdocs)`), and for a `-doc` package
+  over GitHub's 100 MB limit ("Package repository").
+
 Where this file describes those parts, it describes them as they were built on Melon.
 
 ## Repository layout
@@ -112,7 +119,7 @@ pkgdesc="A compression/decompression library"
 license=Zlib
 url=https://zlib.net
 source=(zlib-1.3.1.tar.gz)   # file names inside $SRC (sources/), or files in the recipe dir
-subpackages=(zlib-dev)       # -dev and -doc get default split functions
+subpackages=(zlib-dev)       # -dev has a default split function; -doc and -lang are made without being listed
 makedepends=()               # packages installed into the sysroot before building
 depends=()                   # runtime deps; so: deps are added automatically from ELF NEEDED
 build(){ ./configure --prefix=/usr --libdir=/usr/lib --shared >/dev/null; make -j$JOBS >/dev/null; }
@@ -139,6 +146,23 @@ Things the builder gives you:
 - `py_install <name> <dirs...>` installs pure-Python modules into python3's site-packages with a small `.dist-info`
   (`recipes/python3-mako`). Modules with C parts need their build system (`recipes/python3-libxml2`).
 - `options=('!strip')` skips stripping. `options=(keepdirs)` keeps empty directories.
+- **Docs and translations are split out by the builder, and a recipe never deletes them** (ROADMAP.md, phase 3).
+  What `package()` leaves in `usr/share/{man,info,doc,gtk-doc,help}` goes into `<pkgname>-doc`, and
+  `usr/share/locale` into `<pkgname>-lang`. Each exists only when there is something to put in it, and neither is
+  installed into the sysroot. A recipe lists `<pkgname>-doc` in `subpackages` only to give it a `pkg_doc()` of its
+  own (`recipes/perl`). Files a split function has already moved into another subpackage stay there
+  (`glibc-locales` keeps `usr/share/locale`). `options=(keepdocs)` or `options=(keeplocale)` leaves the files in the
+  main package, for a package whose content they are.
+  Every `-doc` package carries `install-if: docs <pkgname>=<version>`, and every `-lang` package the same with
+  `lang`: with the `docs` package installed, apk adds the `-doc` part of everything installed and of whatever is
+  installed later, and removes them all again with it (`recipes/docs`, `recipes/lang`; both are empty).
+  A `-doc` package with man pages depends on `mandoc`, the reader (`man`, `apropos`, `whatis`): its trigger keeps
+  the index `/usr/share/man/mandoc.db` current, and without that index mandoc's `man` warns on every page. BusyBox
+  has a `man` of its own, which is what `/usr/bin/man` is while mandoc is not installed; it cannot format a page.
+  `scripts/desktop-packages*.txt` list `lang`, so the desktop keeps its translations.
+  Not covered: the recipes that switch documentation off when they configure (about 180: `-Dgtk_doc=false`,
+  `--disable-doc`, ...), mostly because building it needs tools the build machine lacks; and the 41 that pass
+  `--disable-nls`, which build no translations at all (the base tools among them: ROADMAP.md, "Not decided yet").
 - After packaging, files in `/bin`, `/sbin`, `/lib`, `/usr/sbin` are folded into `/usr/bin` and `/usr/lib`,
   `.la` files are deleted, and ELF files are stripped.
 - `so:` provides/depends are generated from SONAME/NEEDED. glibc's libraries carry a SONAME (`libc.so.6`), so the
@@ -244,7 +268,9 @@ Rebuilding the kernel takes about an hour on 2 cores.
 30. *(A musl rule, kept so the numbering holds: musl 1.2.4+ hid the `*64` LFS types unless `_LARGEFILE64_SOURCE`
     was defined, so gpgme got `-D_LARGEFILE64_SOURCE`.)*
 31. **The builder's `apk add --upgrade` only reinstalls a package whose version-release changed.** Generated
-    recipes take their `pkgrel` from the `PKGREL` table in `scripts/gen-simple-recipes.py`.
+    recipes take their `pkgrel` from the `PKGREL` table in `scripts/gen-simple-recipes.py`, plus `REBUILD`, which is
+    added to every recipe that generator writes (`gen-kde-recipes.py` has the same pair; `gen-lxqt-recipes.py` one
+    number for all).
 29. **Two build queues may run at once** for the same arch: `valence-build` takes `flock repo/<arch>/.lock`
     around sysroot installs and reindexing, and writes packages under a temporary name first.
 
@@ -453,6 +479,18 @@ Rebuilding the kernel takes about an hour on 2 cores.
     when root runs it, drops the controlling terminal unless that ioctl is disabled: `su - user` then starts a shell
     with no job control ("cannot set terminal process group"), and doas and sudo answer "a tty is required". The disk
     test's `su - jcole` and `sudo id -u` steps are what catch it. `su -c command` has always run without a terminal.
+62. **util-linux's `--disable-all-programs` also switches off every program that has no `--enable` option of its
+    own, whatever the command line says.** `--enable-findmnt --enable-mkswap --enable-findfs --enable-blkdiscard`
+    were "unrecognized options" in configure's output, and Valence had no `findmnt` (BusyBox supplied the other
+    three). `recipes/util-linux` takes those four out of that default in `configure` itself, and stops if one of
+    them is not built. Before adding `--enable-<name>` for another of its programs, look in `configure.ac` for an
+    `AC_ARG_ENABLE([<name>]`; without one, the program goes into the recipe's `_extra` list.
+63. **A recipe says which optional libraries it uses.** zstd's makefile turns on `.gz`, `.xz` and `.lz4` support
+    for whichever of zlib, liblzma and liblz4 it finds in the sysroot. First built before xz, it had no liblzma;
+    rebuilt after it (a `pkgrel` bump that changed nothing else), it linked liblzma and pulled xz's library onto the
+    ISO. `recipes/zstd` passes `HAVE_ZLIB=1 HAVE_LZMA=0 HAVE_LZ4=0`. The sysroot only grows, so a rebuild can find
+    more than the first build did (ROADMAP.md, "Clean builds"). After rebuilding base packages, compare the file
+    list of `work/liveroot` with the one from before: that comparison is what caught this.
 
 To resume a failed long build without unpacking again (for example the kernel):
 `VALENCE_KEEP_SRC=1 scripts/valence-build linux-valence`. `build-everything.sh` does that by itself (`VALENCE_AUTO_RESUME=1`), but
@@ -496,6 +534,13 @@ scripts/qemu-test.py desktop-install out/valence-desktop-*-x86_64.iso /tmp/desk.
 ```
 
 The tests run the console installer by name (`valence-install`, with the `VALENCE_*` variables from "Installers").
+
+`disk` also checks what the roadmap's phases promise of an installed system. The GNU tools own their command names,
+and `findmnt`, `mkswap`, `findfs` and `blkdiscard` are util-linux's programs (rule 62). A fresh install has no
+documentation files. `apk add less-doc` from this build's `repo/`, which the test serves over HTTP itself, makes
+`man less` and `apropos less` work; `apk add docs` brings the `-doc` part of everything installed, and `man` finds
+pages from eight of those packages; `apk del docs` leaves nothing behind. `--offline` skips the steps that need the
+repository.
 
 Logs go to `logs/qemu-*.log`. The tests use KVM when it really works (`qemu-test.py` asks the kernel with the
 `KVM_GET_API_VERSION` ioctl: WSL2 on Windows 11 does, WSL2 on **Windows 10, or on a CPU Windows can't nest on, creates a

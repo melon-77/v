@@ -107,6 +107,9 @@ then for reasons outside the build (the musl ISO's install step took 100 s where
 times only within one sitting.
 The GNU tools (19 November 2026) added 14 recipes, about three minutes of building together. The console ISO is now
 64 recipes and 405 MB, and the six tests took six minutes.
+Splitting out the documentation (phase 3, the same day) rebuilt 41 of them in 11 minutes, glibc and GRUB among them,
+and added mandoc, `docs` and `lang` to the base list: 67 recipes are built, 64 of them are on the ISO, which is still
+405 MB. The six tests took 6 minutes with the new documentation steps.
 
 Every time above is from a musl build. On glibc the console ISO is 64 recipes; the new times are not recorded here yet.
 
