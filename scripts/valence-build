@@ -220,7 +220,12 @@ amove(){ local p; for p in "$@"; do
 default_dev(){
   amove usr/include usr/lib/pkgconfig usr/share/pkgconfig usr/lib/cmake usr/share/aclocal 'usr/lib/*.a'
   local l; for l in $pkgdir/usr/lib/*.so; do [ -L "$l" ] && amove "usr/lib/$(basename $l)"; done; true; }
-default_doc(){ amove usr/share/man usr/share/info usr/share/doc usr/share/gtk-doc; }
+# docs and translations are never deleted and never ride along in the program's own package (ROADMAP phase 3):
+# what a recipe leaves in these directories ends up in <pkg>-doc and <pkg>-lang (see "docs and translations" below).
+# usr/share/info/dir is the index every Texinfo package would ship its own copy of.
+default_doc(){ amove usr/share/man usr/share/info usr/share/doc usr/share/gtk-doc usr/share/help
+  rm -f "$subpkgdir/usr/share/info/dir"; }
+default_lang(){ amove usr/share/locale; }
 
 # ---------- normalise: merged /usr ----------
 normalise(){ local d=$1
@@ -262,12 +267,20 @@ make_apk(){ local sub=$1 dir=$2 desc=$3; shift 3; local deps=("$@")
   while read -r t so; do [ "$t" = N ] || continue
     printf '%s\n' "${sonames[@]:-}" | grep -qxF "$so" || deps+=("so:$so"); done <<< "$scan"
   local vp; vp=$(varname "$sub"); local extra="provides_${vp}[@]"; provides+=(${!extra:-})
+  # <pkg>-doc and <pkg>-lang install themselves next to <pkg> once "docs" or "lang" is installed (apk add docs) and
+  # leave with it; a -doc package with man pages brings the program that shows them
+  local iif=
+  case $sub in
+    "$pkgname-doc") iif="docs $pkgname=$pkgver-r$pkgrel"; [ ! -d "$dir/usr/share/man" ] || deps+=(mandoc) ;;
+    "$pkgname-lang") iif="lang $pkgname=$pkgver-r$pkgrel" ;;
+  esac
   local info=(-I "name:$sub" -I "version:$pkgver-r$pkgrel" -I "description:$desc" -I "arch:$ARCH"
               -I "license:$license" -I "origin:$pkgname" -I "maintainer:Valence builder <builder@valence.local>"
               -I "build-time:$(date +%s)")
   [ -n "$url" ] && info+=(-I "url:$url")
   [ ${#deps[@]} -gt 0 ] && info+=(-I "depends:$(printf '%s\n' "${deps[@]}" | sort -u | xargs)")
   [ ${#provides[@]} -gt 0 ] && info+=(-I "provides:${provides[*]}")
+  [ -n "$iif" ] && info+=(-I "install-if:$iif")
   local scr=() st
   for st in pre-install post-install pre-upgrade post-upgrade pre-deinstall post-deinstall trigger; do
     [ -f "$startdir/$sub.$st" ] && scr+=(-s "$st:$startdir/$sub.$st"); done
@@ -289,13 +302,31 @@ for sp in "${subpackages[@]:-}"; do
   fn=$(varname "${sp#$pkgname-}")
   if declare -F "pkg_$fn" >/dev/null; then "pkg_$fn"
   elif [ "$fn" = dev ]; then default_dev
-  elif [ "$fn" = doc ]; then default_doc; fi
+  elif [ "$fn" = doc ]; then default_doc
+  elif [ "$fn" = lang ]; then default_lang; fi
 done
-for sp in "${subpackages[@]:-}"; do
+# ---------- docs and translations ----------
+# What is still in the main package's doc and locale directories after the recipe's own split functions goes into
+# $pkgname-doc and $pkgname-lang, which exist only when there is something to put in them. A recipe lists them in
+# subpackages only to give them a pkg_doc()/pkg_lang() of its own. options=(keepdocs) or (keeplocale) leaves the
+# files in the main package, for a package whose content they are.
+_listed(){ local s; for s in "${subpackages[@]:-}"; do [ "$s" = "$1" ] && return 0; done; return 1; }
+auto=()
+for kind in doc lang; do
+  sp=$pkgname-$kind
+  _listed "$sp" && continue
+  [ $kind = doc ] && has_opt keepdocs && continue
+  [ $kind = lang ] && has_opt keeplocale && continue
+  subpkgdir=$pkgbase/$sp; rm -rf "$subpkgdir"; mkdir -p "$subpkgdir"; export subpkgdir
+  default_$kind
+  if [ -n "$(find "$subpkgdir" ! -type d -print -quit)" ]; then auto+=("$sp"); else rm -rf "$subpkgdir"; fi
+done
+for sp in "${subpackages[@]:-}" "${auto[@]:-}"; do
   [ -z "$sp" ] && continue
   v=$(varname "$sp"); d="depends_${v}[@]"; dsc="pkgdesc_${v}"
   sdeps=(${!d:-}); [[ $sp == *-dev ]] && [ -z "${!d:-}" ] && sdeps=("$pkgname=$pkgver-r$pkgrel")
-  make_apk "$sp" "$pkgbase/$sp" "${!dsc:-$pkgdesc ($sp)}" "${sdeps[@]}"
+  case $sp in "$pkgname-doc") what=documentation;; "$pkgname-lang") what=translations;; *) what=$sp;; esac
+  make_apk "$sp" "$pkgbase/$sp" "${!dsc:-$pkgdesc ($what)}" "${sdeps[@]}"
 done
 make_apk "$pkgname" "$pkgdir" "$pkgdesc" "${depends[@]}"
 
@@ -305,7 +336,8 @@ msg "reindex"
 
 # ---------- install into sysroot so later builds can use it ----------
 if [ $INSTALL = 1 ]; then
-  all=("$pkgname"); for sp in "${subpackages[@]:-}"; do [ -n "$sp" ] && [[ $sp != *-doc ]] && all+=("$sp"); done
+  # (-doc and -lang packages are not installed: no build needs them)
+  all=("$pkgname"); for sp in "${subpackages[@]:-}"; do [ -n "$sp" ] && [[ $sp != *-doc && $sp != *-lang ]] && all+=("$sp"); done
   msg "sysroot: ${all[*]}"; sysroot_add "${all[@]}"
 fi
 # free the disk: build trees are large (set VALENCE_KEEP_WORK=1 to keep them for debugging)
