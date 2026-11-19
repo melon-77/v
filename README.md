@@ -8,24 +8,15 @@
 ## Status: being ported from Melon Linux
 
 Valence is the successor to [Melon Linux](https://github.com/melon-77/melon-os). It starts as a port of Melon's
-engineering (this tree was imported from Melon's `main` at `8849e5a` on 18 November 2026) and then changes the parts
-listed below. Nothing has been released, and there is no online package repository yet.
+engineering (this tree was imported from Melon's `main` at `8849e5a` on 18 November 2026) and then changes a handful
+of things: glibc instead of musl, documentation and translations in their own packages instead of deleted, a builder
+that orders builds itself, and a Btrfs root with a snapshot before every update. **[ROADMAP.md](ROADMAP.md) is the
+plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
 
-| Phase | What | State |
-|---|---|---|
-| 1 | Bring Melon's engineering over under the new name, without its joke layer | in progress: imported and renamed, not built yet |
-| 2 | glibc instead of musl (`x86_64-valence-linux-gnu`) | not started |
-| 3 | Man pages and translations go into `-doc` and `-lang` packages instead of being deleted | not started |
-| 4 | `valence-build` orders builds by dependency itself, replacing the hand-kept queue scripts | not started |
-| 5 | Btrfs root with a snapshot before every update, instead of XFS | not started |
-| 6 | The desktop: Plasma 6 on Wayland, SDDM, Calamares | not started |
-| 7 | Documentation and a first test release | not started |
-
-Not decided yet: BusyBox or the GNU tools on the installed system, whether the 32-bit edition stays, native Steam
-(multilib) or Flatpak, clean-chroot builds, how a rollback is offered, hosting, a website.
-
-Until a phase lands, the rest of this file, `AGENTS.md` and `BUILDING.md` describe the system as it was inherited from
-Melon: musl, XFS, and dated status notes that are Melon's history. The artwork is still Melon's too.
+Nothing has been released, and there is no online package repository yet. Until a phase lands, the rest of this file,
+`AGENTS.md` and `BUILDING.md` describe the system as it was inherited from Melon: musl, XFS, and dated status notes
+that are Melon's history. The desktop's pictures (wallpaper, splash, login and boot menu backgrounds) are still
+Melon's too; the logo is Valence's.
 
 ## What it is
 
@@ -52,7 +43,9 @@ scripts/valence-build    builds one recipe into signed .apk packages and reindex
 scripts/mkiso.sh       assembles the hybrid BIOS/UEFI live ISO from the repo
 recipes/<pkg>/VALENCEBUILD   package recipes (APKBUILD-like)
 iso-files/init         live initramfs init
-branding/              logo
+branding/              the logo (SVG and PNGs)
+art/logo.py            draws the logo
+ROADMAP.md             the plan and its phases
 recipes/calamares-valence/   graphical installer: Calamares settings, branding and finishing scripts
 ```
 
