@@ -1,12 +1,13 @@
 pkgname=open-vm-tools
 pkgver=13.0.10
-pkgrel=3
+pkgrel=4
 pkgdesc="VMware guest tools: screen auto-resize (resolutionKMS), time sync, clean shutdown, shared folders (vmhgfs-fuse)"
 license=LGPL-2.1-or-later
 url=https://github.com/vmware/open-vm-tools
 source=(open-vm-tools-13.0.10.tar.xz)
 builddir=$srcdir/open-vm-tools-stable-13.0.10
-makedepends=(glib-dev libtirpc-dev fuse3-dev openssl-dev libdrm-dev eudev-dev linux-headers)
+# libxcrypt-dev: configure stops without crypt() (found only by chance while every build shared one sysroot)
+makedepends=(glib-dev libtirpc-dev fuse3-dev openssl-dev libdrm-dev eudev-dev libxcrypt-dev linux-headers)
 # The musl patches come from Alpine's open-vm-tools package (aports, community/open-vm-tools).
 # No X11 desktop helper (vmware-user): the Plasma session is Wayland, where resizing goes through
 # vmwgfx and vmtoolsd's resolutionKMS plugin.

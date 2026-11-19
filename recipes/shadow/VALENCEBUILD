@@ -1,11 +1,13 @@
 pkgname=shadow
 pkgver=4.20.3
-pkgrel=1
+pkgrel=2
 pkgdesc="Login and account tools: login, su, passwd, useradd, usermod and the rest"
 license=BSD-3-Clause
 url=https://github.com/shadow-maint/shadow
 source=(shadow-4.20.3.tar.xz)
-makedepends=(libxcrypt-dev acl-dev)
+# attr-dev: ACL support needs <attr/error_context.h> as well as libacl, and configure quietly drops it otherwise
+# (--with-acl makes that an error). Extended attributes themselves are left off, as in every build so far.
+makedepends=(libxcrypt-dev acl-dev attr-dev)
 subpackages=(shadow-dev)
 # passwd, su, newgrp and a few more are setuid root. valence-build's own strip pass is skipped ('!strip') and
 # `make install-strip` strips while it installs, before the install hook sets those modes.
@@ -19,7 +21,7 @@ prepare(){
   grep -q 'nscd_flush_cache(MAYBE_UNUSED const char \*_1)' lib/nscd.h
 }
 build(){
-  ./configure $conf_flags --disable-static --disable-nls --without-libpam --without-selinux --without-audit --without-tcb \
+  ./configure $conf_flags --disable-static --disable-nls --with-acl --without-attr --without-libpam --without-selinux --without-audit --without-tcb \
     --without-nscd --without-sssd --without-libbsd --disable-logind --with-yescrypt --with-bcrypt \
     --with-group-name-max-length=32
   make -j$JOBS
