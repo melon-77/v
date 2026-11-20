@@ -856,7 +856,7 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
 
 ROADMAP.md, phase 5. **The owner's decisions (19 November 2026): rollback is offered both as a command and in the
 boot menu, and it works "however Nix does it".** That is taken as NixOS's behaviour on top of the Btrfs snapshots the
-roadmap asks for, not as Nix's store (which is nearer to phase 9): every state of the system is listed in the boot
+roadmap asks for, not as Nix's store (which is nearer to phase 10): every state of the system is listed in the boot
 menu and can be started from there without changing the default; a command makes a state the default; nothing is
 lost by going back. Everything is in `valence-base`: `valence-snapshot`, apk's hook, `boot-snapshot`, and the parts
 of `valence-install`, `valence-update-grub`, `valence-mkinitramfs` and `/etc/runit/1` that know about it.

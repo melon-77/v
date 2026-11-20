@@ -43,7 +43,7 @@ Valence stops optimising for the number and optimises for a system that behaves 
 | | |
 |---|---|
 | Init | runit |
-| Packages | Signed apk v3 packages, built from source recipes. apk-tools 3 installs them until Valence's own package manager does (phase 9) |
+| Packages | Signed apk v3 packages, built from source recipes. apk-tools 3 installs them until Valence's own package manager does (phase 10) |
 | Recipes | Melon's APKBUILD-like format. Most of its 442 recipes come over with little change |
 | Toolchain | A cross toolchain built from source (binutils, GCC), then the system rebuilds itself |
 | Kernel | Mainline Linux, generic flavour |
@@ -86,13 +86,13 @@ documentation: how to install, how to update, how to recover, and how to contrib
 **7. Its own package manager, and a folder for every program.**
 On the installed system apk gives way to a package manager written for Valence: fast, with a proper screen to
 watch, and built around one idea from GoboLinux, that every program lives in a folder of its own. The builder,
-the recipes and the signed packages stay as they are. Phase 9 has the design.
+the recipes and the signed packages stay as they are. Phase 10 has the design.
 
 **8. A file you can throw in to get the system you want.**
 A proposal (19 November 2026). Instead of installing and setting up everything by hand, you write what you want in
 one short file (`packages = steam, firefox, nano`, the groups a user is in, the services that run), and the
 installer, or one command on a running system, does it. It is a convenience and not a specification of the system:
-it adds what it lists and leaves the rest alone. Phase 10 has the design.
+it adds what it lists and leaves the rest alone. Phase 8 has the design.
 
 ## Roadmap
 
@@ -152,7 +152,37 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   Signed ISOs with checksums.
   *Done when:* someone who has never seen Melon can install Valence from the guide alone.
 
-- [ ] **8. A 64-bit ARM edition for Raspberry Pi.**
+- [ ] **8. A file you can throw in to get the system you want.**
+  A proposal, put here on 19 November 2026 as the last phase and moved ahead of the ARM edition the day after
+  ("wishlist should be before arm edition"). The design below is a starting point. What is wanted, in the owner's
+  words: "a file you can throw in to just get what you want", instead of installing everything by hand, "rather
+  than a reproducible system". A sketch of one:
+
+      packages = steam, firefox, nano
+      services = sshd
+      hostname = valence
+      user.jcole.groups = wheel, audio, video
+
+  It is a list of wishes. Applying it does what you would otherwise do by hand, a line at a time: the packages are
+  installed, the services enabled, the user put into the groups, the settings set. What is already so is left as
+  it is, so applying a file a second time changes nothing. What the file does not mention is left alone too:
+  nothing is removed because a file leaves it out. That is the difference from NixOS's `configuration.nix`, which
+  is the whole truth about a system and builds it the same way every time; it was considered and is not what is
+  wanted here.
+  Where a file goes in: the installers take one (a file beside the ISO's own on the stick, or one named when the
+  installer starts), so a new system comes up with everything on the list; and one command applies a file to a
+  running system, at once, with no restart. A snapshot is taken first (phase 5), so one rollback takes back a file
+  that turned out wrong.
+  A name under `packages` is looked for in the package repository first, and then among the apps Valence gets
+  from Flathub, which is where Steam and Firefox come from today. Packages are installed through apk until
+  Valence's own package manager takes over (phase 10).
+  In stages: packages, services, groups and the host name on a running system; then the installers; then whatever
+  else people set by hand after every install and would rather write down once.
+  *Done when:* a QEMU test installs a system with a file thrown in and finds its packages, services and groups
+  there; applies a second file on the running system and has everything on it, with nothing gone that was there
+  before; applies it again and nothing changes; and one rollback takes the second file's changes back.
+
+- [ ] **9. A 64-bit ARM edition for Raspberry Pi.**
   A second architecture, `aarch64-valence-linux-gnu`, next to x86_64 in the same tree (the way Melon carried its
   32-bit edition): cross toolchain, the base system, a Pi kernel and firmware, and a disk image to write to an SD
   card instead of an ISO. It needs the build to stop running freshly built programs directly on the build machine,
@@ -161,7 +191,7 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   *Done when:* the image boots on a Raspberry Pi 4 to a login prompt, gets a network address, and can `apk add` a
   package; and the same image boots in QEMU as an automatic test.
 
-- [ ] **9. Valence's own package manager, with a folder for every program.**
+- [ ] **10. Valence's own package manager, with a folder for every program.**
   A new package manager for the installed system, in Rust, reading the same signed `.apk` packages and
   repositories that the builder makes today.
   *A folder per program*, as in GoboLinux: each package is unpacked into a directory of its own,
@@ -183,34 +213,6 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   on the same machine.
   Open: its name. Whether `-dev`, `-doc` and `-lang` parts get folders of their own or live inside the program's
   folder. And when: before the desktop, the desktop is fitted to the layout once.
-
-- [ ] **10. A file you can throw in to get the system you want.**
-  A proposal, put here on 19 November 2026; the design below is a starting point. What is wanted, in the owner's
-  words: "a file you can throw in to just get what you want", instead of installing everything by hand, "rather
-  than a reproducible system". A sketch of one:
-
-      packages = steam, firefox, nano
-      services = sshd
-      hostname = valence
-      user.jcole.groups = wheel, audio, video
-
-  It is a list of wishes. Applying it does what you would otherwise do by hand, a line at a time: the packages are
-  installed, the services enabled, the user put into the groups, the settings set. What is already so is left as
-  it is, so applying a file a second time changes nothing. What the file does not mention is left alone too:
-  nothing is removed because a file leaves it out. That is the difference from NixOS's `configuration.nix`, which
-  is the whole truth about a system and builds it the same way every time; it was considered and is not what is
-  wanted here.
-  Where a file goes in: the installers take one (a file beside the ISO's own on the stick, or one named when the
-  installer starts), so a new system comes up with everything on the list; and one command applies a file to a
-  running system, at once, with no restart. A snapshot is taken first (phase 5), so one rollback takes back a file
-  that turned out wrong.
-  A name under `packages` is looked for in the package repository first, and then among the apps Valence gets
-  from Flathub, which is where Steam and Firefox come from today.
-  In stages: packages, services, groups and the host name on a running system; then the installers; then whatever
-  else people set by hand after every install and would rather write down once.
-  *Done when:* a QEMU test installs a system with a file thrown in and finds its packages, services and groups
-  there; applies a second file on the running system and has everything on it, with nothing gone that was there
-  before; applies it again and nothing changes; and one rollback takes the second file's changes back.
 
 ## Not decided yet
 
@@ -237,14 +239,14 @@ These are open on purpose. Each gets settled before the phase that needs it.
   alternative is man-db with groff, about 15 MB, which is what Arch and Debian use.
 - **Documentation on the ISO.** The ISO's own package repository carries only a few extras, so `apk add docs` needs
   the online repository. All 38 `-doc` packages of the base and mandoc together are about 5 MB.
-- **The system file (phase 10).** Its name and the command's, the exact format, how a name is matched to a Flathub
-  app, and what it covers beyond packages, services and groups. And when: it needs only phase 5, so the part for
-  packages from the repository could be built before the desktop; Steam and Firefox on a list need the desktop's
-  Flatpak.
+- **The system file (phase 8).** Its name and the command's, the exact format, how a name is matched to a Flathub
+  app, and what it covers beyond packages, services and groups.
 - **Website**, and the font for the wordmark (the current one is a stand-in).
 
 ## Decided
 
+- **The wish-list file comes before the ARM edition** (20 November 2026): "wishlist should be before arm edition".
+  It is phase 8 now; the ARM edition is phase 9 and Valence's own package manager phase 10.
 - **The wallpaper is plain black** (20 November 2026): "make it a pure black wallpaper actually". The login, lock
   and loading screens and the boot menu follow it. Before that the owner had worked a drawing out over several
   previews, a lattice gate woven from the logo's V ("imagine it as like a fence gate where the next row is flipped
@@ -254,11 +256,11 @@ These are open on purpose. Each gets settled before the phase that needs it.
 - **The logo is a folded V in greys, and the desktop takes its colours from it** (19 and 20 November 2026). It
   replaced the bismuth crystal. The colour scheme is the logo's greys.
 - **The system file is a wish list, not a specification** (19 November 2026). "A file you can throw in to just
-  get what you want", rather than a reproducible system: it adds what it lists and removes nothing. (Phase 10.)
+  get what you want", rather than a reproducible system: it adds what it lists and removes nothing. (Phase 8.)
 - **Rollback: both a command and the boot menu, and "however Nix does it"** (19 November 2026). Taken as NixOS's
   behaviour on Btrfs snapshots: the boot menu lists every snapshot and starts the one chosen, without changing what
   starts by default; `valence-snapshot rollback` makes a snapshot the default; what a rollback replaces is kept.
-  Not taken as Nix's store, a folder per package with the system assembled from them, which is nearer to phase 9.
+  Not taken as Nix's store, a folder per package with the system assembled from them, which is nearer to phase 10.
 - **Clean builds** (19 November 2026). Every package is built in a sysroot that holds only what its recipe
   declares, so a missing dependency fails the build instead of going unnoticed, and the same recipe gives the same
   package whatever was built before it.
