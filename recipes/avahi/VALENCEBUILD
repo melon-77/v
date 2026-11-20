@@ -1,11 +1,11 @@
 pkgname=avahi
 pkgver=0.8
-pkgrel=2
+pkgrel=3
 pkgdesc="Avahi: mDNS/DNS-SD service discovery (finds network printers for CUPS)"
 license=LGPL-2.1-or-later
 url=https://avahi.org/
 source=(avahi-0.8.tar.gz)
-makedepends=(libdaemon-dev expat-dev dbus-dev)
+makedepends=(libdaemon-dev expat-dev dbus-dev libcap-dev)
 subpackages=(avahi-dev avahi-libs)
 pkgdesc_avahi_libs="Avahi client libraries"
 build(){ ./configure $conf_flags --disable-static --disable-nls --disable-glib --disable-gobject --disable-introspection \

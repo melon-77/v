@@ -125,6 +125,28 @@ ROWS = [
 REBUILD = 1
 PKGREL = {'sqlite': 1, 'npth': 1, 'libjpeg-turbo': 1, 'networkmanager': 2, 'power-profiles-daemon': 1, 'libxkbcommon': 1, 'fuse3': 1, 'ostree': 1, 'pipewire': 2,
           'shared-mime-info': 1}
+# +1: their makedepends changed when the desktop was rebuilt on glibc in clean sysroots (ROADMAP phase 6)
+for _n in ('gdk-pixbuf gnupg gst-plugins-base libsm libva libxcursor libxfont2 libxft libxi libxrandr libxtst libxxf86vm ostree pipewire xcb-util-cursor xcb-util-image').split(): PKGREL[_n] = PKGREL.get(_n, 0) + 1
+# makedepends beyond a row's own: what Melon's packages linked without the row saying so (they were built one after
+# another in one sysroot), from scripts/suggest-makedepends.py, and what clean builds showed after that
+MORE_DEPS = {
+    'libsm': 'xtrans',   # sm_manager.c includes X11/Xtrans/Xtrans.h
+    'gnupg': 'libgpg-error-dev',
+    'gst-plugins-base': 'glib-dev zlib-dev',
+    'libva': 'libxcb-dev',
+    'libxcursor': 'libx11-dev',
+    'libxfont2': 'zlib-dev xorgproto',   # xproto and fontsproto
+    'libxft': 'libx11-dev',
+    'libxi': 'libx11-dev',
+    'libxrandr': 'libx11-dev',
+    'libxtst': 'libx11-dev libxext-dev',
+    'libxxf86vm': 'libx11-dev',
+    'ostree': 'libgpg-error-dev',
+    'pipewire': 'ncurses-dev',
+    'xcb-util-cursor': 'libxcb-dev',
+    'xcb-util-image': 'libxcb-dev',
+    'gdk-pixbuf': 'shared-mime-info-dev',   # its shared-mime-info.pc is in the -dev package
+}
 # extra VALENCEBUILD lines (the scripts they name live next to the generated VALENCEBUILD)
 EXTRA = {
     # rebuild the MIME cache whenever a package adds definitions (shared-mime-info.trigger); without it
@@ -140,6 +162,7 @@ def recipe(r):
     if not os.path.lexists(src): os.symlink(tb[3:] if tb.startswith('../') else f'deb/{tb}', src)
     lines = [f'pkgname={name}', f'pkgver={ver}', f'pkgrel={PKGREL.get(name, 0) + REBUILD}', f'pkgdesc="{name} (graphics stack)"', 'license=custom', f'source=({link})',
              f'builddir=$srcdir/{top}']
+    mdeps = ' '.join(dict.fromkeys((mdeps + ' ' + MORE_DEPS.get(name, '')).split()))
     if mdeps: lines.append(f'makedepends=({mdeps})')
     if 'noarch' not in extra: lines.append(f'subpackages=({name}-dev)')
     if system == 'meson':

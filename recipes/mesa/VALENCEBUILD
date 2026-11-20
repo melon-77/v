@@ -1,6 +1,6 @@
 pkgname=mesa
 pkgver=26.0.8
-pkgrel=5
+pkgrel=6
 pkgdesc="OpenGL, EGL, GBM and Vulkan drivers (AMD, Intel, NVIDIA nouveau, virtual, software)"
 # with LLVM: llvmpipe (fast software rendering for VMs and GPUs without a driver) and radeonsi's LLVM paths;
 # VALENCE_MESA_LLVM=disabled builds without it (radeonsi then uses only ACO)
@@ -10,7 +10,8 @@ url=https://www.mesa3d.org
 source=(mesa-26.0.8.tar.xz)
 makedepends=(libdrm-dev wayland-dev wayland-protocols libx11-dev libxext-dev libxfixes-dev libxshmfence-dev libxxf86vm-dev
   libxrandr-dev libxcb-dev expat-dev zlib-dev zstd-dev elfutils-dev libva-dev eudev-dev spirv-tools-dev glslang-dev
-  xorgproto)
+  xorgproto
+  libdisplay-info-dev llvm-dev xcb-util-keysyms-dev)
 subpackages=(mesa-dev mesa-va mesa-vulkan mesa-dri)
 # zink: OpenGL on Vulkan; on GTX 16/RTX 20 and newer Mesa uses it on top of NVK (mesa-nvk) instead of nouveau's own GL
 depends=(mesa-dri)

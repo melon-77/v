@@ -1,6 +1,6 @@
 pkgname=llvm
 pkgver=21.1.8
-pkgrel=3
+pkgrel=4
 pkgdesc="LLVM compiler infrastructure (shared library for Mesa's AMD and software renderers)"
 license="Apache-2.0 WITH LLVM-exception"
 url=https://llvm.org
@@ -11,16 +11,14 @@ subpackages=(llvm-dev llvm-libs)
 depends=(llvm-libs)
 pkgdesc_llvm_libs="LLVM shared library"
 # 32-bit (i686): only the X86 backend (Mesa's i915 and llvmpipe compile shaders with it; no AMDGPU there)
-_targets="X86;AMDGPU" _triple=x86_64-valence-linux-musl
+_targets="X86;AMDGPU" _triple=$TARGET
 [ "$APK_ARCH" != x86 ] || { _targets=X86 _triple=$TARGET; }
 build(){
-  # Configured as a native build: Valence binaries run on the build host, so the freshly built
-  # llvm-tblgen can be used directly instead of building a second, host copy of it.
-  cmake -G Ninja -S llvm -B build \
-    -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX -DCMAKE_SYSROOT=$SYSROOT \
-    -DCMAKE_FIND_ROOT_PATH=$SYSROOT -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-    -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
-    -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+  # A cross build. LLVM then builds the tablegens it runs a second time, for the build machine (build/NATIVE), with
+  # the build machine's own compiler: CROSS_TOOLCHAIN_FLAGS_NATIVE names it. On Melon this was configured as a native
+  # build, because a program built for musl ran on the build machine as it was; one built for Valence's glibc does not.
+  cmake_setup -S llvm -B build -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+    -DCROSS_TOOLCHAIN_FLAGS_NATIVE="-DCMAKE_C_COMPILER=gcc;-DCMAKE_CXX_COMPILER=g++" \
     -DLLVM_TARGETS_TO_BUILD="$_targets" -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON \
     -DLLVM_ENABLE_RTTI=ON -DLLVM_ENABLE_ASSERTIONS=OFF -DLLVM_ENABLE_ZLIB=ON -DLLVM_ENABLE_ZSTD=ON \
     -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_LIBEDIT=OFF -DLLVM_ENABLE_FFI=OFF -DLLVM_ENABLE_TERMINFO=OFF \
@@ -28,7 +26,9 @@ build(){
     -DLLVM_BUILD_TOOLS=ON -DLLVM_INSTALL_UTILS=OFF -DLLVM_ENABLE_BINDINGS=OFF \
     -DLLVM_HOST_TRIPLE=$_triple -DLLVM_DEFAULT_TARGET_TRIPLE=$_triple \
     -DLLVM_PARALLEL_LINK_JOBS=1
-  ninja -C build -j$JOBS
+  # (NATIVE is configured while ninja runs: the cross compiler and its flags stay out of that)
+  env -u CC -u CXX -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_SYSROOT_DIR -u PKG_CONFIG_PATH \
+    -u CONFIG_SITE ninja -C build -j$JOBS
 }
 package(){
   DESTDIR=$pkgdir ninja -C build install

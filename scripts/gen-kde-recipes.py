@@ -92,7 +92,7 @@ for n, extra in PLASMA:
 # pkgrel for recipes whose build changed without a version change (rule 6/31 in AGENTS.md).
 # REBUILD is added to every one: 1 = docs and translations are no longer deleted, the builder puts them in
 # <pkg>-doc and <pkg>-lang (ROADMAP phase 3)
-REBUILD = 1
+REBUILD = 2   # 2: built on glibc, each from the makedepends it declares (ROADMAP phase 6)
 # 1: Qt gained its xcb platform (Plasma 6 needs KDE's X11 integration headers even in a Wayland session)
 PKGREL = {n: 1 for n in ('qt6-qtbase kf6-kwindowsystem kf6-kguiaddons kf6-kdbusaddons kf6-kcrash kf6-kglobalaccel '
                          'kf6-kjobwidgets kf6-kidletime kf6-kstatusnotifieritem kf6-kio kf6-qqc2-desktop-style kf6-kdesu '
@@ -111,10 +111,45 @@ PKGREL['qca'] = 2   # relocatable CMake export (POST below)
 PKGREL['breeze'] = 1   # drops two unused sizes of the default "Next" wallpaper (POST below)
 PKGREL['qt6-qtbase'] = 3   # 2: CUPS print support (xdg-desktop-portal-kde); 3: Vulkan (kinfocenter; Mesa has RADV/ANV)
 
+# makedepends. Melon built these in ORDER, each into the one sysroot, and declared nothing; a clean build gets only
+# what is declared (AGENTS.md, "Building"). scripts/kde-deps.json is what each recipe was built against, worked out
+# by "scripts/suggest-makedepends.py INDEX --kde-json scripts/kde-deps.json" from the libraries Melon's packages
+# link and from each source's .kde-ci.yml. DEPS_MORE is what clean builds showed on top of that: what is used
+# without being linked (headers, protocol files, tools).
+DEPS = json.load(open(f'{M}/scripts/kde-deps.json')) if os.path.exists(f'{M}/scripts/kde-deps.json') else {}
+# What a -dev package needs beside it that the builder cannot see (it adds the -dev packages of the libraries the
+# recipe's libraries link): headers that are used without anything being linked.
+DEV_MORE = {
+    'qt6-qtbase': 'vulkan-headers',   # QtGui's Vulkan classes include vulkan.h
+    'libplasma': 'kf6-kirigami-dev',   # PlasmaConfig.cmake asks for KF6KirigamiPlatform (Plasma::Plasma names it; nothing links it)
+    'kf6-modemmanager-qt': 'modemmanager-dev',   # its targets name ModemManager's include directory
+    'kf6-kquickcharts': 'extra-cmake-modules',   # KF6QuickChartsConfig.cmake asks for ECM
+    'kf6-networkmanager-qt': 'networkmanager-dev',   # KF6NetworkManagerQtConfig.cmake looks libnm up with pkg-config, and its targets name libnm's include directory
+    'kwin': 'extra-cmake-modules',   # KWinConfig.cmake asks for ECM
+    'plasma5support': 'kf6-kservice-dev',   # Plasma5SupportConfig.cmake asks for KF6Service, which no library of it links
+}
+DEPS_MORE = {
+    'qt6-qtbase': 'vulkan-headers',   # FEATURE_vulkan: headers only, Qt loads libvulkan by name
+    'qt6-qttranslations': 'qt6-qtbase-dev qt6-qttools-dev',   # only data, so the index shows nothing: Qt6 itself and lrelease
+    'kf6-modemmanager-qt': 'modemmanager-dev',   # ModemManager's headers only (its constants): nothing is linked
+    'kf6-networkmanager-qt': 'networkmanager-dev',   # libnm's headers, found with pkg-config: nothing is linked
+    'kf6-kfilemetadata': 'attr-dev',   # FindXattr wants libattr's attr/xattr.h on glibc (musl had the functions and the header in libc)
+    'kf6-kio': 'qt6-qttools-dev',   # Qt6UiPlugin, for its Qt Designer plugin
+    'qt6-qtmultimedia': 'pipewire-dev',   # screen capture through PipeWire and the desktop portal: Qt loads libpipewire by name, so only the lost libQt6DBus showed it (compare-with-index.py)
+    'kactivitymanagerd': 'boost-headers',   # Boost's headers (nothing is linked)
+    'libksysguard': 'libnl3-dev',   # NL is REQUIRED at configure time though only the libpcap helper, which is not built, would link it
+    'plasma-workspace': 'libxcrypt-dev pipewire-dev',   # the users settings module links crypt(), which is libxcrypt's on glibc (musl had it in libc, so Melon's index shows nothing); the camera indicator applet is only built when PipeWire is found (compare-with-index.py: Melon's package had it)
+    'plasma-desktop': 'xkeyboard-config',   # the keyboard settings read xkb_base from xkeyboard-config's .pc file (data only, nothing is linked)
+    'xdg-desktop-portal-kde': 'cups-dev',   # its print dialog uses Qt's private print support, whose interface names Cups::Cups: only Qt's CUPS plugin links the library
+}
+
 # extra build() steps, run before configuring
 HOSTENV = ('unset CC CXX AR AS LD NM RANLIB STRIP OBJCOPY CFLAGS CXXFLAGS CPPFLAGS LDFLAGS PKG_CONFIG_LIBDIR '
            'PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_PATH CONFIG_SITE; ')
 PRE = {
+    # Breeze Icons runs two programs it has just built, and names them as $<TARGET_FILE:...>. CMake puts the emulator
+    # (scripts/valence-run) only in front of a command that is the bare name of a target, so name them that way.
+    'kf6-breeze-icons': "sed -i 's/\\$<TARGET_FILE:\\(generate-symbolic-dark\\|qrcAlias\\)>/\\1/' icons/CMakeLists.txt; ",
     # KSyntaxHighlighting builds its syntax index with katehighlightingindexer: build that for the build host first
     'kf6-syntax-highlighting': '( ' + HOSTENV + 'cmake -G Ninja -S . -B host-indexer -DKSYNTAXHIGHLIGHTING_USE_GUI=OFF '
             '-DBUILD_TESTING=OFF -DQT_MAJOR_VERSION=6 -DCMAKE_PREFIX_PATH=$M/hosttools/qt6 -DECM_DIR=$SYSROOT/usr/share/ECM/cmake '
@@ -157,7 +192,10 @@ def write(name, deb, args, kind):
     bdir = '$srcdir' if top == '.' else f'$srcdir/{top}'
     lines = [f'pkgname={name}', f'pkgver={s["ver"].split("+")[0]}', f'pkgrel={PKGREL.get(name, 0) + REBUILD}', f'pkgdesc="{name}"',
              'license="LGPL-2.1-or-later OR GPL-2.0-or-later (see sources)"', f'source=({link})', f'builddir={bdir}']
+    deps = sorted(set(DEPS.get(name, [])) | set(DEPS_MORE.get(name, '').split()))
+    if deps: lines.append('makedepends=(' + ' '.join(deps) + ')')
     if kind != 'noarch-kde': lines.append(f'subpackages=({name}-dev)')
+    if name in DEV_MORE: lines.append(f'depends_{name.replace("-", "_")}_dev=("{name}=$pkgver-r$pkgrel" {DEV_MORE[name]})')
     lines.append(f'build(){{ {PRE.get(name, "")}cmake_setup -B build {args}; ninja -C build -j$JOBS; }}')
     lines.append('package(){ DESTDIR=$pkgdir ninja -C build install;' + POST.get(name, '') + ' }')
     if kind == 'qt':

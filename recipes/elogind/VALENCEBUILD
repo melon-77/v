@@ -1,11 +1,11 @@
 pkgname=elogind
 pkgver=255.24
-pkgrel=6
+pkgrel=7
 pkgdesc="Session, seat and power management (logind without systemd)"
 license="LGPL-2.1-or-later"
 url=https://github.com/elogind/elogind
 source=(elogind-255.24.tar.gz)
-makedepends=(libcap-dev eudev-dev linux-pam-dev util-linux-dev)
+makedepends=(libcap-dev eudev-dev linux-pam-dev util-linux-dev acl-dev)
 subpackages=(elogind-dev libelogind)
 depends=(libelogind dbus)
 pkgdesc_libelogind="libelogind (sd-login compatible library)"

@@ -37,11 +37,8 @@ POOL = {  # binary .debs: source package, component
     'ca-certificates': ('ca-certificates', 'main'), 'ovmf-generic': ('edk2', 'main')}
 GIT = {  # tarball name prefix -> repo, tag pattern
     'apk-tools': ('https://github.com/alpinelinux/apk-tools', 'v{v}'),
-    'argp-standalone': ('https://github.com/ericonr/argp-standalone', '{v}'),
     'elogind': ('https://github.com/elogind/elogind', 'v{v}'),
     'eudev': ('https://github.com/eudev-project/eudev', 'v{v}'),
-    'musl-fts': ('https://github.com/void-linux/musl-fts', 'v{v}'),
-    'musl-obstack': ('https://github.com/void-linux/musl-obstack', 'v{v}'),
     'ripgrep': ('https://github.com/BurntSushi/ripgrep', '{v}'),
     'vulkan-headers': ('https://github.com/KhronosGroup/Vulkan-Headers', 'v{v}'),
     'spirv-llvm-translator': ('https://github.com/KhronosGroup/SPIRV-LLVM-Translator', 'v{v}'),

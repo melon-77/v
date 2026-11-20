@@ -1,10 +1,12 @@
 pkgname=linux-pam
 pkgver=1.7.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Pluggable Authentication Modules (needed by SDDM, the screen locker and elogind)"
 license="BSD-3-Clause OR GPL-2.0-or-later"
 url=https://github.com/linux-pam/linux-pam
 source=(Linux-PAM-1.7.0.tar.xz)
+# crypt() is libxcrypt's on glibc (pam_unix)
+makedepends=(libxcrypt-dev)
 builddir=$srcdir/Linux-PAM-1.7.0
 subpackages=(linux-pam-dev)
 build(){ meson_setup -Dexamples=false -Ddocs=disabled -Dselinux=disabled -Daudit=disabled -Deconf=disabled -Dnis=disabled \

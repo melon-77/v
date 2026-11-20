@@ -1,11 +1,13 @@
 pkgname=elfutils
 pkgver=0.194
-pkgrel=1
+pkgrel=2
 pkgdesc="ELF object file access library (libelf) and tools"
 license="GPL-3.0-or-later AND (GPL-2.0-or-later OR LGPL-3.0-or-later)"
 url=https://sourceware.org/elfutils
 source=(elfutils-0.194.tar.bz2)
-makedepends=(zlib-dev zstd-dev argp-standalone musl-fts-dev musl-obstack-dev)
+# (glibc has argp, fts and obstack itself: the three libraries that stood in for them on musl are gone, and so are
+# the two musl patches)
+makedepends=(zlib-dev zstd-dev libarchive-dev)
 subpackages=(elfutils-dev libelf)
 depends=(libelf)
 pkgdesc_libelf="libelf, libdw and libasm"
