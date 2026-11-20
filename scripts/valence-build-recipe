@@ -11,7 +11,7 @@ ARCH=$APK_ARCH
 OUT=$REPO/$ARCH
 mkdir -p "$OUT" "$WORK"
 # Bump when a change to this script alters what packages contain: scripts/valence-build then builds every recipe again.
-BUILD_EPOCH=1
+BUILD_EPOCH=2
 # What every build may use without naming it: the C library with its headers (and the kernel's), and the compiler's
 # runtime libraries, which a program that a build makes and then runs is started with (scripts/valence-run).
 BUILD_BASE="glibc-dev libgcc libstdc++"
@@ -190,6 +190,33 @@ else
     echo "$name: the sysroot could not be set up: a makedepends that no package in the repository provides?"; exit 1; }
 fi
 
+# ---------- programs in the sysroot can be run on the build machine ----------
+# A program in the sysroot was built for Valence: it wants Valence's loader and libraries, and the build machine's
+# own are older ones (scripts/valence-run). Builds run such programs all the time without saying so: CMake starts an
+# imported tool directly (KDE's kconfig_compiler; CMAKE_CROSSCOMPILING_EMULATOR is only put in front of programs
+# the same build made), meson a program it found through pkg-config (wayland-scanner), a configure script whatever
+# it found. On Melon they simply ran, because musl's loader had a name of its own. So every dynamically linked
+# program in the sysroot's program directories is put aside under $SYSROOT/.real and replaced by a two-line script
+# that starts it through Valence's loader, under its own name (--argv0). This is the sysroot only, done again for
+# every build; packages are not touched.
+wrap_sysroot_programs(){
+  local d f real elf; elf=$(printf '\177ELF')
+  for d in usr/bin usr/libexec usr/lib/qt6/bin usr/lib/qt6/libexec; do
+    [ ! -d "$SYSROOT/$d" ] || find "$SYSROOT/$d" -type f -perm -u+x 2>/dev/null
+  done | while IFS= read -r f; do
+    [ "$(head -c 4 "$f" 2>/dev/null)" = "$elf" ] || continue
+    $READELF -l "$f" 2>/dev/null | grep -q INTERP || continue      # (a static program runs as it is)
+    real=$SYSROOT/.real${f#$SYSROOT}
+    mkdir -p "${real%/*}" && cp -p "$f" "$real.tmp" && mv "$real.tmp" "$real" || continue
+    printf '#!/bin/sh\nexec %s --library-path %s --argv0 "$0" %s "$@"\n' "$SYSROOT/usr/lib/$LDSO" "$SYSROOT/usr/lib" "$real" > "$f.wrap.tmp"
+    chmod --reference="$f" "$f.wrap.tmp"; mv "$f.wrap.tmp" "$f"
+  done
+  # what was put aside for programs that have left the sysroot since
+  [ ! -d $SYSROOT/.real ] || find $SYSROOT/.real -type f | while IFS= read -r real; do
+    [ -e "$SYSROOT${real#$SYSROOT/.real}" ] || rm -f "$real"; done
+}
+wrap_sysroot_programs
+
 # ---------- fetch / unpack ----------
 # VALENCE_KEEP_SRC=1 resumes a failed build in the existing tree (no unpack, no patches, no prepare)
 # VALENCE_AUTO_RESUME=1 resumes by itself when an earlier run got past "prepare" (container restarts), but only with
@@ -283,6 +310,12 @@ elf_scan(){ # prints "P soname" / "N needed"
     $READELF -d "$f" 2>/dev/null | awk '/\(SONAME\)/{gsub(/[\[\]]/,"",$5);print "P",$5} /\(NEEDED\)/{gsub(/[\[\]]/,"",$5);print "N",$5}'
   done | sort -u; }
 
+lib_needed(){ # prints "N needed" for what the shared libraries (files with a SONAME) under $1 link; programs don't count
+  find "$1" -type f 2>/dev/null | while read -r f; do
+    case $(file -b "$f") in *ELF*dynamic*|*ELF*shared\ object*|*ELF*pie*) ;; *) continue;; esac
+    $READELF -d "$f" 2>/dev/null | awk '/\(SONAME\)/{so=1} /\(NEEDED\)/{gsub(/[\[\]]/,"",$5); n[$5]} END{if (so) for (x in n) print "N", x}'
+  done | sort -u; }
+
 make_apk(){ local sub=$1 dir=$2 desc=$3; shift 3; local deps=("$@")
   normalise "$dir"
   local scan provides=() sonames=() n
@@ -355,10 +388,38 @@ for kind in doc lang; do
   default_$kind
   if [ -n "$(find "$subpkgdir" ! -type d -print -quit)" ]; then auto+=("$sp"); else rm -rf "$subpkgdir"; fi
 done
+# ---------- what a -dev package needs beside it ----------
+# A library's headers and CMake files pull in those of the libraries it links: Qt6Gui's want OpenGL's and xkbcommon's,
+# a KDE framework's want the frameworks under it. In a clean sysroot those are only there if something asks for
+# them, so every -dev package of this recipe depends on the -dev packages of the libraries this recipe's packages
+# libraries link (not its programs), wherever such a -dev package was in this build's sysroot. (For libraries with a .pc file the pc: dependencies
+# in make_apk say the same thing; this covers the ones found through CMake or by name.) What a header needs without
+# linking it, another library's headers alone, still goes into depends_<x>_dev by hand.
+linked_dev=()
+if [ -f $SYSROOT/lib/apk/db/installed ]; then
+  mapfile -t linked_dev < <(
+    { echo "== db"; cat $SYSROOT/lib/apk/db/installed; echo "== needed"
+      for _d in "$pkgdir" $(for sp in "${subpackages[@]:-}" "${auto[@]:-}"; do [ -z "$sp" ] || echo "$pkgbase/$sp"; done); do lib_needed "$_d"; done
+    } | awk -v self="$pkgname" '
+      $0 == "== needed" { flush(); mode = 1; next }
+      $0 == "== db" { next }
+      function flush(   i, n, a) {
+        if (P == "") return
+        if (P ~ /-dev$/) dev[O] = (O in dev ? dev[O] " " : "") P
+        n = split(prov, a, " "); for (i = 1; i <= n; i++) { sub(/=.*/, "", a[i]); if (a[i] ~ /^so:/) owner[substr(a[i], 4)] = O }
+        P = ""; O = ""; prov = ""
+      }
+      mode != 1 && /^P:/ { flush(); P = substr($0, 3); O = P; next }
+      mode != 1 && /^o:/ { O = substr($0, 3); next }
+      mode != 1 && /^p:/ { prov = prov " " substr($0, 3); next }
+      mode == 1 && $1 == "N" { o = owner[$2]; if (o != "" && o != self && o != "glibc" && o != "gcc-runtime" && (o in dev)) print dev[o] }
+    ' | tr ' ' '\n' | sort -u)
+fi
 for sp in "${subpackages[@]:-}" "${auto[@]:-}"; do
   [ -z "$sp" ] && continue
   v=$(varname "$sp"); d="depends_${v}[@]"; dsc="pkgdesc_${v}"
   sdeps=(${!d:-}); [[ $sp == *-dev ]] && [ -z "${!d:-}" ] && sdeps=("$pkgname=$pkgver-r$pkgrel")
+  [[ $sp == *-dev ]] && [ ${#linked_dev[@]} -gt 0 ] && sdeps+=("${linked_dev[@]}")
   case $sp in "$pkgname-doc") what=documentation;; "$pkgname-lang") what=translations;; *) what=$sp;; esac
   make_apk "$sp" "$pkgbase/$sp" "${!dsc:-$pkgdesc ($what)}" "${sdeps[@]}"
 done
