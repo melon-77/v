@@ -120,8 +120,8 @@ iso-files/init          live initramfs /init
 branding/               the logo: valence-logo.svg and transparent PNGs, written by art/logo.py
 art/logo.py             the logo: a folded V in five greys (the owner's drawing; `--check` compares it with the
                         checksums of the files the owner approved). `art/logo.py --export branding` needs cairosvg
-art/desktop.py          the desktop's pictures and colours, made from the logo: wallpaper, splash, boot menu
-                        background, the logo's copies in recipes (icons, Calamares branding) and the colour scheme.
+art/desktop.py          the desktop's pictures (plain black: wallpaper, splash, boot menu background), the logo's
+                        copies in recipes (icons, Calamares branding) and the colour scheme (the logo's greys).
                         `art/desktop.py --export` writes them into valence-desktop and calamares-valence
 ROADMAP.md              the plan: what Valence keeps from Melon, what changes, the phases and their "done when"
 recipes/calamares-valence/    graphical installer: Calamares settings, branding, job configs, finishing scripts (stage 2)
@@ -786,13 +786,17 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
   "Install Valence" icon runs `valence-install-gui`, which starts Calamares as root through doas.
 - **Valence's look (valence-desktop):** Plasma style `valence`, colours ValenceDark, Konsole profile Valence, SDDM theme `valence`
   (its own QML, `usr/share/sddm/themes/valence`), GRUB theme `usr/share/valence/grub/themes/valence` (the desktop ISO uses
-  it too). The pictures and the colours are Valence's own and come from one script, `art/desktop.py`: the wallpaper is
-  the logo's V over and over on black, joined arm to arm in rows, with smaller V's in the empty spaces of the larger
-  ones and one V lit (`nested`; `woven` pushes the rows into each other instead); the splash screen, the login
-  screen's background and the boot menu's background (dimmed) are the same picture; and the colour scheme is the
-  logo's greys with a blue-grey accent, in Plasma, Konsole, the login screen, the boot menu and the installer. Melon's
-  planet and its green and orange are gone. Change a picture or a colour in the script and run
-  `art/desktop.py --export`, not in the files it writes. `/etc/issue` and `valencefetch` draw the same V.
+  it too). The pictures and the colours are Valence's own and come from one script, `art/desktop.py`. **The
+  wallpaper is plain black** (the owner, 20 November 2026: "make it a pure black wallpaper actually"), and so is
+  everything made from it: the login and lock screens show the wallpaper itself, the loading screen fades into it
+  under the word "Valence" and a progress bar, and the boot menu's background goes with them. The logo is on the
+  desktop as the launcher's button, the icons and the installer's pictures. The script keeps one drawing that can be
+  exported instead (`art/desktop.py --export gate`): a lattice gate woven from the logo's V, which the owner chose
+  from previews before choosing black. The colour scheme is the logo's greys with a blue-grey accent, in Plasma,
+  Konsole, the login screen, the boot menu and the installer. Melon's planet and its green and orange are gone.
+  Change a picture in the script and run `art/desktop.py --export`, not in the files it writes. The colours were
+  turned from Melon's into these once: to change one now, change it in the script's table and in the files
+  (`--export` leaves a colour it has already converted alone). `/etc/issue` and `valencefetch` draw the logo's V.
 - **Calamares makes the console installer's Btrfs layout.** `partition.conf` offers Btrfs only and lays an erased
   disk out as a 1 GiB FAT32 `/boot` and a Btrfs `/` (on UEFI Calamares puts its EFI system partition, `/boot/efi`,
   before them); `mount.conf` makes the subvolumes `@`, `@home` and `@log` and mounts them with

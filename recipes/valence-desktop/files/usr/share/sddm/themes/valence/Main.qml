@@ -1,4 +1,4 @@
-// Valence's login screen (SDDM, Qt 6): the wallpaper's V's, a clock, the user, a password field.
+// Valence's login screen (SDDM, Qt 6): the wallpaper, a clock, the user, a password field.
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts

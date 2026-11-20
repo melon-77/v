@@ -22,8 +22,8 @@ subvolumes, and apk takes a snapshot before every change to the installed packag
 NixOS's generations do: the boot menu lists every snapshot and starts the one chosen, and `valence-snapshot rollback`
 makes a snapshot the system that starts by default. The tests break an update on purpose both ways: one program,
 undone with the command; and init together with the kernel, after which the disk does not boot until the boot menu
-starts the snapshot from before it. On a plain disk on BIOS and on an encrypted one on UEFI. The desktop's pictures
-and colours are Valence's own: the logo's V repeated on black, and its greys. Phases 7 to 10 have not started.
+starts the snapshot from before it. On a plain disk on BIOS and on an encrypted one on UEFI. The desktop's look is
+Valence's own: a plain black wallpaper and the logo's greys. Phases 7 to 10 have not started.
 
 ## Why it exists
 
@@ -140,8 +140,8 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
 - [x] **6. The desktop.**
   Rebuild the Plasma 6 stack on glibc (Mesa, Qt, KDE Frameworks, Plasma, SDDM, PipeWire, the apps Melon
   ships). Plain Calamares branding, and Calamares makes the same Btrfs layout as the console installer. A normal
-  first boot. The wallpaper, the splash, login and boot menu pictures and the colour scheme are Valence's own, drawn
-  from the logo, in place of Melon's planet and its green and orange.
+  first boot. The wallpaper, the splash, login and boot menu pictures and the colour scheme are Valence's own (plain
+  black, and the logo's greys), in place of Melon's planet and its green and orange.
   *Done when:* the desktop ISO installs in QEMU on BIOS and UEFI and logs in to Plasma through SDDM.
   *Done (20 November 2026):* it does, with the console installer in the automated test and with Calamares by hand
   (BIOS, UEFI, and an encrypted disk). The first encrypted Calamares run left a disk that did not start, a fault in
@@ -224,9 +224,6 @@ These are open on purpose. Each gets settled before the phase that needs it.
   garbage); `/home` and `/var/log` are outside them, so going back leaves both alone; the filesystem is compressed
   with zstd at level 1; the command is called `valence-snapshot`. All were chosen while building phase 5 and are
   easy to change.
-- **The wallpaper.** Two drawings of the same idea exist, the logo's V joined into rows until it fills the screen:
-  `nested`, with smaller V's in the empty spaces of the larger ones, is on the desktop ISO; `woven` pushes the rows
-  into each other instead. `art/desktop.py --export woven` switches.
 - **PAM in the base system.** The desktop brings linux-pam (SDDM and the lock screen need it); the base has none,
   so a console login and `su` do not go through PAM. Move it into the base and rebuild shadow on it, or leave the
   console system without?
@@ -248,9 +245,14 @@ These are open on purpose. Each gets settled before the phase that needs it.
 
 ## Decided
 
-- **The logo is a folded V in greys, and the desktop is drawn from it** (19 and 20 November 2026). It replaced the
-  bismuth crystal. The wallpaper is that V "connecting to other V's until it fills the screen", on black, and the
-  colour scheme is the logo's greys.
+- **The wallpaper is plain black** (20 November 2026): "make it a pure black wallpaper actually". The login, lock
+  and loading screens and the boot menu follow it. Before that the owner had worked a drawing out over several
+  previews, a lattice gate woven from the logo's V ("imagine it as like a fence gate where the next row is flipped
+  compared to the other row", "too dense reduce the amount of v's by like half", "normal gate no logo"); the first
+  wallpaper on the desktop ISO, small V's set into the gaps of large ones, was not what was meant. The gate is kept
+  in `art/desktop.py` and one command exports it instead of black.
+- **The logo is a folded V in greys, and the desktop takes its colours from it** (19 and 20 November 2026). It
+  replaced the bismuth crystal. The colour scheme is the logo's greys.
 - **The system file is a wish list, not a specification** (19 November 2026). "A file you can throw in to just
   get what you want", rather than a reproducible system: it adds what it lists and removes nothing. (Phase 10.)
 - **Rollback: both a command and the boot menu, and "however Nix does it"** (19 November 2026). Taken as NixOS's

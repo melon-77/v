@@ -126,7 +126,7 @@ built over ten runs, as missing `makedepends` showed one after another. Then eve
 new `pkgrel`, and one run rebuilt those 153, LLVM, Mesa, Qt and all of KDE among them, in 2 hours 49 minutes without
 a failure: LLVM 35 minutes, qt6-qtdeclarative 22, plasma-workspace 11, KWin 9, qt6-qtbase 8, Mesa 5, and most of the
 rest a minute or less each. A run after it built nothing. The packages are 897 MB in 900 files. The desktop ISO takes
-35 seconds to make and is 806 MB; the console ISO is still 408 MB, with the same files as before but for the four
+35 seconds to make and is 804 MB; the console ISO is still 408 MB, with the same files as before but for the four
 that changed. Without KVM the `desktop` test takes 3 minutes and `desktop-install` 9 to 14 minutes on each of BIOS
 and UEFI (two rounds that night: 9 and 9, then 14 and 11).
 

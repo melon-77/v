@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """Valence's desktop pictures and colours, made from the logo (art/logo.py): the grey V and its greys.
 
-  desktop.py --preview <dir> [nested|woven]   the wallpaper and the boot menu's background as small PNGs, to look at
-  desktop.py --export [nested|woven]          writes everything into recipes/valence-desktop and
-                                              recipes/calamares-valence: the wallpaper in three sizes, the splash
-                                              picture, the boot menu's background and boxes, the logo as the icons
-                                              and the installer's pictures, and the colours of Plasma, Konsole, the
-                                              login screen, the boot menu and the installer's sidebar
+  desktop.py --export [black|gate]          writes the pictures into recipes/valence-desktop (the wallpaper in three
+                                            sizes, the splash picture, the boot menu's background and boxes) and
+                                            the logo into the icons and the installer's pictures
+  desktop.py --preview <dir> [black|gate]   the wallpaper and the boot menu's background as small PNGs, to look at
 
-The wallpaper is the logo over and over on black: V's joined arm to arm in rows, each row hanging its tips on the
-tops of the row below, with smaller V's in the empty spaces of the larger ones ("nested"; "woven" pushes the rows
-into each other instead), and one V lit: the logo.
+The wallpaper is plain black, and so are the pictures made from it: the login and lock screens show the wallpaper
+itself, the loading screen fades into it, and the boot menu's background goes with them. The owner, 20 November
+2026: "make it a pure black wallpaper actually". The logo is still on the desktop as the launcher's button, the
+icons and the installer's pictures.
 
-Needs cairosvg and Pillow, as logo.py --export does. The pictures are drawings, so every size is drawn, not scaled.
-What this replaces was Melon's: a planet, and a green and orange scheme (ROADMAP.md, phase 6). --export expects
-the colour files as Melon had them (git has them) and stops if it finds a colour it has no answer for.
+"gate" is a drawing that is kept in case it is wanted again: a lattice gate made of the logo's V. The owner had
+chosen it from previews an hour before choosing black ("imagine it as like a fence gate where the next row is
+flipped compared to the other row", "too dense reduce the amount of v's by like half", "normal gate no logo"). Rows
+of V's joined arm to arm alternate with rows of V's upside down. A flipped V sits straight under a V, point on
+point, so one arm of the V and the opposite arm of the flipped V make one straight slat. The slats cross in X's and
+leave black diamonds, and they are woven: over at one crossing, under at the next. No V is lit.
+
+Needs Pillow, and cairosvg for the logo's copies and the gate. Pictures are drawn at every size, not scaled.
+What this replaced was Melon's: a planet, and a green and orange scheme (ROADMAP.md, phase 6). The colour tables
+below turned Melon's colours into the logo's greys, once. --export leaves a colour that is already converted alone
+and stops at one it does not know, so to change a colour now, change it in the table and in the files it names.
 """
 import io, os, re, shutil, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); M = os.path.dirname(HERE)
@@ -23,53 +30,58 @@ import logo
 
 BLACK = (0, 0, 0)
 G1, G2, G3, G4, G5 = [tuple(int(h[i:i + 2], 16) for i in (1, 3, 5)) for h in logo.GRAPHITE]   # lightest to darkest
-STEP, RISE = 290, 350      # the next V in a row shares an arm's top with this one; the next row hangs its tips on those tops
+STEP = 290                 # the next V in a row shares an arm's top with this one
+ACROSS = 5.66              # V's across the screen (8 was "too dense": half as many V's is each one 1.41 times larger)
+LEVELS = 12                # steps of brightness between the edge of the picture and its brightest place
 
 
 # ------------------------------------------------------------------------------------------------ pictures
-def one(x, y, s, o):
-    # (fill-opacity on each half, not opacity on the group: a group's opacity makes the renderer paint a whole
-    # screen-sized layer for every V)
-    return (f'<g transform="translate({x:.2f} {y:.2f}) scale({s:.5f})"><polygon fill="url(#g0)" fill-opacity="{o:.3f}" points="{logo.LEFT}"/>'
-            f'<polygon fill="url(#g1)" fill-opacity="{o:.3f}" points="{logo.RIGHT}"/></g>')
+def shade(c, f): return '#%02x%02x%02x' % tuple(min(255, int(int(c[i:i + 2], 16) * f)) for i in (1, 3, 5))
 
 
-def inside(x, y, s, o, depth, out):
-    """The V's that sit in the empty spaces around the V whose 512 box starts at (x, y) with scale s: one in its
-    notch, and one in the gap above the place where it meets its right-hand neighbour, whose tip reaches down into
-    the notch of the V below. Each of those gets the same, smaller."""
-    if depth == 0 or o < 0.02: return
-    for c, cx, cy in ((0.36, 256, 104), (0.37, 401, 328)):
-        nx, ny, ns, no = x + s * (cx - 256 * c), y + s * (cy - 92 * c), s * c, o * 0.80
-        out.append(one(nx, ny, ns, no))
-        inside(nx, ny, ns, no, depth - 1, out)
+def arm(side, x, y, s, k, flip=False, clip=''):
+    """One arm of a V whose 512 box starts at (x, y), in brightness step k. flip turns the V upside down in place:
+    its drawing runs from 92 to 446 in the box either way."""
+    t = f'translate({x:.2f} {y + 538 * s:.2f}) scale({s:.5f} {-s:.5f})' if flip else f'translate({x:.2f} {y:.2f}) scale({s:.5f})'
+    return f'<polygon transform="{t}" fill="url(#{"a" if side == "l" else "b"}{k})"{clip} points="{logo.LEFT if side == "l" else logo.RIGHT}"/>'
 
 
-def picture(w, h, variant="nested", across=8.0, focus=(0.66, 0.50), dim=1.0):
-    """dim < 1 makes the field quieter (the boot menu puts text on it)."""
+def picture(w, h, across=ACROSS, focus=(0.66, 0.50), dim=1.0):
+    """The lattice gate (the "gate" wallpaper). dim < 1 makes it quieter (the boot menu puts text on it).
+
+    The numbers come from the V itself. Its arms meet in a fold from 318 to 446, so a flipped V 226 below a V (the
+    depth of the notch) has its fold exactly on the V's fold, and the arm of one runs on into the opposite arm of
+    the other. The flipped V's feet are then 580 below the V's tops, where the next row of V's starts.
+    The weave: at a fold the slat that runs down to the right is on top (the V's left arm over the flipped V's left
+    arm, the flipped V's right arm over the V's right arm); where arms share an end the other slat is (the V's right
+    arm over the next V's left, the next flipped V's left foot over this one's right). That order goes round in a
+    circle, so the flipped V's left arm is drawn twice: whole at the bottom of the pile, and its foot again on top."""
     s = w / (STEP * across)
-    P = STEP * s
-    H = (RISE if variant == "nested" else RISE / 2) * s
-    fx, fy = focus[0] * w, focus[1] * h
-    ox, oy = fx - 256 * s, fy - 269 * s           # where the lit V's 512 box starts
-    field, small = [], []
-    j0, j1 = int(-oy // H) - 3, int((h - oy) // H) + 2
-    for j in range(j0, j1 + 1):
-        off = (j % 2) * (STEP / 2) * s
-        i0, i1 = int(-(ox + off) // P) - 3, int((w - ox - off) // P) + 2
-        for i in range(i0, i1 + 1):
-            x, y = ox + off + i * P, oy + j * H
-            d = (((x - ox) / P) ** 2 + ((y - oy) / (RISE * s)) ** 2) ** 0.5     # distance from the lit V, in V's
-            lit = d < 0.01
-            o = (0.10 + 0.34 * 2.718281828 ** (-d / 1.6)) * dim
-            if not lit: field.append(one(x, y, s, o if variant == "nested" else o * 0.75))
-            if variant == "nested":
-                kids = []
-                inside(x, y, s, o, 2, kids)
-                small += kids[3:] if lit else kids        # (the lit V keeps its notch empty: it is the logo)
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}"><defs>'
-            + logo.gradients(logo.ON_DARK) + f'</defs><rect width="{w}" height="{h}" fill="#000000"/>'
-            + ''.join(field) + ''.join(small) + one(ox, oy, s, 1.0) + '</svg>')
+    P, H = STEP * s, 580 * s
+    ox, oy = focus[0] * w - 256 * s, focus[1] * h - 269 * s          # the V in the brightest place
+    defs = ''.join(logo.gradients(tuple(shade(c, (0.13 + 0.50 * k / (LEVELS - 1)) * dim) for c in logo.ON_DARK), ids=(f'a{k}', f'b{k}'))
+                   for k in range(LEVELS)) + '<clipPath id="foot"><rect x="0" y="60" width="512" height="170"/></clipPath>'
+
+    def step(x, y):                                                   # brightness by distance from that V, in V's
+        d = (((x - ox) / P) ** 2 + ((y - oy) / (350 * s)) ** 2) ** 0.5
+        return max(0, min(LEVELS - 1, round(2.718281828 ** (-d / 1.7) * (LEVELS - 1))))
+    under, vl, vr, fr, feet = [], [], [], [], []
+    for j in range(int(-oy // H) - 2, int((h - oy) // H) + 2):
+        for i in range(int(-ox // P) - 3, int((w - ox) // P) + 3):
+            x, y = ox + i * P, oy + j * H
+            k = step(x, y); vl.append(arm('l', x, y, s, k)); vr.append(arm('r', x, y, s, k))
+            yf = y + 226 * s; k = step(x, yf)
+            under.append(arm('l', x, yf, s, k, True)); fr.append(arm('r', x, yf, s, k, True))
+            feet.append(arm('l', x, yf, s, k, True, ' clip-path="url(#foot)"'))
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}"><defs>{defs}</defs>'
+            f'<rect width="{w}" height="{h}" fill="#000000"/>' + ''.join(under + vl + vr + fr + feet) + '</svg>')
+
+
+def wall(w, h, variant, dim=1.0, out=None):
+    """The wallpaper as an image of w by h (or of the size `out`, drawn as for w by h)."""
+    from PIL import Image
+    if variant == 'black': return Image.new('RGB', out or (w, h), (0, 0, 0))
+    return render(picture(w, h, dim=dim), *(out or (w, h)))
 
 
 def render(svg, w, h):
@@ -122,11 +134,12 @@ def hexs(c): return '#%02x%02x%02x' % tuple(c)
 
 def recolour(path, table, strict=True):
     """Every 'Key=r,g,b' in an ini file through the table."""
-    missing = set()
+    missing, done = set(), set(table.values())            # (a colour that is already a new one stays)
     def one_(m):
         c = tuple(int(x) for x in m.group(2).split(','))
         if c not in table:
-            missing.add(c); return m.group(0)
+            if c not in done: missing.add(c)
+            return m.group(0)
         return m.group(1) + ','.join(map(str, table[c]))
     s = open(path, encoding='utf-8').read()
     s2 = re.sub(r'^(\w+=)(\d+,\d+,\d+)$', one_, s, flags=re.M)
@@ -143,7 +156,7 @@ def swap(path, pairs):
     open(path, 'w', encoding='utf-8').write(s)
 
 
-def export(variant):
+def export(variant='black'):
     logo.check()
     D = f'{M}/recipes/valence-desktop/files/usr/share'
     E = f'{M}/recipes/valence-desktop/files/etc'
@@ -151,11 +164,11 @@ def export(variant):
     # ---- pictures
     wp = f'{D}/wallpapers/valence/contents'
     for w, h in ((1920, 1080), (2560, 1440), (3840, 2160)):
-        render(picture(w, h, variant), w, h).save(f'{wp}/images/{w}x{h}.jpg', quality=92, optimize=True)
-    render(picture(1600, 900, variant), 400, 225).save(f'{wp}/screenshot.jpg', quality=90, optimize=True)
-    render(picture(1920, 1080, variant), 1920, 1080).save(f'{D}/plasma/look-and-feel/org.valence.desktop/contents/splash/images/splash.jpg', quality=92, optimize=True)
+        wall(w, h, variant).save(f'{wp}/images/{w}x{h}.jpg', quality=92, optimize=True)
+    wall(1600, 900, variant, out=(400, 225)).save(f'{wp}/screenshot.jpg', quality=90, optimize=True)
+    wall(1920, 1080, variant).save(f'{D}/plasma/look-and-feel/org.valence.desktop/contents/splash/images/splash.jpg', quality=92, optimize=True)
     g = f'{D}/valence/grub/themes/valence'
-    render(picture(1920, 1080, variant, dim=0.55), 1920, 1080).save(f'{g}/background.png', optimize=True)
+    wall(1920, 1080, variant, dim=0.55).save(f'{g}/background.png', optimize=True)
     nine(g, 'menu', 14, (10, 11, 15, 220), (255, 255, 255, 30))
     nine(g, 'select', 8, G2 + (255,))
     # ---- the logo, wherever a copy of it is shipped
@@ -177,7 +190,7 @@ def export(variant):
     swap(f'{D}/plasma/look-and-feel/org.valence.desktop/contents/defaults', [('AccentColor=111,191,74', f'AccentColor={acc}')])
     swap(f'{D}/sddm/themes/valence/theme.conf', [('accent=#6fbf4a', f'accent={hexs(G2)}')])
     swap(f'{D}/sddm/themes/valence/Main.qml', [
-        ("the Valence planet,", "the wallpaper's V's,"),
+        ("the wallpaper's V's,", "the wallpaper,"), ("the Valence planet,", "the wallpaper,"),
         ('color: "#0a0e0c"', 'color: "#000000"'), ('config.accent || "#6fbf4a"', f'config.accent || "{hexs(G2)}"'),
         ('readonly property color text: "#eef6e8"', f'readonly property color text: "{hexs(G1)}"'),
         ('"#b0070a08"', '"#b0000000"'), ('"#60070a08"', '"#60000000"'), ('"#10070a08"', '"#10000000"'),
@@ -217,12 +230,11 @@ def export(variant):
 
 if __name__ == '__main__':
     a = sys.argv[1:]
-    variant = a.pop() if a and a[-1] in ('nested', 'woven') else 'nested'
+    variant = a.pop() if a and a[-1] in ('black', 'gate') else 'black'
     if len(a) == 2 and a[0] == '--preview':
-        from PIL import Image
         os.makedirs(a[1], exist_ok=True)
-        render(picture(1920, 1080, variant), 1920, 1080).resize((1280, 720), Image.LANCZOS).save(os.path.join(a[1], 'wallpaper.png'))
-        render(picture(1920, 1080, variant, dim=0.55), 1920, 1080).resize((1280, 720), Image.LANCZOS).save(os.path.join(a[1], 'bootmenu.png'))
+        wall(1920, 1080, variant, out=(1280, 720)).save(os.path.join(a[1], 'wallpaper.png'))
+        wall(1920, 1080, variant, dim=0.55, out=(1280, 720)).save(os.path.join(a[1], 'bootmenu.png'))
     elif a == ['--export']:
         export(variant)
     else:

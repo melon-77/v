@@ -21,7 +21,7 @@ an order the builder works out from the recipes, each in a sysroot holding only 
 `apk add docs` from a package repository adds them, with `man`, for everything installed. Its root is Btrfs,
 whichever installer made it, and apk takes a snapshot before every change to the installed packages; the boot menu
 starts any of them, and a command makes one the system again ("Snapshots and rolling back" below). The desktop's
-pictures and colours are Valence's own: the logo's V on black, and its greys. The rest is still as inherited from
+look is Valence's own: a plain black wallpaper and the logo's greys. The rest is still as inherited from
 Melon: the 106 recipes beyond the two ISOs (the developer tools, the NVIDIA packages, the 32-bit edition's LXQt
 desktop: not yet rebuilt on glibc, with Melon's musl workarounds still in them), the 32-bit edition, and dated
 status notes that are Melon's history. Where this file, `AGENTS.md` and `BUILDING.md` describe those parts, they
@@ -57,7 +57,7 @@ recipes/<pkg>/VALENCEBUILD   package recipes (APKBUILD-like)
 iso-files/init         live initramfs init
 branding/              the logo (SVG and PNGs)
 art/logo.py            the logo: a folded V in greys
-art/desktop.py         the desktop's wallpaper, splash and boot pictures and its colours, made from the logo
+art/desktop.py         the desktop's wallpaper, splash and boot pictures (plain black) and its colours (the logo's greys)
 ROADMAP.md             the plan and its phases
 recipes/calamares-valence/   graphical installer: Calamares settings, branding and finishing scripts
 ```
