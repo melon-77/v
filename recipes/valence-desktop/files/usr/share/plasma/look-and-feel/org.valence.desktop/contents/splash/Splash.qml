@@ -1,14 +1,14 @@
 import QtQuick
 
-// Valence's loading screen: the planet from the default wallpaper eases up into place while Plasma starts,
+// Valence's loading screen: the default wallpaper eases into place while Plasma starts,
 // so the desktop takes over from the same picture; a thin progress bar follows KSplash's stages (1-6)
 Rectangle {
     id: root
-    color: "#0a0e0c"
+    color: "#000000"
     property int stage
 
     Image {
-        id: planet
+        id: picture
         anchors.fill: parent
         source: "images/splash.jpg"
         fillMode: Image.PreserveAspectCrop
@@ -18,8 +18,8 @@ Rectangle {
         Component.onCompleted: rise.start()
         ParallelAnimation {
             id: rise
-            OpacityAnimator { target: planet; from: 0; to: 1; duration: 900; easing.type: Easing.OutQuad }
-            ScaleAnimator { target: planet; from: 1.08; to: 1.0; duration: 3200; easing.type: Easing.OutCubic }
+            OpacityAnimator { target: picture; from: 0; to: 1; duration: 900; easing.type: Easing.OutQuad }
+            ScaleAnimator { target: picture; from: 1.08; to: 1.0; duration: 3200; easing.type: Easing.OutCubic }
         }
     }
 
@@ -35,7 +35,7 @@ Rectangle {
             readonly property int px: Math.round(root.height * 0.022)
             anchors.horizontalCenter: parent.horizontalCenter
             text: "Valence"
-            color: "#d6ecc8"
+            color: "#c3c9d6"
             opacity: 0.85
             font.pixelSize: px
             font.letterSpacing: px * 0.45
@@ -46,7 +46,7 @@ Rectangle {
             color: "#33ffffff"
             Rectangle {
                 width: parent.width * Math.min(1, root.stage / 6); height: parent.height; radius: 1.5
-                color: "#8fd46a"
+                color: "#c3c9d6"
                 Behavior on width { NumberAnimation { duration: 450; easing.type: Easing.OutCubic } }
             }
         }

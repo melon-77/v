@@ -1,21 +1,21 @@
 [Background]
-Color=16,21,18
+Color=8,9,12
 
 [BackgroundIntense]
-Color=22,30,25
+Color=20,21,27
 
 [Foreground]
-Color=230,241,222
+Color=228,231,238
 
 [ForegroundIntense]
-Color=230,241,222
+Color=228,231,238
 Bold=true
 
 [Color0]
-Color=24,30,26
+Color=20,21,27
 
 [Color0Intense]
-Color=72,86,76
+Color=89,96,122
 
 [Color1]
 Color=218,68,83
@@ -24,10 +24,10 @@ Color=218,68,83
 Color=255,110,120
 
 [Color2]
-Color=111,191,74
+Color=98,200,140
 
 [Color2Intense]
-Color=150,220,110
+Color=140,228,176
 
 [Color3]
 Color=240,196,96
@@ -54,10 +54,10 @@ Color=94,190,170
 Color=130,220,200
 
 [Color7]
-Color=208,222,200
+Color=195,201,214
 
 [Color7Intense]
-Color=248,252,244
+Color=242,244,248
 
 [General]
 Description=Valence

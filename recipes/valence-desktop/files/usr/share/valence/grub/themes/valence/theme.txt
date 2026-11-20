@@ -1,7 +1,7 @@
 # Valence's boot menu
 title-text: ""
 desktop-image: "background.png"
-desktop-color: "#0a0e0c"
+desktop-color: "#000000"
 terminal-font: "DejaVu Sans Mono Regular 16"
 terminal-box: "menu_*.png"
 
@@ -12,8 +12,8 @@ terminal-box: "menu_*.png"
   height = 40%
   item_font = "Noto Sans Regular 24"
   selected_item_font = "Noto Sans Bold 24"
-  item_color = "#d6e8cc"
-  selected_item_color = "#0b150c"
+  item_color = "#c3c9d6"
+  selected_item_color = "#0b0c10"
   item_height = 44
   item_padding = 18
   item_spacing = 16
@@ -32,7 +32,7 @@ terminal-box: "menu_*.png"
   height = 28
   text = "Starting in %d seconds"
   font = "Noto Sans Regular 18"
-  color = "#a8c2a8"
+  color = "#8d95a8"
 }
 + label {
   left = 7%
@@ -41,5 +41,5 @@ terminal-box: "menu_*.png"
   height = 24
   text = "Up/Down to choose  -  Enter to start  -  e to edit  -  c for a command line"
   font = "Noto Sans Regular 16"
-  color = "#7f9a82"
+  color = "#6f7690"
 }

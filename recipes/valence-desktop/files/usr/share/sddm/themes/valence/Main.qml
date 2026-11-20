@@ -1,4 +1,4 @@
-// Valence's login screen (SDDM, Qt 6): the Valence planet, a clock, the user, a password field.
+// Valence's login screen (SDDM, Qt 6): the wallpaper's V's, a clock, the user, a password field.
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
@@ -6,10 +6,10 @@ import QtQuick.Layouts
 Rectangle {
     id: root
     width: 1920; height: 1080
-    color: "#0a0e0c"
+    color: "#000000"
 
-    readonly property color accent: config.accent || "#6fbf4a"
-    readonly property color text: "#eef6e8"
+    readonly property color accent: config.accent || "#c3c9d6"
+    readonly property color text: "#f2f4f8"
     property string message: ""
 
     Connections {
@@ -28,9 +28,9 @@ Rectangle {
         anchors.fill: parent
         gradient: Gradient {
             orientation: Gradient.Horizontal
-            GradientStop { position: 0.0; color: "#b0070a08" }
-            GradientStop { position: 0.55; color: "#60070a08" }
-            GradientStop { position: 1.0; color: "#10070a08" }
+            GradientStop { position: 0.0; color: "#b0000000" }
+            GradientStop { position: 0.55; color: "#60000000" }
+            GradientStop { position: 1.0; color: "#10000000" }
         }
     }
 
@@ -79,14 +79,14 @@ Rectangle {
             Layout.topMargin: 12
             echoMode: TextInput.Password
             placeholderText: "Password"
-            placeholderTextColor: "#99b0a0"
+            placeholderTextColor: "#8d95a8"
             color: root.text
             font.pixelSize: root.height * 0.022
             padding: root.height * 0.014
             focus: true
             background: Rectangle {
                 radius: 12
-                color: "#99101612"
+                color: "#99101116"
                 border.color: password.activeFocus ? root.accent : "#40ffffff"
                 border.width: 2
             }
@@ -108,7 +108,7 @@ Rectangle {
             text: "Log in"
             font.pixelSize: root.height * 0.02
             onClicked: root.login()
-            contentItem: Text { text: go.text; font: go.font; color: "#0b150c"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+            contentItem: Text { text: go.text; font: go.font; color: "#0b0c10"; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
             background: Rectangle { implicitWidth: root.height * 0.14; implicitHeight: root.height * 0.05; radius: 12; color: go.down ? Qt.darker(root.accent, 1.2) : root.accent }
         }
     }
@@ -125,7 +125,7 @@ Rectangle {
             currentIndex: sessionModel.lastIndex >= 0 ? sessionModel.lastIndex : 0
             font.pixelSize: root.height * 0.016
             implicitWidth: root.height * 0.3
-            background: Rectangle { radius: 8; color: "#66101612"; border.color: "#30ffffff" }
+            background: Rectangle { radius: 8; color: "#66101116"; border.color: "#30ffffff" }
             contentItem: Text { text: session.displayText; color: root.text; font: session.font; leftPadding: 10; verticalAlignment: Text.AlignVCenter }
         }
         Item { Layout.fillWidth: true }

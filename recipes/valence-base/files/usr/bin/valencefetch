@@ -1,44 +1,34 @@
 #!/bin/sh
-# valencefetch: system summary next to Valence's mark, a bismuth hopper crystal seen straight down.
+# valencefetch: system summary next to Valence's mark, the grey V.
 #   valencefetch            logo + info
 #   valencefetch --art      logo only
 . /etc/os-release 2>/dev/null
 E=$(printf '\033')
 R="${E}[0m" B="${E}[1m" D="${E}[2m"
-P="${E}[1;38;5;212m"      # rose (labels)
-O="${E}[38;5;221m"        # gold (the name)
+P="${E}[1;38;5;146m"      # the labels: the logo's greys have this cool tint
+O="${E}[38;5;255m"        # the name
 
-# ---------------------------------------------------------------- the crystal
-# The drawing of branding/valence-logo.svg (art/logo.py) at 38 by 38 pixels: three square terraces stepping down to
-# a floor, coloured along bismuth's oxide ramp (gold, rose, violet, blue, teal). The walls under the top and left
-# edges are in shade, the other two catch the light.
+# ---------------------------------------------------------------- the V
+# The drawing of branding/valence-logo.svg (art/logo.py): the V is 408 by 354 in its 512 box, here 38 pixels wide
+# and 33 high. Each arm has the drawing's own run of greys, darker on the left arm and lighter on the right; a pixel
+# is filled when most of it (5 of 9 points) lies inside the V.
 art=$(awk -v E="$E" '
 function clamp(v){ return v<0?0:(v>1?1:v) }
 function mix(c1,c2,t,   a,b){ split(c1,a,";"); split(c2,b,";"); t=clamp(t)
   return int(a[1]+(b[1]-a[1])*t) ";" int(a[2]+(b[2]-a[2])*t) ";" int(a[3]+(b[3]-a[3])*t) }
+function arm(x,y){ return y<=446 && x<=256 && x>=52+(y-92)*204/354 && (y>318 || x<=170+(y-92)*86/226) }
 BEGIN{
-  W=38; PH=38                         # pixels: 38 wide, 38 tall (two per text row via half blocks)
-  S[0]="245;197;53"; S[1]="238;93;140"; S[2]="138;92;240"; S[3]="58;134;242"; S[4]="24;185;167"
-  DEEP="26;18;64"; WHITE="255;255;255"
-  # how far in from the edge each band starts, in pixels: terrace, wall, terrace, wall, terrace, wall, floor, end
-  split("0 4 6 10 12 15 17 19", at, " ")
+  W=38; PH=34                         # pixels: 38 wide, 34 tall (two per text row via half blocks)
+  L0="195;201;214"; L1="89;96;122"; R0="242;244;248"; R1="141;149;168"
+  sc=408/W
   for(py=0;py<PH;py++) for(px=0;px<W;px++){
-    dt=py; dl=px; dr=W-1-px; db=PH-1-py
-    m=dt; if(dl<m) m=dl; if(dr<m) m=dr; if(db<m) m=db
-    for(k=1;k<7;k++) if(m<at[k+1]) break             # k: odd = a terrace (7 = the floor), even = a wall
-    lvl=int((k-1)/2)
-    if(k%2==1){                                       # flat: a gradient along its own diagonal
-      m0=at[k]; span=2*(W-1-2*m0)
-      c=mix(mix(S[lvl],WHITE,0.10), S[lvl+1], ((px-m0)+(py-m0))/span)
-    } else {                                          # a wall down to the next terrace
-      b=S[lvl+1]
-      if(dt==m && dl>m)       c=mix(b,DEEP,0.50)      # under the top edge: in shade
-      else if(dl==m && db>m)  c=mix(b,DEEP,0.66)      # under the left edge: deeper shade
-      else if(dr==m && db>m)  c=mix(b,WHITE,0.58)     # right: lit
-      else                    c=mix(b,WHITE,0.38)     # bottom: lit
+    nl=0; nr=0; tl=0; tr=0
+    for(sy=0;sy<3;sy++) for(sx=0;sx<3;sx++){
+      x=52+(px+(sx+0.5)/3)*sc; y=92+(py+(sy+0.5)/3)*sc
+      if(arm(x,y))          { nl++; tl+=((x-52)/204+(y-92)/354)/2 }
+      else if(arm(512-x,y)) { nr++; tr+=((460-x)/204+(y-92)/354)/2 }
     }
-    sheen=0.26*(1-2*(px+py)/(W+PH-2)); if(sheen>0) c=mix(c,WHITE,sheen)
-    col[py,px]=c
+    if(nl+nr>=5) col[py,px]=(nl>=nr) ? mix(L0,L1,tl/nl) : mix(R0,R1,tr/nr)
   }
   for(row=0;row<PH/2;row++){
     line=""

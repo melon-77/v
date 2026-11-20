@@ -178,7 +178,8 @@ mount -t vfat -o umask=0077 "$BOOTP" $TARGET/boot
 [ $MODE = alongside ] && { mkdir -p $TARGET/boot/efi; mount -t vfat -o umask=0077 "$ESP" $TARGET/boot/efi; }
 say "Copying the Valence system"
 mkdir -p /run/valence-src; mount -t squashfs -o loop,ro "$SYSIMG" /run/valence-src
-tar -C /run/valence-src --exclude=./boot -cf - . | tar -C $TARGET -xpf -
+# (--xattrs: file capabilities are extended attributes, and the desktop's packages have some)
+tar -C /run/valence-src --exclude=./boot --xattrs --xattrs-include='*' -cf - . | tar -C $TARGET --xattrs --xattrs-include='*' -xpf -
 for f in /run/valence-src/boot/*; do [ -f "$f" ] && cp "$f" $TARGET/boot/; done
 umount /run/valence-src
 mkdir -p $TARGET/dev $TARGET/proc $TARGET/sys $TARGET/run
