@@ -57,8 +57,9 @@ build 19041 or newer.
 
 7. **There is no KVM on Windows 10, or on a CPU Windows can't nest on.** `/dev/kvm` may exist and QEMU still says
    "failed to initialize kvm: No such device" (`wsl` itself prints "Nested virtualization is not supported on this machine").
-   `qemu-test.py` then uses software emulation (AGENTS.md, "Testing"): the console install and boot tests pass in about a minute,
-   the Plasma desktop tests were not usable on that laptop.
+   `qemu-test.py` then uses software emulation (AGENTS.md, "Testing"): the console install and boot tests pass in about a minute.
+   The Plasma desktop tests were not usable on that laptop in October 2026; on the i5-12450H below they take 3 minutes
+   (`desktop`) and 9 to 14 (`desktop-install`).
 
 8. A USB stick (or any drive Windows doesn't auto-mount in WSL) needs a mount: `D: /mnt/d drvfs defaults,nofail 0 0` in `/etc/fstab`.
    The signing key can stay on it and be used in place (`VALENCE_SIGN_KEY`, "The signing key" below). Keep the offline **backup** key
@@ -120,6 +121,14 @@ With the Btrfs root and snapshots (phase 5, the same day): btrfs-progs is new, a
 only it used, is no longer built for the console ISO, which is now 63 recipes built and 58 on it, and 408 MB. The kernel was
 rebuilt with Btrfs built in (13 minutes). There are eight console tests now: the two `rollback` ones start the VM
 five times each, and the eight took 13 minutes.
+The desktop (phase 6, 20 November 2026): `--edition desktop` is 345 recipes with the console's. They were first
+built over ten runs, as missing `makedepends` showed one after another. Then every recipe that had changed got its
+new `pkgrel`, and one run rebuilt those 153, LLVM, Mesa, Qt and all of KDE among them, in 2 hours 49 minutes without
+a failure: LLVM 35 minutes, qt6-qtdeclarative 22, plasma-workspace 11, KWin 9, qt6-qtbase 8, Mesa 5, and most of the
+rest a minute or less each. A run after it built nothing. The packages are 897 MB in 900 files. The desktop ISO takes
+35 seconds to make and is 806 MB; the console ISO is still 408 MB, with the same files as before but for the four
+that changed. Without KVM the `desktop` test takes 3 minutes and `desktop-install` 9 to 14 minutes on each of BIOS
+and UEFI (two rounds that night: 9 and 9, then 14 and 11).
 
 Every time in the paragraphs before "On glibc" is from a musl build.
 

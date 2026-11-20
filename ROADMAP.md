@@ -4,25 +4,26 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 [Melon Linux](https://github.com/melon-77/melon-os): the same engineering, without the jokes, and with a handful
 of fixes where Melon chose small over sensible.
 
-Status, 19 November 2026: phases 1 to 3 and 5 are done. The base system is on glibc 2.44 and its commands are the
-GNU tools: the cross toolchain, the 58 recipes the console ISO is made of and the ISO build. The ISO passes all
-eight console tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next
+Status, 20 November 2026: phases 1 to 3, 5 and 6 are done. The system is on glibc 2.44 and its commands are the
+GNU tools. Both ISOs build: the console ISO (58 recipes on it) and the Plasma desktop ISO (345 recipes with the
+console's: LLVM, Mesa, Qt 6, KDE Frameworks and Plasma 6, SDDM, PipeWire, Flatpak, Calamares). The console ISO passes
+its eight tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next
 to Windows on UEFI, and two rollback tests), and the installed system adds a package from a repository over the
-network. BusyBox stays for `/bin/sh`, the initramfs and the small daemons. Documentation and translations are
-packages of their own: the builder makes `<pkg>-doc` and `<pkg>-lang` from what a recipe installs, no recipe deletes
-them any more, and a fresh install has no documentation files until `apk add docs` (or one `-doc` package) brings
-them, with `man`. The recipes beyond the base (the desktop, the developer tools) have not been rebuilt on glibc, so
-their `-doc` and `-lang` packages do not exist yet. Phase 4's builder is written and in use for the base: from an
-empty repository, one command built the console system in an order worked out from the recipes, each package in a
-clean sysroot, and a second run built nothing. It cannot rebuild the whole repository yet, because the recipes beyond
-the base do not build on glibc and the desktop's generated recipes do not say what they need: that part of phase 4
-waits for phase 6. The console installer makes a Btrfs root in subvolumes, and apk takes a snapshot before every
-change to the installed packages. Going back works the way NixOS's generations do: the boot menu lists every
-snapshot and starts the one chosen, and `valence-snapshot rollback` makes a snapshot the system that starts by
-default. The tests break an update on purpose both ways: one program, undone with the command; and init together
-with the kernel, after which the disk does not boot until the boot menu starts the snapshot from before it. On a
-plain disk on BIOS and on an encrypted one on UEFI. The graphical installer is part of the desktop and still makes
-an XFS root. Nothing later has started.
+network. The desktop ISO passes its three: the live desktop (services, Plasma, a USB stick, video encoders, printing,
+Wi-Fi), and an install on BIOS and one on UEFI that each log in to Plasma through SDDM. The graphical installer was
+run by hand on BIOS, on UEFI and with an encrypted disk. BusyBox stays for `/bin/sh`, the initramfs and the small
+daemons. Documentation and translations are packages of their own: the builder makes `<pkg>-doc` and `<pkg>-lang`
+from what a recipe installs, no recipe deletes them any more, and a fresh install has no documentation files until
+`apk add docs` (or one `-doc` package) brings them, with `man`. Phase 4's builder builds both editions in an order
+worked out from the recipes, each package in a sysroot that holds only what its recipe declares, and a second run
+builds nothing; the 106 recipes outside the two ISOs (the developer tools, the NVIDIA packages, the 32-bit edition's
+desktop) are not rebuilt on glibc yet, which is what keeps phase 4 open. Both installers make a Btrfs root in
+subvolumes, and apk takes a snapshot before every change to the installed packages. Going back works the way
+NixOS's generations do: the boot menu lists every snapshot and starts the one chosen, and `valence-snapshot rollback`
+makes a snapshot the system that starts by default. The tests break an update on purpose both ways: one program,
+undone with the command; and init together with the kernel, after which the disk does not boot until the boot menu
+starts the snapshot from before it. On a plain disk on BIOS and on an encrypted one on UEFI. The desktop's pictures
+and colours are Valence's own: the logo's V repeated on black, and its greys. Phases 7 to 10 have not started.
 
 ## Why it exists
 
@@ -79,7 +80,7 @@ intro, `melon-sounds`, `melon-pinball`, `nethack`, and the in-jokes scattered th
 is plain Calamares and first boot has normal defaults.
 
 **6. A proper identity.**
-A new name, a logo (a bismuth hopper crystal seen from straight above; the files are in `branding/`), and real
+A new name, a logo (a folded V in greys; the files are in `branding/`), and real
 documentation: how to install, how to update, how to recover, and how to contribute.
 
 **7. Its own package manager, and a folder for every program.**
@@ -124,21 +125,27 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   The dependency-ordered builder replaces the queue, retry and resume scripts.
   *Done when:* one command rebuilds the whole repository from empty with no order written down anywhere, and a
   second run with nothing changed builds nothing.
-  *So far (19 November 2026):* true for the console system, 65 recipes. The queue, retry, resume and build-all
-  scripts and the ordered lists in `build-everything.sh` are gone. Open: the other 388 recipes, which must first
-  build on glibc and declare their dependencies (phase 6).
+  *So far (20 November 2026):* true for the console system from an empty repository (65 recipes then), and for the
+  desktop edition in the sense that one run rebuilt the 153 recipes phase 6 changed, LLVM, Mesa, Qt and all of KDE
+  among them, without a failure, and the next run built nothing. The desktop's generated recipes now declare what
+  they need. The queue, retry, resume and build-all scripts and the ordered lists in `build-everything.sh` are
+  gone. Open: one run of everything from an empty repository, and the 106 recipes outside the two ISOs, which must
+  first build on glibc and declare their dependencies.
 
 - [x] **5. Btrfs and snapshots.**
   The installer creates a Btrfs root with subvolumes. Updating takes a snapshot first. Rolling back is
   documented and tested.
   *Done when:* a QEMU test breaks an update on purpose, rolls back, and boots.
 
-- [ ] **6. The desktop.**
+- [x] **6. The desktop.**
   Rebuild the Plasma 6 stack on glibc (Mesa, Qt, KDE Frameworks, Plasma, SDDM, PipeWire, the apps Melon
-  ships). Plain Calamares branding, and Calamares makes the same Btrfs layout as the console installer (it still
-  makes an XFS root, which has no snapshots). A normal first boot. The wallpaper, the splash, login and boot menu pictures
-  and the green and orange colour scheme are still Melon's, and are replaced here.
+  ships). Plain Calamares branding, and Calamares makes the same Btrfs layout as the console installer. A normal
+  first boot. The wallpaper, the splash, login and boot menu pictures and the colour scheme are Valence's own, drawn
+  from the logo, in place of Melon's planet and its green and orange.
   *Done when:* the desktop ISO installs in QEMU on BIOS and UEFI and logs in to Plasma through SDDM.
+  *Done (20 November 2026):* it does, with the console installer in the automated test and with Calamares by hand
+  (BIOS, UEFI, and an encrypted disk). The first encrypted Calamares run left a disk that did not start, a fault in
+  the settings inherited from Melon; AGENTS.md, "Installers", has it.
 
 - [ ] **7. Documentation and the first test release.**
   README, install guide, update and recovery guide, contributing rules (`testing` before `main`, as in Melon).
@@ -217,6 +224,14 @@ These are open on purpose. Each gets settled before the phase that needs it.
   garbage); `/home` and `/var/log` are outside them, so going back leaves both alone; the filesystem is compressed
   with zstd at level 1; the command is called `valence-snapshot`. All were chosen while building phase 5 and are
   easy to change.
+- **The wallpaper.** Two drawings of the same idea exist, the logo's V joined into rows until it fills the screen:
+  `nested`, with smaller V's in the empty spaces of the larger ones, is on the desktop ISO; `woven` pushes the rows
+  into each other instead. `art/desktop.py --export woven` switches.
+- **PAM in the base system.** The desktop brings linux-pam (SDDM and the lock screen need it); the base has none,
+  so a console login and `su` do not go through PAM. Move it into the base and rebuild shadow on it, or leave the
+  console system without?
+- **Sources of the desktop's recipes.** About 150 of them (Qt, KDE, X.Org, Mesa) still build from Ubuntu's `orig`
+  tarballs, as on Melon. The rule is upstream's own releases, verified; moving them is a piece of work of its own.
 - **Hosting.** Where the package repository and the ISOs live.
 - **Translations of the base tools.** bash, coreutils, grep and 38 other recipes are built with `--disable-nls`,
   as on Melon, so they build no translations and have no `-lang` package: their messages are English only. Turning
@@ -233,6 +248,9 @@ These are open on purpose. Each gets settled before the phase that needs it.
 
 ## Decided
 
+- **The logo is a folded V in greys, and the desktop is drawn from it** (19 and 20 November 2026). It replaced the
+  bismuth crystal. The wallpaper is that V "connecting to other V's until it fills the screen", on black, and the
+  colour scheme is the logo's greys.
 - **The system file is a wish list, not a specification** (19 November 2026). "A file you can throw in to just
   get what you want", rather than a reproducible system: it adds what it lists and removes nothing. (Phase 10.)
 - **Rollback: both a command and the boot menu, and "however Nix does it"** (19 November 2026). Taken as NixOS's

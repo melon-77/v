@@ -48,47 +48,49 @@ path (rule 60). The signing key can stay where it is:
 
 ### State of the glibc switch
 
-Valence's C library was musl, as in Melon, and is now glibc (ROADMAP.md, phase 2). The base system builds on glibc:
-the cross toolchain and the 58 recipes the console ISO is made of, the GNU tools among them (with mandoc, `docs` and
-`lang` beside them, for its documentation). ROADMAP.md has the test status.
+Valence's C library was musl, as in Melon, and is now glibc (ROADMAP.md, phase 2). Two editions build on it and pass
+their tests (ROADMAP.md has the status): the console system, which is the cross toolchain and the 58 recipes the
+console ISO is made of, the GNU tools among them (with mandoc, `docs` and `lang` beside them, for its
+documentation); and the Plasma desktop (`--edition desktop`, 345 recipes with the console's: LLVM and Mesa, Qt 6,
+KDE Frameworks, Plasma, SDDM, PipeWire, Flatpak, CUPS, Calamares and the applications).
 Not converted yet:
 
-- **The graphical installer still makes an XFS root.** Calamares (`recipes/calamares-valence`, on the desktop ISO) has
-  not been rebuilt, and a system it installs has no snapshots: `valence-snapshot` and apk's hook do nothing on a root
-  that is not the console installer's Btrfs layout. Calamares gets that layout with the desktop (ROADMAP.md, phase 6).
-- **The recipes beyond those** (the desktop, the developer tools, Rust, LLVM, ...) still contain musl workarounds
-  and have not been built on glibc. `argp-standalone`, `musl-fts` and `musl-obstack`, and `elfutils`, which uses
-  them, will not build as they are.
-- **Recipes that run what they have just built.** `cmake_native`, and the rules and recipe comments that say a
-  freshly built program runs directly on the build machine "(rule 18)" (the clang, LLVM, perl, Go and Rust recipes
-  among them), describe Melon's mechanism. Those recipes need `scripts/valence-run` (rule 18) when they are converted.
+- **The 106 recipes outside the two editions** still contain musl workarounds and have not been built on glibc:
+  the developer tools (binutils, gcc, clang, cmake, meson, ninja, git, perl, Rust, Go, qemu, ...), the 32-bit
+  edition's desktop (LXQt, labwc, wlroots and their libraries), and what the online repository offered beside the
+  ISOs (nvidia-open, linux-firmware-nvidia, mesa-nvk, xfsprogs, cataclysm-dda, ...). Compare `ls recipes` with
+  `scripts/valence-build --edition desktop --order` for the list.
+- **Recipes that run what they have just built.** `cmake_native` (libclc and spirv-llvm-translator call it), and the
+  rules and recipe comments that say a freshly built program runs directly on the build machine "(rule 18)" (the
+  clang, perl, Go and Rust recipes among them), describe Melon's mechanism. Those recipes need `scripts/valence-run`
+  (rule 18) when they are converted, the way `recipes/llvm` was (rule 66).
 - **Self-hosting.** "Valence as the build machine" in BUILDING.md, rule 53 and `valence_deps` in `host-setup.sh` were
   written for a musl system and are untested on glibc.
 - **The 32-bit edition** has not been built on glibc; whether it stays is undecided (ROADMAP.md).
 - **shadow has no PAM.** The base system has no linux-pam, so `recipes/shadow` is built without it and a console
-  login does not go through PAM (BusyBox's login never did either). When the desktop is converted and linux-pam is
-  in every desktop install, decide whether it moves into the base, and rebuild shadow with it.
-- **Account tools in other recipes.** The console installer uses shadow's `useradd`, `usermod` and `chpasswd`. The
-  install scripts of dbus, polkit, cups, avahi and valence-desktop still call BusyBox's `adduser` and `addgroup`
-  (BusyBox stays installed, so they work). Calamares' `shadow-shim`, BusyBox-backed stand-ins for shadow's tools,
-  is not needed any more and goes when the desktop is converted.
-- **The console installer's copy drops extended attributes.** `valence-install` copies the system with `tar | tar`.
-  GNU tar can carry file capabilities and ACLs (`--xattrs --acls`); nothing in the base has any. Add the options
-  when the desktop, which has file capabilities, is converted.
+  login does not go through PAM (BusyBox's login never did either). The desktop is converted now and linux-pam is in
+  every desktop install; whether it moves into the base, with shadow rebuilt on it, is the owner's to decide
+  (ROADMAP.md, "Not decided yet").
+- **Account tools in other recipes.** Both installers use shadow's `useradd`, `usermod` and `chpasswd` (Calamares
+  through its users job; the BusyBox-backed `shadow-shim` it needed on Melon is gone). The install scripts of dbus,
+  polkit, cups, avahi and valence-desktop still call BusyBox's `adduser` and `addgroup` (BusyBox stays installed,
+  so they work).
+- **Extended attributes.** `valence-install` copies the system with `tar --xattrs --xattrs-include='*'` (valence-base
+  44), so file capabilities would survive the copy. No package on either ISO has any (`getcap -r` on the desktop's
+  system image finds none), so nothing tests that yet.
+- **What the recipes outside the editions need.** A build gets only what its recipe declares (clean builds). The
+  two editions' recipes declare it (rules 63, 67 and 68). Nobody has checked the other 106, and
+  `scripts/valence-build -n` names one of them that asks for a package nothing makes (libclc: `musl-dev`).
+- **Docs and translations outside the editions.** No recipe deletes them any more. The two editions' recipes make
+  107 `-doc` and 93 `-lang` packages, none near GitHub's 100 MB limit. The other recipes make theirs the first time
+  they are built on glibc. Watch then for two packages shipping the same page, for a program that reads its own
+  files from `usr/share/doc` at run time (it needs `options=(keepdocs)`), and for a `-doc` package over the limit
+  ("Package repository").
+- **Sources still from Ubuntu's archive.** "Sources" says a recipe that is touched moves to its upstream tarball.
+  Phase 6 changed 153 recipes (their `makedepends`, mostly) and moved none: the KDE, Qt and X.Org recipes still build
+  from Ubuntu 26.04's `orig` tarballs. That is its own piece of work (about 150 downloads to verify).
 
-- **What the recipes beyond the base need.** A build gets only what its recipe declares (clean builds). The base's
-  recipes do declare it; three did not, and were fixed (rule 63). Nobody has checked the others, and the generated
-  KDE recipes declare nothing at all: `gen-kde-recipes.py` writes no `makedepends`, because Melon relied on build
-  order and one shared sysroot. Each needs its `makedepends` when it is converted; until then `valence-build`
-  builds them in an order that means nothing. `scripts/valence-build -n` finds one recipe that names a package
-  nothing makes (libclc: `musl-dev`), and no recipes that need each other.
-- **Docs and translations beyond the base.** No recipe deletes them any more (361 recipes changed, 247 of them
-  through the generators), but only the base has been rebuilt: the others make their `-doc` and `-lang` packages
-  the first time they are built on glibc. Watch then for two packages shipping the same page, for a program that
-  reads its own files from `usr/share/doc` at run time (it needs `options=(keepdocs)`), and for a `-doc` package
-  over GitHub's 100 MB limit ("Package repository").
-
-Where this file describes those parts, it describes them as they were built on Melon.
+Where this file describes the parts that are not converted, it describes them as they were built on Melon.
 
 ## Repository layout
 
@@ -101,17 +103,26 @@ scripts/valence-build-recipe   the step it runs for each: ONE recipe -> signed .
                         sysroot that holds what the recipe declares and nothing else; reindex
 scripts/console-packages.txt   what the console system is made of (mkiso.sh and --edition console read it)
 scripts/valence-run     start a program built for Valence on the build machine, through the sysroot's loader (rule 18)
+scripts/suggest-makedepends.py   what a recipe's source asks for, as -dev packages; writes scripts/kde-deps.json,
+                        the generated KDE recipes' makedepends (rule 67)
+scripts/compare-with-index.py    what the built packages link, against another index: finds a feature that a missing
+                        makedepends switched off without an error (rule 67)
+scripts/check-dev-deps.py        does every package bring what its CMake files and library links name? (rule 68)
 scripts/mkiso.sh        live/installer ISO: rootfs.sqfs (pristine apk-installed system, copied to disk by the
                         installers) + live.sqfs (small live-session layer) + a small repo of extras (VM guest tools,
                         a few base packages; never a second copy of what rootfs.sqfs already holds)
 scripts/qemu-test.py    headless boot + install + reboot test over the serial console
+scripts/qemu-gui.py     look at a VM's screen, click and type, by hand: how Calamares is tested ("Testing")
 recipes/<name>/VALENCEBUILD   one directory per recipe (see below)
 recipes/<name>/*.patch      applied automatically with patch -p1, in name order
 recipes/<name>/<pkg>.post-install etc.   apk scripts for (sub)package <pkg>
 iso-files/init          live initramfs /init
 branding/               the logo: valence-logo.svg and transparent PNGs, written by art/logo.py
-art/logo.py             draws the logo (a bismuth hopper crystal seen straight down); `art/logo.py --export branding`
-                        needs cairosvg. The copies in recipes (icons, Calamares branding) are made from branding/
+art/logo.py             the logo: a folded V in five greys (the owner's drawing; `--check` compares it with the
+                        checksums of the files the owner approved). `art/logo.py --export branding` needs cairosvg
+art/desktop.py          the desktop's pictures and colours, made from the logo: wallpaper, splash, boot menu
+                        background, the logo's copies in recipes (icons, Calamares branding) and the colour scheme.
+                        `art/desktop.py --export` writes them into valence-desktop and calamares-valence
 ROADMAP.md              the plan: what Valence keeps from Melon, what changes, the phases and their "done when"
 recipes/calamares-valence/    graphical installer: Calamares settings, branding, job configs, finishing scripts (stage 2)
 ```
@@ -182,8 +193,13 @@ Things the builder gives you:
 - `pc:` provides/depends are generated from pkg-config files the same way: a package provides `pc:<module>` for
   every `.pc` file it ships, and depends on the modules their `Requires` and `Requires.private` lines name. So
   `makedepends=(glib-dev)` brings pcre2-dev, libffi-dev, zlib-dev and util-linux-dev with it, because glib's `.pc`
-  files ask for them. A header that includes another library's header without pkg-config saying so needs
-  `depends_<x>_dev` by hand.
+  files ask for them.
+- A `-dev` package also depends on the `-dev` packages of the libraries that the recipe's own libraries link (its
+  programs do not count), as far as those were in the build's sysroot. Qt6Gui's CMake files ask for OpenGL's and
+  xkbcommon's, a KDE framework's for the frameworks under it, and there is no `.pc` file to say so. What nothing
+  links is still written by hand, as `depends_<x>_dev` (for a generated KDE recipe in `DEV_MORE` in the generator):
+  another library's headers used alone, or a library that went into a sister subpackage. `scripts/check-dev-deps.py`
+  finds those (rule 68).
 
 ### Building: the order, clean sysroots, and what counts as built
 
@@ -275,7 +291,9 @@ Rebuilding the kernel takes about an hour on 2 cores.
     than Valence's, and a program started directly would get the build machine's loader and libraries.
     `valence-build` gives the wrapper to meson (`exe_wrapper` and `needs_exe_wrapper = true` in the cross file) and to
     CMake (`CMAKE_CROSSCOMPILING_EMULATOR` in the toolchain file); a recipe that runs a built program by hand must
-    call it through `$M/scripts/valence-run`. Autoconf builds are cross builds and don't run test programs: their
+    call it through `$M/scripts/valence-run`. CMake uses that only for programs the project itself builds: the
+    programs of packages in the sysroot (moc, kconfig_compiler, wayland-scanner) are wrapped by the builder (rule
+    66). Autoconf builds are cross builds and don't run test programs: their
     answers are in `scripts/config.site` (rule 25). A second architecture (the planned 64-bit ARM edition) swaps the
     wrapper for an emulator.
     Melon instead pointed `/lib/ld-musl-x86_64.so.1` and `/etc/ld-musl-x86_64.path` at the sysroot, so that such
@@ -563,6 +581,67 @@ Rebuilding the kernel takes about an hour on 2 cores.
     The functions there now prefix their variables (`p_id`, `c_id`, `r_name`). Do the same in any function added to
     the scripts in `valence-base`, and let a test read numbers back from what the script printed, which is how this
     one was caught.
+66. **CMake starts a program from the sysroot as it is, so the builder wraps those programs.** CMake puts
+    `CMAKE_CROSSCOMPILING_EMULATOR` (rule 18) in front of a command only when the command is the bare name of a
+    program the project itself builds. `Qt6::moc`, `KF6::kconfig_compiler` and `wayland-scanner` come from packages
+    in the sysroot (imported targets, or paths from `find_program`), and CMake 3.28 starts them directly: with the
+    build machine's loader and its older glibc, where they fail, or run against the build machine's libraries.
+    Before every build `valence-build-recipe` (`wrap_sysroot_programs`) therefore moves each dynamically linked
+    program in the sysroot's `usr/bin`, `usr/libexec`, `usr/lib/qt6/bin` and `usr/lib/qt6/libexec` to
+    `$SYSROOT/.real/` and leaves a two-line script in its place that starts it through the sysroot's loader, with
+    `--argv0` so that the program still sees its own path (Qt's tools find their files from it). A package that
+    keeps build tools in another directory needs that directory added to the list there. Two cases stay with the
+    recipe. A command written as `$<TARGET_FILE:tool>` for a tool the project has just built gets no emulator: name
+    the target instead (`PRE['kf6-breeze-icons']` in `gen-kde-recipes.py`). And a tool that must run on the build
+    machine *while* the project is built for Valence is built for the build machine first: LLVM's tablegens
+    (`CROSS_TOOLCHAIN_FLAGS_NATIVE` in `recipes/llvm`, which is now a CMake cross build like the others), KWin's
+    Wayland scanner and KSyntaxHighlighting's indexer (`PRE` in the generator).
+67. **The generated KDE recipes take their `makedepends` from `scripts/kde-deps.json`, and a comparison with Melon's
+    packages shows what a build lost.** Melon built these recipes in a fixed order into one sysroot and declared
+    nothing. `scripts/suggest-makedepends.py INDEX --kde-json scripts/kde-deps.json` works the table out from four
+    things: the libraries Melon's package was linked against (INDEX is Melon's last `Packages.adb`,
+    `https://raw.githubusercontent.com/melon-77/melon-os/packages/x86_64/Packages.adb`), the source's
+    `.kde-ci.yml`, its `find_package()` calls, and a `poqm/` directory (translations Qt loads: `lrelease`, in
+    qt6-qttools-dev). It keeps only what the generator's `ORDER` builds earlier, so the table cannot make a cycle.
+    What none of the four shows goes into `DEPS_MORE` in the generator, with the reason (headers used without
+    linking, a library Qt loads by name); `gen-simple-recipes.py` has `MORE_DEPS` for the same.
+    `suggest-makedepends.py INDEX RECIPE...` prints the suggestion for a hand-written recipe.
+    After building, run `scripts/compare-with-index.py INDEX`. It compares what every built package links and
+    provides with the reference. "No longer links" means a clean sysroot switched a feature off and nothing failed
+    (rule 63): qt6-qtmultimedia had lost libQt6DBus, which was its screen capture through PipeWire, because
+    pipewire-dev was not declared; mesa needed llvm-dev (llvmpipe and the shader compilers), python3 the libraries of
+    its bz2, lzma, zstd, readline and uuid modules, cups acl-dev, avahi libcap-dev, and so on through 31 recipes
+    outside the KDE generator. "No longer provides" is a plugin that was not built: plasma-workspace's camera
+    indicator needs pipewire-dev. The differences that are meant: glib without libelf (the base has no elfutils; the
+    recipe says `-Dlibelf=disabled`), xfsprogs without libdevmapper and zstd without liblzma and liblz4 (rule 63),
+    libvorbis with libmvec (glibc's vector math library, which musl does not have), calamares-valence without Melon's
+    question-game page (ROADMAP.md, "The joke layer goes"), and linux-firmware, whose subpackages are cut differently
+    from the ones in Melon's last index.
+68. **A `-dev` package brings what its own files name.** A project that says `find_package(Plasma)` reads
+    `PlasmaConfig.cmake`, which says `find_dependency(KF6KirigamiPlatform)`; in a clean sysroot that only works if
+    libplasma-dev depends on kf6-kirigami-dev, and when it does not, the failure appears in milou and kscreenlocker,
+    far from the recipe that is wrong. Three things fill a `-dev` package's dependencies: its `.pc` files'
+    `Requires`, the libraries the recipe's libraries link ("Recipe format"), and `depends_<x>_dev` by hand.
+    `scripts/check-dev-deps.py` reads the built packages and reports what is still missing: a `find_dependency()`
+    or a pkg-config module (`pkg_check_modules`) in a package's CMake files, an include directory or an imported file
+    named there, when nothing the package depends on ships it; and a link `libx.so -> libx.so.1` whose library is in
+    a package the link's package does not depend on. It found libplasma-dev (above), kf6-modemmanager-qt-dev and
+    kf6-networkmanager-qt-dev (ModemManager's and NetworkManager's headers: nothing is linked), plasma5support-dev
+    (KF6Service), kf6-kquickcharts-dev and kwin-dev (ECM), and three whose library sits in a sister subpackage:
+    appstream-dev (libAppStreamQt is in appstream-qt), btrfs-progs-dev (the tools do not link the libraries in
+    btrfs-progs-libs) and flite-dev. Run it after building
+    a recipe that has a `-dev` package; it must report nothing. With `-v` it also lists what no built package ships at
+    all (find modules that come with CMake, LLVM's static libraries, which are not packaged), which it cannot judge.
+69. **What glibc changed for sources that built on musl.** Found while the desktop was rebuilt (glibc 2.44):
+    `strrchr()`, `strchr()` and their relatives return a `const` pointer when given one (C23, since glibc 2.43),
+    and a project that builds with `-Werror=discarded-qualifiers` stops (`recipes/pipewire/glibc-const-strrchr.patch`).
+    glibc takes its errno names from the kernel's headers, which gave two values a second name (`EFSBADCRC`,
+    `EFSCORRUPTED`); a table built from that list has them twice
+    (`recipes/elogind/0012-errno-list-leave-out-the-kernel-s-second-names.patch`). `crypt()` is libxcrypt's, not the
+    C library's, so no index of Melon's shows who uses it: linux-pam, calamares, plasma-workspace and open-vm-tools
+    declare libxcrypt-dev. And the patches written to make a source build on musl go, with the stand-in libraries
+    they needed: elfutils lost its patches, and the recipes `argp-standalone`, `musl-fts` and `musl-obstack`, which
+    only it used, are deleted; cairo lost one patch, elogind eight.
 
 To resume a failed long build without unpacking again (for example the kernel):
 `VALENCE_KEEP_SRC=1 scripts/valence-build-recipe linux-valence`. `valence-build` does that by itself (`VALENCE_AUTO_RESUME=1`), but
@@ -603,12 +682,44 @@ scripts/qemu-test.py desktop out/valence-desktop-*-x86_64.iso              # ser
                                                                           # NetworkManager joins WPA2 Wi-Fi on mac80211_hwsim radios;
                                                                           # LOOK at logs/qemu-desktop.ppm
 qemu-img create -f raw /tmp/desk.img 16G
-scripts/qemu-test.py desktop-install out/valence-desktop-*-x86_64.iso /tmp/desk.img   # install, SDDM greeter stays up,
-                                                                          # log in through it, Plasma runs; LOOK at both screenshots
+scripts/qemu-test.py desktop-install out/valence-desktop-*-x86_64.iso /tmp/desk.img [--uefi]   # install, SDDM greeter stays
+                                                                          # up, log in through it, Plasma runs; LOOK at the screenshots
+scripts/qemu-gui.py start cd [--uefi]                                     # Calamares has no automated test: click through it by hand
+                                                                          # ("The graphical installer" below)
 # --offline (any mode): the VM keeps its network card but reaches nothing outside; the installers must still work
 ```
 
 The tests run the console installer by name (`valence-install`, with the `VALENCE_*` variables from "Installers").
+`desktop-install` does too: it installs the desktop profile with the console installer, on BIOS and with `--uefi`.
+
+**The graphical installer is tested by hand**, because Calamares cannot be scripted and the system it installs has no
+serial console. `scripts/qemu-gui.py` starts the desktop ISO in a VM, takes screenshots, and clicks and types where
+you tell it. In one terminal `scripts/qemu-gui.py start cd` (QEMU stays in the foreground), in another, when a
+screenshot shows the desktop (`qemu-gui.py shot a`, about a minute and a half; it writes `logs/gui/a.png`):
+
+```sh
+g=scripts/qemu-gui.py                     # positions are for the VM's 1280x800 screen; look at a screenshot when unsure
+$g click 57 45 , click 57 45 , wait 25 , shot welcome      # double-click "Install Valence"; CHECK that the installer opened
+$g click 1007 727 , wait 12 , click 312 107 , wait 6 , shot partitions   # Next; "Erase disk"
+#   the picture must show valenceboot (1 GiB, FAT32) and valence (Btrfs); on UEFI an EFI system partition before them
+#   for an encrypted install: $g click 312 531 , wait 4 , click 547 531 , type 'valenceluks' , click 774 531 , type 'valenceluks'
+#   (BIOS positions; on UEFI the row is 28 lower). The summary must then say luks2 for valence and still fat32 for /boot
+$g click 1007 727 , wait 8 , click 404 90 , type 'Jo Cole' , click 404 146 , key ctrl+a , type 'jcole' , \
+   click 404 202 , key ctrl+a , type 'valencecal' , click 404 258 , type 'valenceuser' , click 610 258 , type 'valenceuser'
+$g click 1007 727 , wait 8 , shot summary , click 1007 727 , wait 6 , click 730 421      # Next; Install; "Install Now"
+$g wait 240 , shot done                   # "All done." (an encrypted install takes about twice as long without KVM)
+$g click 1105 727 , wait 30 , quit        # Done (it restarts into the ISO again), then stop the VM
+```
+
+Then `scripts/qemu-gui.py start disk` (with `--uefi` if the install was): an encrypted disk asks for the passphrase
+on the screen (`$g shot boot`, then `$g type 'valenceluks' , key ret`), and after about a minute the login screen
+shows the user. `$g key ctrl+alt+f2` gives a text console to log in on as root (the users page gave root the same
+password) and look: `findmnt -t btrfs,vfat` must show `/`, `/home`, `/var/log`, `/.snapshots` and `/swap` as the
+five subvolumes and `/boot` on its own FAT32 partition (with `/boot/efi` on UEFI), `swapon --show` the swap file,
+`id jcole` the group `lpadmin`, and after `apk del gamemode` `valence-snapshot list` must list the snapshot taken
+before it. Do the run on BIOS, on UEFI and on BIOS with "Encrypt system" whenever `calamares`, `kpmcore` or
+`calamares-valence` changes. (20 November 2026: all three pass. The first encrypted run found that Calamares
+encrypted `/boot` too and left a disk that did not start, while the installer said "All done": "Installers".)
 
 `disk` also checks what the roadmap's phases promise of an installed system. The GNU tools own their command names,
 and `findmnt`, `mkswap`, `findfs` and `blkdiscard` are util-linux's programs (rule 62). A fresh install has no
@@ -640,7 +751,9 @@ Logs go to `logs/qemu-*.log`. The tests use KVM when it really works (`qemu-test
 (`-accel tcg,thread=multi -cpu max`) and everything is slow. Measured on a Ryzen 7 5800U under Windows 10 (4 vCPUs, no KVM, 9 October 2026):
 the console `live` install takes 77 s, `disk` and `disk --uefi` about 40 s each, and the desktop ISO boots and takes a login on
 the serial console in 25 s, but the Plasma desktop tests (`desktop`, `desktop-install`) were not usable there (another session saw
-Plasma not start in 15 minutes): run those on a machine with KVM. Use generous timeouts. The ISO's GRUB and the installed system both use
+Plasma not start in 15 minutes). On an i5-12450H under Windows 10 (also no KVM, 20 November 2026, Valence on glibc) they are:
+`desktop` takes 3 minutes, `desktop-install` 9 to 14 minutes on each of BIOS and UEFI (two rounds the same night),
+and Calamares installs in 4 to 9 minutes (about 10 with encryption). Use generous timeouts. The ISO's GRUB and the installed system both use
 the serial port, so tests don't need a screen. The VM has an Intel HD Audio card (the `live` and `disk` tests list
 the sound devices the kernel found); QEMU records whatever it plays to `logs/audio-capture.wav`.
 
@@ -673,12 +786,36 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
   "Install Valence" icon runs `valence-install-gui`, which starts Calamares as root through doas.
 - **Valence's look (valence-desktop):** Plasma style `valence`, colours ValenceDark, Konsole profile Valence, SDDM theme `valence`
   (its own QML, `usr/share/sddm/themes/valence`), GRUB theme `usr/share/valence/grub/themes/valence` (the desktop ISO uses
-  it too). **Still Melon's pictures:** the wallpaper, the splash screen, the login screen's background, the boot menu's
-  background and the green and orange colour scheme were drawn for Melon and are replaced in the desktop phase
-  (ROADMAP.md, phase 6). The logo, the icons made from it, `/etc/issue` and `valencefetch` are already Valence's.
-- **Calamares runs Valence's own jobs** (`cal-prepare`, `cal-finish` in `calamares-valence`): Calamares'
-  users job calls shadow's `useradd`/`usermod`/`groupadd`, which Valence doesn't have, so `cal-prepare`
-  puts BusyBox-backed shims into the target's `/usr/local/bin` and `cal-finish` removes them.
+  it too). The pictures and the colours are Valence's own and come from one script, `art/desktop.py`: the wallpaper is
+  the logo's V over and over on black, joined arm to arm in rows, with smaller V's in the empty spaces of the larger
+  ones and one V lit (`nested`; `woven` pushes the rows into each other instead); the splash screen, the login
+  screen's background and the boot menu's background (dimmed) are the same picture; and the colour scheme is the
+  logo's greys with a blue-grey accent, in Plasma, Konsole, the login screen, the boot menu and the installer. Melon's
+  planet and its green and orange are gone. Change a picture or a colour in the script and run
+  `art/desktop.py --export`, not in the files it writes. `/etc/issue` and `valencefetch` draw the same V.
+- **Calamares makes the console installer's Btrfs layout.** `partition.conf` offers Btrfs only and lays an erased
+  disk out as a 1 GiB FAT32 `/boot` and a Btrfs `/` (on UEFI Calamares puts its EFI system partition, `/boot/efi`,
+  before them); `mount.conf` makes the subvolumes `@`, `@home` and `@log` and mounts them with
+  `noatime,compress=zstd:1`. The rest is Valence's own job, `cal-finish` (in `calamares-valence`, run as
+  `shellprocess@finish` after the users job): it makes `@snapshots` and `@swap`, writes `/etc/fstab`, makes the swap
+  file with `btrfs filesystem mkswapfile`, removes the live-only packages (with `--no-commit-hooks`: no snapshot of
+  a system that is still being put together), copies the ISO's package repository, builds the unlock initramfs for
+  an encrypted root, enables the profile's services and installs GRUB. A root that manual partitioning puts on
+  another filesystem is installed as before and has no snapshots. Calamares' users job calls shadow's `useradd`,
+  `usermod` and `groupadd`, which the system image has: the BusyBox-backed shims of Melon's `cal-prepare` are gone.
+  The user it makes is in the same groups as the console installer's, `lpadmin` among them.
+- **`/boot` is never encrypted, and an install that cannot start is an error.** GRUB reads the kernel and the unlock
+  initramfs from `/boot` before any passphrase is typed. Calamares encrypts every partition of `partitionLayout` when
+  "Encrypt system" is ticked unless the entry says `noEncrypt: true`; the entry for `/boot` did not (the comment
+  above it said `/boot` stays unencrypted), so an encrypted install had `/boot` inside LUKS, `grub-install` failed
+  where nobody saw it (`|| true`), and Calamares finished with "All done" on a disk that stopped at "Booting from
+  Hard Disk". Now the entry has `noEncrypt`, and `cal-finish` stops the install with a message when `/boot` is
+  encrypted or on a filesystem GRUB cannot read, when GRUB's BIOS boot code cannot be written on a BIOS machine, or
+  when no loader ended up on the EFI partition. (On UEFI the extra BIOS boot code and the firmware's boot entry stay
+  optional: a GPT disk has no room for the first, and some firmware refuses the second.)
+- **The live desktop does not lock its screen.** `mkiso.sh` gives the live user a `kscreenlockerrc` with
+  `Autolock=false`: Plasma locks after five minutes without input, an install on a slow machine takes longer, and
+  nobody can know that the live user's password is empty.
 - **Live-only packages** (`/usr/share/valence/profiles/live-only`, e.g. `calamares-valence`) are in the
   desktop ISO's system image and both installers remove them from the new system. Both installers make
   the new system's `/etc/apk/world` match the chosen profile.

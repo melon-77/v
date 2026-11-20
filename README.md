@@ -13,18 +13,19 @@ of things: glibc instead of musl, documentation and translations in their own pa
 that orders builds itself, and a Btrfs root with a snapshot before every update. **[ROADMAP.md](ROADMAP.md) is the
 plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
 
-Test builds of the console ISO are on the repository's Releases page; there is no online package repository yet. The
-base system is on glibc: the cross toolchain and the 58 recipes the console ISO is made of build on it, in an order
-the builder works out from the recipes, each in a sysroot holding only what its recipe declares (ROADMAP.md has the
-test status). Its documentation is in packages of its own: a fresh install has no man pages, and `apk add docs`
-from a package repository adds them, with `man`, for everything installed. Its root is Btrfs, and apk takes a
-snapshot before every change to the installed packages; the boot menu starts any of them, and a command makes one the
-system again ("Snapshots and rolling back" below). The rest is still as inherited from Melon: the desktop and every
-other recipe beyond the console ISO (not yet rebuilt on glibc, with Melon's musl workarounds still in them; the
-graphical installer is one of them and still makes an XFS root, which has no snapshots), the 32-bit edition, and
-dated status notes that are Melon's
-history. Where this file, `AGENTS.md` and `BUILDING.md` describe those parts, they describe Melon's system. The
-desktop's pictures (wallpaper, splash, login and boot menu backgrounds) are still Melon's too; the logo is Valence's.
+Test builds of both ISOs are on the repository's Releases page; there is no online package repository yet. The
+system is on glibc: the cross toolchain and the 345 recipes the two ISOs are made of build on it (58 are on the
+console ISO; the desktop ISO adds Mesa, Qt 6, KDE Plasma 6, SDDM, PipeWire, Flatpak and the Calamares installer), in
+an order the builder works out from the recipes, each in a sysroot holding only what its recipe declares
+(ROADMAP.md has the test status). Its documentation is in packages of its own: a fresh install has no man pages, and
+`apk add docs` from a package repository adds them, with `man`, for everything installed. Its root is Btrfs,
+whichever installer made it, and apk takes a snapshot before every change to the installed packages; the boot menu
+starts any of them, and a command makes one the system again ("Snapshots and rolling back" below). The desktop's
+pictures and colours are Valence's own: the logo's V on black, and its greys. The rest is still as inherited from
+Melon: the 106 recipes beyond the two ISOs (the developer tools, the NVIDIA packages, the 32-bit edition's LXQt
+desktop: not yet rebuilt on glibc, with Melon's musl workarounds still in them), the 32-bit edition, and dated
+status notes that are Melon's history. Where this file, `AGENTS.md` and `BUILDING.md` describe those parts, they
+describe Melon's system.
 
 ## What it is
 
@@ -55,7 +56,8 @@ scripts/mkiso.sh       assembles the hybrid BIOS/UEFI live ISO from the repo
 recipes/<pkg>/VALENCEBUILD   package recipes (APKBUILD-like)
 iso-files/init         live initramfs init
 branding/              the logo (SVG and PNGs)
-art/logo.py            draws the logo
+art/logo.py            the logo: a folded V in greys
+art/desktop.py         the desktop's wallpaper, splash and boot pictures and its colours, made from the logo
 ROADMAP.md             the plan and its phases
 recipes/calamares-valence/   graphical installer: Calamares settings, branding and finishing scripts
 ```
