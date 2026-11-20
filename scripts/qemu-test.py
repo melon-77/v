@@ -221,19 +221,19 @@ if mode == 'desktop':
     ok &= flap == ''; step('services: ' + ('none restarting in a loop' if flap == '' else f'RESTARTING: {flap}'))
     found = False
     for _ in range(40):                            # KWin and plasmashell after SDDM's autologin
-        out = sh('ps -o comm | grep -qx kwin_wayland && ps -o comm | grep -qx plasmashell && echo PLASMA-UP || echo waiting')
+        out = sh('ps -e -o comm | grep -qx kwin_wayland && ps -e -o comm | grep -qx plasmashell && echo PLASMA-UP || echo waiting')
         if 'PLASMA-UP' in out: found = True; break
         time.sleep(5)
     time.sleep(20)                                  # let the desktop finish drawing
     # still there after settling, and inside a real logind session (a crash loop can look alive for a moment)
     out = sh('echo SESSIONS=$(loginctl list-sessions --no-legend 2>/dev/null | grep -c seat0) '
-             'KWIN=$(ps -o comm | grep -cx kwin_wayland) SHELL=$(ps -o comm | grep -cx plasmashell)')
+             'KWIN=$(ps -e -o comm | grep -cx kwin_wayland) SHELL=$(ps -e -o comm | grep -cx plasmashell)')
     import re as _re
     v = dict(_re.findall(r'(SESSIONS|KWIN|SHELL)=(\d+)', out))
     stable = found and all(int(v.get(k, '0')) > 0 for k in ('SESSIONS', 'KWIN', 'SHELL')); ok &= stable
     step(f"Plasma after 20 s: sessions={v.get('SESSIONS')} kwin={v.get('KWIN')} plasmashell={v.get('SHELL')}")
     # Plasma's device list asks UDisks2 over D-Bus, which starts udisksd; then mount the stick the same way Dolphin does
-    out = sh('echo UDISKSD=$(ps -o comm | grep -cx udisksd)')
+    out = sh('echo UDISKSD=$(ps -e -o comm | grep -cx udisksd)')
     started = 'UDISKSD=1' in out; ok &= started; step('udisksd started by D-Bus activation: ' + ('yes' if started else 'NO'))
     out = sh('dev=$(doas blkid -L VALENCEUSB); echo "stick: $dev"; doas udisksctl mount -b $dev && '
              'cat /run/media/root/VALENCEUSB/hello.txt && doas udisksctl unmount -b $dev', timeout=120)
@@ -323,7 +323,7 @@ if mode == 'desktop-install':
     time.sleep(15)                                  # SDDM and KWin are starting: typing now can lose characters
     sh('stty cols 160 rows 50; export TERM=vt100')
     # (comm is cut to 15 characters: sddm-greeter-qt6 shows as sddm-greeter-qt)
-    greeter = "ps -o pid,comm | awk '$2 ~ /^sddm-greeter/{print $1}' | head -1"
+    greeter = "ps -e -o pid,comm | awk '$2 ~ /^sddm-greeter/{print $1}' | head -1"
     for _ in range(60):
         pid = count(greeter)
         if pid: break
@@ -340,7 +340,7 @@ if mode == 'desktop-install':
     time.sleep(3); mon(f'screendump {M}/logs/qemu-desktop-splash.ppm')   # Plasma's loading screen
     # the desktop's shell: Plasma's plasmashell, or on the 32-bit edition LXQt's panel (on labwc)
     desk = 'lxqt-panel' if i686 else 'plasmashell'
-    shell = f"ps -o user,comm | awk '$1==\"jcole\" && $2==\"{desk}\"' | wc -l"
+    shell = f"ps -e -o user,comm | awk '$1==\"jcole\" && $2==\"{desk}\"' | wc -l"
     for _ in range(60):
         if count(shell): break
         time.sleep(3)
@@ -348,7 +348,7 @@ if mode == 'desktop-install':
     sess = count("loginctl list-sessions --no-legend | awk '$3==\"jcole\" && $6==\"active\"' | wc -l")
     up = count(shell) == 1 and sess == 1; ok &= up
     if i686:
-        lab = count("ps -o user,comm | awk '$1==\"jcole\" && $2==\"labwc\"' | wc -l"); up &= lab == 1; ok &= lab == 1
+        lab = count("ps -e -o user,comm | awk '$1==\"jcole\" && $2==\"labwc\"' | wc -l"); up &= lab == 1; ok &= lab == 1
         step(f'LXQt for jcole after 20 s: lxqt-panel={count(shell)} labwc={lab} active sessions={sess}')
     else:
         step(f'Plasma for jcole after 20 s: plasmashell={count(shell)} active sessions={sess}')

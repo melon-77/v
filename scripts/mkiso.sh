@@ -77,7 +77,14 @@ if [ "$EDITION" = desktop ]; then
   awk -F: -v OFS=: '$1=="live"{next} $1 ~ /^(wheel|audio|video|input|render|plugdev|netdev|users)$/{$4=($4==""?"live":$4",live")} {print}' \
     $ROOT/etc/group > $LIVE/etc/group; echo 'live:x:1000:' >> $LIVE/etc/group
   mkdir -p $LIVE/home/live/Desktop $LIVE/etc/sddm.conf.d
+  session_is_plasma=0; [ ! -f $ROOT/usr/share/wayland-sessions/plasma.desktop ] || session_is_plasma=1
   cp -a $ROOT/etc/skel/. $LIVE/home/live/
+  # The live session does not lock its screen. Plasma would after five minutes without input, which an install on a
+  # slow machine outlasts, and nobody can know that the live user's password is empty.
+  if [ $session_is_plasma = 1 ]; then
+    mkdir -p $LIVE/home/live/.config
+    printf '[Daemon]\nAutolock=false\nLockOnResume=false\n' > $LIVE/home/live/.config/kscreenlockerrc
+  fi
   install -m755 $ROOT/usr/share/applications/valence-install.desktop $LIVE/home/live/Desktop/valence-install.desktop 2>/dev/null || true
   chown -R 1000:1000 $LIVE/home/live
   session=plasma; [ -f $ROOT/usr/share/wayland-sessions/plasma.desktop ] || session=lxqt-wayland
