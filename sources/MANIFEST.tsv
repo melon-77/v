@@ -819,3 +819,13 @@ at-spi2-core-2.62.1.tar.xz	cca6b6a86e4389d89b370288761ce2385ddeceb10c4412da78689
 libXt-1.3.1.tar.xz	e0a774b33324f4d4c05b199ea45050f87206586d81655f8bef4dba434d931288	url	https://www.x.org/releases/individual/lib/libXt-1.3.1.tar.xz
 gtk+-3.24.43.tar.xz	7e04f0648515034b806b74ae5d774d87cffb1a2a96c468cb5be476d51bf2f3c7	url	https://download.gnome.org/sources/gtk+/3.24/gtk+-3.24.43.tar.xz
 firefox-153.7.0esr.source.tar.xz	7f8715ee7de2cf36a156216a9b1c7f26d1653010e65793bb2fce66e12edb6ea0	url	https://archive.mozilla.org/pub/firefox/releases/153.7.0esr/source/firefox-153.7.0esr.source.tar.xz
+openssh-10.6p2.tar.gz	9ae44872090cf2f06b3cf9ff147e7f16f309671340763ed2f99248398ae29d5b	url	https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz
+libevent-2.1.12-stable.tar.gz	92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb	url	https://github.com/libevent/libevent/releases/download/release-2.1.12-stable/libevent-2.1.12-stable.tar.gz
+tmux-3.8.tar.gz	e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e	url	https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz
+htop-3.5.3.tar.xz	a8b164386494cb85bb255a415a3f5f80afe7a0c4491da5d113b3a0f951087e65	url	https://github.com/htop-dev/htop/releases/download/3.5.3/htop-3.5.3.tar.xz
+jq-1.8.2.tar.gz	71b8d6e8f5fe81f6c6d0d110e3892251f6ce76ed095abd315e26e6e1193af3af	url	https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-1.8.2.tar.gz
+vim-9.2.1381.tar.gz	928a9782fc2821c6817bc6d35fa11b62d6d0211f8829c9e254255d6176a0f1c2	url	https://github.com/vim/vim/archive/refs/tags/v9.2.1381.tar.gz
+unix-tree-2.3.2.tar.gz	513a53cbc42ca1f4ea06af2bab1f5283524a3848266b1d162416f8033afc4985	url	https://gitlab.com/OldManProgrammer/unix-tree/-/archive/2.3.2/unix-tree-2.3.2.tar.gz
+strace-7.3.tar.xz	529634c40910895a9a1f3c5c1e65da2ca9ed72fb158dfc4bcc89efdf05e39b72	url	https://github.com/strace/strace/releases/download/v7.3/strace-7.3.tar.xz
+wireguard-tools-1.0.20260223.tar.xz	af459827b80bfd31b83b08077f4b5843acb7d18ad9a33a2ef532d3090f291fbf	url	https://git.zx2c4.com/wireguard-tools/snapshot/wireguard-tools-1.0.20260223.tar.xz
+fd-10.5.2.tar.gz	8991b6504cac33c00528050622dfe3f2a0db1be1a6faf99f69b46d1a8f737dc5	url	https://github.com/sharkdp/fd/archive/refs/tags/v10.5.2.tar.gz

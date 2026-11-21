@@ -100,7 +100,19 @@ Added `at-spi2-core` (2.62.1), `libxt` (1.3.1), `gtk3` (3.24.43), and `firefox` 
 
 ---
 
-## 5. Full repository build, ISOs, and QEMU test suites
+## 5. Test pass D — CLI & sysadmin essentials
+
+Added `openssh` (with `/etc/sv/sshd` runit service + `sshd` user), `libevent`, `tmux`, `htop`, `jq`, `vim`, `tree`, `strace`, `wireguard-tools`, and `fd`:
+
+```sh
+"$PWD/scripts/valence-build" openssh tmux htop jq vim tree strace wireguard-tools fd
+```
+
+Verify each builds cleanly and `scripts/check-dev-deps.py` passes on `libevent-dev` and `jq-dev`.
+
+---
+
+## 6. Full repository build, ISOs, and QEMU test suites
 
 Once the new packages build cleanly (or if you want to validate the whole distro end-to-end):
 
