@@ -177,6 +177,9 @@ Things the builder gives you:
   call it; everything else is a cross build with `cmake_setup`.
 - `options=(runhere)`: what the recipe links can run on the build machine (rule 18). `options=(rust)`: the recipe
   puts Rust code into a package (rule 46).
+- `arch=(aarch64)`: the only architectures the recipe is for (`$APK_ARCH` names: x86_64, x86, aarch64). Without it a
+  recipe is for all. `valence-build` leaves such a recipe out when it builds everything for another architecture,
+  and refuses it there by name or as a dependency (`recipes/linux-rpi`, `recipes/rpi-firmware`).
 - `py_install <name> <dirs...>` installs pure-Python modules into python3's site-packages with a small `.dist-info`
   (`recipes/python3-mako`). Modules with C parts need their build system (`recipes/python3-libxml2`).
 - `options=('!strip')` skips stripping. `options=(keepdirs)` keeps empty directories.
@@ -307,8 +310,10 @@ Rebuilding the kernel takes about an hour on 2 cores.
     call it through `$M/scripts/valence-run`. CMake uses that only for programs the project itself builds: the
     programs of packages in the sysroot (moc, kconfig_compiler, wayland-scanner) are wrapped by the builder (rule
     66). Autoconf builds are cross builds and don't run test programs: their
-    answers are in `scripts/config.site` (rule 25). A second architecture (the planned 64-bit ARM edition) swaps the
-    wrapper for an emulator.
+    answers are in `scripts/config.site` (rule 25). On 64-bit ARM (`VALENCE_ARCH=aarch64`,
+    ROADMAP.md phase 9) the wrapper starts them inside QEMU's user-mode emulator (`VALENCE_EMU` in `env.sh`, Ubuntu's
+    qemu-user), and package scripts run in an aarch64 root through the kernel's binfmt registration
+    (qemu-user-static, with the F flag, so it works in a chroot); `host-setup.sh` installs both.
     **`options=(runhere)` is for a build that runs what it has just built and cannot be handed a wrapper for it:**
     perl's Configure and its miniperl, bc's `fbc`, `file` compiling its magic, clang's tablegen in a build configured
     as native (`cmake_native`), Rust's build running the compiler it has made. Everything such a recipe links gets

@@ -9,4 +9,5 @@
 #
 # This is also the one place a second architecture changes: there the wrapper is an emulator.
 if [ -z "${SYSROOT:-}" ] || [ -z "${LDSO:-}" ]; then . "$(dirname "$(readlink -f "$0")")/env.sh"; fi
-exec "$SYSROOT/usr/lib/$LDSO" --library-path "$SYSROOT/usr/lib" "$@"
+# (a target the processor cannot run, 64-bit ARM: the same, inside QEMU's user-mode emulator; VALENCE_EMU in env.sh)
+exec ${VALENCE_EMU:-} "$SYSROOT/usr/lib/$LDSO" --library-path "$SYSROOT/usr/lib" "$@"

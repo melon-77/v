@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the Valence cross toolchain for $VALENCE_ARCH (x86_64-valence-linux-gnu or i686-valence-linux-gnu).
+# Build the Valence cross toolchain for $VALENCE_ARCH (x86_64-, i686- or aarch64-valence-linux-gnu).
 # The order a glibc cross toolchain needs: binutils; the kernel's headers; the compiler alone; glibc's headers and
 # start files; libgcc; glibc; then the rest of GCC (libstdc++ and friends). Each step leaves a stamp in
 # work/toolchain, so an interrupted run carries on where it stopped; delete work/toolchain to start over.
@@ -38,6 +38,7 @@ if todo sources; then step "gcc and glibc sources"
   tar xf $SRC/gcc-$GCCV.tar.xz; cd gcc-$GCCV
   # 64-bit libraries go to lib, not lib64 (only a link here)
   sed -i '/m64=/s/lib64/lib/' gcc/config/i386/t-linux64
+  sed -i '/mabi.lp64=/s/lib64/lib/' gcc/config/aarch64/t-aarch64-linux
   tar xf $SRC/gmp-6.3.0.tar.xz && mv gmp-6.3.0+dfsg gmp
   # the Debian dfsg tarball drops the docs; stop GMP from expecting them
   sed -i "s| doc/Makefile||" gmp/configure; sed -i "s/^SUBDIRS = \(.*\) doc$/SUBDIRS = \1/" gmp/Makefile.in

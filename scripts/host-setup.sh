@@ -27,6 +27,7 @@ ubuntu_deps(){
     ninja-build cmake pkg-config autoconf automake autopoint libtool libltdl-dev gettext patch file \
     xz-utils zstd lz4 bzip2 cpio rsync unzip wget curl git ca-certificates dpkg-dev \
     xorriso mtools dosfstools xfsprogs squashfs-tools qemu-system-x86 ovmf \
+    qemu-user qemu-user-static qemu-system-arm btrfs-progs \
     libssl-dev zlib1g-dev libzstd-dev libelf-dev dwarves kmod scdoc \
     tcl hwdata publicsuffix rpcsvc-proto device-tree-compiler glslang-tools spirv-tools xsltproc \
     llvm-19-dev libclang-19-dev libclang-cpp19-dev libclc-19-dev libllvmspirvlib-19-dev \
