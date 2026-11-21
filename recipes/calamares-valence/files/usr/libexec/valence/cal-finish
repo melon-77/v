@@ -111,6 +111,14 @@ if [ -f $prof ]; then
 fi
 mkdir -p "$ROOT/var/service"
 for s in $svcs $vmsvcs; do if [ -d "$ROOT/etc/sv/$s" ]; then ln -sfn /etc/sv/$s "$ROOT/var/service/$s"; fi; done
+
+# a wish list on a USB stick or another drive (valence-wishlist.txt; ROADMAP.md, phase 8), as valence-install does
+tdisk=/dev/$(basename "$(readlink -f /sys/class/block/${bootdev##*/}/..)")
+if wish=$(valence-wish --find --exclude "$tdisk" 2>/dev/null); then
+  say "wish list $wish"
+  mkdir -p "$ROOT/etc/valence"; cp "$wish" "$ROOT/etc/valence/wishlist.txt"
+  valence-wish --root "$ROOT" "$wish" || say "the wish list was not applied completely (above); after the first start: sudo valence-wish /etc/valence/wishlist.txt"
+fi
 chroot "$ROOT" dbus-uuidgen --ensure 2>/dev/null || true
 
 say "bootloader"

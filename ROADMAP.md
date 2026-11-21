@@ -4,7 +4,7 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 [Melon Linux](https://github.com/melon-77/melon-os): the same engineering, without the jokes, and with a handful
 of fixes where Melon chose small over sensible.
 
-Status, 20 November 2026: phases 1 to 6 are done. The system is on glibc 2.44 and its commands are the
+Status, 21 November 2026: phases 1 to 8 are done, and 0.1.0 is the first release. The system is on glibc 2.44 and its commands are the
 GNU tools. Both ISOs build: the console ISO (58 recipes on it) and the Plasma desktop ISO (345 recipes with the
 console's: LLVM, Mesa, Qt 6, KDE Frameworks and Plasma 6, SDDM, PipeWire, Flatpak, Calamares). The console ISO passes
 its eight tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next
@@ -151,12 +151,20 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   (BIOS, UEFI, and an encrypted disk). The first encrypted Calamares run left a disk that did not start, a fault in
   the settings inherited from Melon; AGENTS.md, "Installers", has it.
 
-- [ ] **7. Documentation and the first test release.**
+- [x] **7. Documentation and the first test release.**
   README, install guide, update and recovery guide, contributing rules (`testing` before `main`, as in Melon).
   Signed ISOs with checksums.
   *Done when:* someone who has never seen Melon can install Valence from the guide alone.
+  *Done (21 November 2026):* `docs/install.md`, `docs/updating.md`, `CONTRIBUTING.md`, and a README rewritten as
+  the front page; `scripts/release.sh` signs `SHA256SUMS` with the packages' key, and release 0.1.0 carries both
+  ISOs, the checksums, the signature and the key. Someone who had never seen Melon or Valence (a fresh Claude agent
+  given only the guide) installed the desktop ISO in a virtual machine with the graphical installer, following the
+  guide alone, and the installed system logged in to Plasma. What it found unclear went into the guide; the two
+  things it found in the ISOs (the live session turned the screen off in the middle of the install, and the boot
+  menu cut its entries' names short) are fixed in the test builds after 0.1.0. Not done: an install by a person on
+  a real computer.
 
-- [ ] **8. A file you can throw in to get the system you want.**
+- [x] **8. A file you can throw in to get the system you want.**
   A proposal, put here on 19 November 2026 as the last phase and moved ahead of the ARM edition the day after
   ("wishlist should be before arm edition"). The design below is a starting point. What is wanted, in the owner's
   words: "a file you can throw in to just get what you want", instead of installing everything by hand, "rather
@@ -185,6 +193,13 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   *Done when:* a QEMU test installs a system with a file thrown in and finds its packages, services and groups
   there; applies a second file on the running system and has everything on it, with nothing gone that was there
   before; applies it again and nothing changes; and one rollback takes the second file's changes back.
+  *Done (21 November 2026):* `valence-wish` (AGENTS.md, "Wish lists"), taken by both installers from a
+  `valence-wishlist.txt` on a USB stick or another drive. `qemu-test.py wish` passes: the console installer finds a
+  list on a USB stick and applies it, and the installed system has its package, service, group and host name; a
+  second list applied on the running system adds its own and keeps the first one's, after one snapshot; applied
+  again it changes nothing; a list naming a package that does not exist changes nothing; one rollback and a restart
+  take the second list back and keep the first. Not in the test: Flathub apps in a list (they need the internet),
+  and Calamares' use of a list (Calamares has no automated test).
 
 - [ ] **9. A 64-bit ARM edition for Raspberry Pi.**
   A second architecture, `aarch64-valence-linux-gnu`, next to x86_64 in the same tree (the way Melon carried its
@@ -239,8 +254,12 @@ These are open on purpose. Each gets settled before the phase that needs it.
   alternative is man-db with groff, about 15 MB, which is what Arch and Debian use.
 - **Documentation on the ISO.** The ISO's own package repository carries only a few extras, so `apk add docs` needs
   the online repository. All 38 `-doc` packages of the base and mandoc together are about 5 MB.
-- **The system file (phase 8).** Its name and the command's, the exact format, how a name is matched to a Flathub
-  app, and what it covers beyond packages, services and groups.
+- **The wish list's details (phase 8).** Chosen while building it, mine and easy to change: the command
+  `valence-wish`, the file `valence-wishlist.txt` when an installer is to find it, `key = a, b` lines with `#`
+  comments, the keys `packages`, `services`, `hostname` and `user.NAME.groups`, and a Flathub app found by its full
+  ID, a table of common names, or Flathub's search when exactly one app has that name. Not covered yet: what
+  people set by hand after every install beyond those (time zone, keyboard layout, language, Wi-Fi networks, more
+  users).
 - **Website**, and the font for the wordmark (the current one is a stand-in).
 
 ## Decided

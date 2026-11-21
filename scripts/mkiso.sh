@@ -84,6 +84,12 @@ if [ "$EDITION" = desktop ]; then
   if [ $session_is_plasma = 1 ]; then
     mkdir -p $LIVE/home/live/.config
     printf '[Daemon]\nAutolock=false\nLockOnResume=false\n' > $LIVE/home/live/.config/kscreenlockerrc
+    # Nor does it dim or switch off the screen, or suspend: someone following the install guide saw the screen go
+    # dark in the middle of an install (Plasma's power saving) and could take it for the end, or a crash, and pull
+    # the stick. (powerdevil's own setting names: [<profile>][Display] and [<profile>][SuspendAndShutdown].)
+    for prof in AC Battery LowBattery; do
+      printf '[%s][Display]\nDimDisplayWhenIdle=false\nTurnOffDisplayWhenIdle=false\n\n[%s][SuspendAndShutdown]\nAutoSuspendAction=0\n\n' $prof $prof
+    done > $LIVE/home/live/.config/powerdevilrc
   fi
   install -m755 $ROOT/usr/share/applications/valence-install.desktop $LIVE/home/live/Desktop/valence-install.desktop 2>/dev/null || true
   chown -R 1000:1000 $LIVE/home/live

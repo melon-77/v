@@ -715,6 +715,50 @@ ships the clashing file. The sysroot itself needs no repair, because every build
 (`apk_sysroot` in valence-build-recipe). `apk verify` needs an absolute `--keys-dir`:
 a relative one is resolved against `/` and reports every package as UNTRUSTED.
 
+## Wish lists
+
+ROADMAP.md, phase 8: "a file you can throw in to get the system you want", a list of wishes, not a description of
+the whole system. Everything is `valence-wish` in valence-base, with a few lines in the installers.
+
+- **The file** (`valence-wishlist.txt` when an installer is to find it): `key = item, item, ...` lines, `#` starts a
+  comment, a key may come back and its items add up. Keys: `packages`, `services` (folders of `/etc/sv`),
+  `hostname`, `user.NAME.groups`. Anything else is an error that names the line, and so is a hostname that is not
+  one; `valence-wish --check FILE` only reads the file.
+- **Adding, never removing.** `valence-wish FILE` works out what the file lists and the system does not have yet
+  (packages not installed, services without a link in `/var/service`, groups the user is not in, another host
+  name) and does only that; what the file does not mention stays as it is. When everything is already so it says
+  "nothing to do", changes nothing and takes no snapshot, so applying a file twice is the same as once. `-n`
+  prints what it would add.
+- **Everything is checked before anything changes**: a package that is in neither the repository nor Flathub, a
+  service or group that is not there, a user who is not there. A service or group that a package of the same file
+  brings can only be checked once the package is installed; if it is still missing then, `valence-wish` stops
+  there and says that the packages were added.
+- **One snapshot for the whole file.** On a running system it calls `valence-snapshot auto` first, with
+  `VALENCE_SNAPSHOT_TEXT` saying what it is ("before valence-wish wishes.txt"), and runs apk with
+  `--no-commit-hooks`, so the file is one snapshot and one `valence-snapshot rollback` takes all of it back (hostname,
+  services and groups live in `@` too). `AUTO=no` in `snapshot.conf` switches this snapshot off with apk's.
+- **Packages or Flathub.** A name under `packages` is an apk package when the repository has one of exactly that
+  name (`apk search -x`). Otherwise it is a Flathub app: a full app ID (`org.gimp.GIMP`) as it is, a common name
+  from a table in the script (`firefox`, `steam`, `vlc`, `discord`, `gimp`, ...), or else the one app whose name
+  Flathub's own search matches exactly. Flathub needs flatpak, so a base system refuses such a name. Apps are
+  installed with `valence-flathub`, system-wide.
+- **Installers.** `valence-wish --find [--exclude DISK]` looks for `valence-wishlist.txt` at the top of any
+  partition (FAT, exFAT, NTFS, ext4, Btrfs, XFS) other than the target disk's, mounted or not: a second USB stick,
+  the data partition of a multi-ISO stick next to the ISO, a drive in the machine. `valence-install` offers a file it
+  found (the default answer, so `VALENCE_YES=1` takes it; `VALENCE_WISHLIST=FILE|none` decides beforehand), checks
+  it before partitioning, and applies it with `valence-wish --root $TARGET` after the services are set up; `cal-finish`
+  does the same after the users job. A wish that cannot be had does not stop an install: the system is installed
+  without it and the installer says how to apply it later. The file is kept as `/etc/valence/wishlist.txt`.
+  With `--root` there is no snapshot (the system is still being put together) and Flathub apps, which need a
+  network, are written to `/var/lib/valence/wish-flathub`: `valence-first-boot` installs them at the first login.
+  A hostname in the list wins over the installer's.
+- **Test:** `qemu-test.py wish ISO DISK` (ROADMAP.md, phase 8's "done when"): a USB stick with a list on it; the
+  installer finds and applies it; the installed system has its package, service, group and host name; a second list
+  applied on the running system adds its own and keeps the first one's, after one snapshot; applied again it
+  changes nothing; a list naming a package that does not exist changes nothing; one rollback and a restart take
+  the second list back and keep the first. Calamares' part is the same command; it is not tested automatically.
+  Flathub is not in the test (it needs the internet).
+
 ## Testing (required before you commit a change that affects boot or install)
 
 ```sh
@@ -728,6 +772,7 @@ scripts/qemu-test.py disk /tmp/disk.img --luks                            # boot
 scripts/qemu-test.py rollback /tmp/disk.img [--luks] [--uefi]             # on an installed disk: break an update on purpose and go
                                                                           # back, with the command and from the boot menu (below)
 scripts/qemu-test.py dualboot out/valence-*-x86_64.iso /tmp/dual.img        # install next to a fake Windows (UEFI), Windows untouched
+scripts/qemu-test.py wish out/valence-*-x86_64.iso /tmp/disk.img            # a wish list on a USB stick, then on the running system ("Wish lists")
 VALENCE_EDITION=desktop scripts/mkiso.sh                                    # the Plasma live ISO (desktop edition)
 scripts/qemu-test.py desktop out/valence-desktop-*-x86_64.iso              # services ready, Plasma running, a USB stick mounts through
                                                                           # UDisks2, screen-recording encoders work, a text file prints
@@ -898,7 +943,7 @@ the sound devices the kernel found); QEMU records whatever it plays to `logs/aud
   menu, checksums of everything Windows owns before and after).
 - Unattended install variables: `VALENCE_DISK VALENCE_HOSTNAME VALENCE_ROOTPW VALENCE_USER VALENCE_USERPW
   VALENCE_PROFILE VALENCE_YES=1 VALENCE_SERIAL=1 VALENCE_WIFI_SSID VALENCE_WIFI_PSK
-  VALENCE_ENCRYPT=y VALENCE_LUKSPW VALENCE_MODE=alongside`. With `VALENCE_YES=1`, questions that have a default take it.
+  VALENCE_ENCRYPT=y VALENCE_LUKSPW VALENCE_MODE=alongside VALENCE_WISHLIST=FILE|none` ("Wish lists"). With `VALENCE_YES=1`, questions that have a default take it.
 - **Profiles** live in `/usr/share/valence/profiles/` on the live system: `<name>` is the package list,
   `<name>.services` the runit services (`name` enables one, `-name` drops a base service). `mkiso.sh`
   writes them. The desktop profile swaps `mdevd`/`dhcp` for `udevd` and NetworkManager, and the

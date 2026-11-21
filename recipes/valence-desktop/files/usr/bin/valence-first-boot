@@ -14,6 +14,16 @@ if [ "$1" != --in-terminal ]; then
 fi
 
 B=$(printf '\033[1m') O=$(printf '\033[38;5;255m') G=$(printf '\033[38;5;146m') R=$(printf '\033[0m')
+# apps from Flathub that a wish list asked for while installing (valence-wish --root): they need the network
+wish=/var/lib/valence/wish-flathub
+if [ -s $wish ]; then
+  echo; echo "  ${B}Installing the apps your wish list asked for, from Flathub:${R} $(xargs < $wish)"; echo
+  if valence-flathub install $(cat $wish); then
+    doas rm -f $wish; echo; echo "  ${G}Done.${R}"
+  else
+    echo; echo "  That didn't work (no internet?). ${B}valence-first-boot --again${R} tries again."
+  fi
+fi
 cat <<EOF
 
   ${O}${B}Welcome to Valence.${R}

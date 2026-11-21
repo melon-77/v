@@ -15,6 +15,9 @@
   qemu-test.py dualboot <iso> <disk.img>         a fake Windows disk (EFI partition, MSR, NTFS C:, free space): install
                                                  alongside on UEFI, boot Valence from the firmware's boot menu, Windows in
                                                  GRUB, and nothing of Windows' changed
+  qemu-test.py wish <iso> <disk.img>             a wish list on a USB stick: the console installer finds and applies it,
+                                                 a second one on the running system, again (no change), a bad one (no
+                                                 change), and one rollback takes the second back (ROADMAP.md, phase 8)
   --luks   install with an encrypted root (and type the passphrase when the installed disk boots)
   --vmware VMware-style virtual hardware: PVSCSI disk, VMXNET3 network, VMware SVGA
 """
@@ -135,6 +138,21 @@ elif mode == 'dualboot':
                  '-drive', 'if=pflash,format=raw,file=/tmp/valence-ovmf-vars.fd']
     base = cmd + uefi_args
     cmd = base + ['-cdrom', iso] + disk_args(disk) + ['-boot', 'd']
+elif mode == 'wish':
+    import subprocess
+    iso, disk = args
+    # a USB stick with the wish list on it, next to the ISO's: MBR, one FAT32 partition, valence-wishlist.txt at the top
+    usb = '/tmp/valence-wish-usb.img'
+    open(usb, 'wb').truncate(64 << 20)
+    subprocess.run(['sfdisk', '-q', usb], input=b'label: dos\nstart=2048, type=c\n', check=True)
+    subprocess.run(['mkfs.vfat', '-F', '32', '-n', 'WISHES', '--offset', '2048', usb, str((64 << 20) // 1024 - 1024)],
+                   check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(['mcopy', '-i', f'{usb}@@1M', '-', '::valence-wishlist.txt'], check=True,
+                   input=b'# the first list, thrown in at install time\npackages = nano\nservices = getty-tty4\n'
+                         b'hostname = valencewish\nuser.jcole.groups = dialout\n')
+    stick = ['-device', 'qemu-xhci,id=xhci', '-drive', f'if=none,id=stick,format=raw,file={usb}', '-device', 'usb-storage,bus=xhci.0,drive=stick']
+    diskcmd = cmd + disk_args(disk) + ['-boot', 'c']
+    cmd = cmd + ['-cdrom', iso] + disk_args(disk) + ['-boot', 'd'] + stick
 elif mode in ('live', 'toram'):
     iso, disk = args
     cmd += ['-cdrom', iso] + disk_args(disk) + ['-boot', 'd']
@@ -592,6 +610,80 @@ if mode == 'rollback':
         check(v.get('updates') == '2' and v.get('copies') == v.get('used'), 'with KEEP=2 apk keeps its two newest snapshots, and the kernel copies of the others go')
     p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300)
     step('rollback test: ' + ('OK' if not failed else 'FAILED: ' + '; '.join(failed)))
+    sys.exit(0 if not failed else 1)
+
+if mode == 'wish':
+    # Phase 8's "done when": a wish list on a USB stick is found and applied by the console installer; the installed
+    # system has its packages, services, groups and host name; a second list applied to the running system adds its
+    # own and leaves the first one's; applying it again changes nothing; a list that cannot be had changes nothing;
+    # and one "valence-snapshot rollback" takes the second list back. The "online repository" is this build's repo/,
+    # served by this script (10.0.2.2 is the host in QEMU's user network).
+    import http.server, threading, functools
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=f'{M}/repo'))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    repourl = f'http://10.0.2.2:{srv.server_address[1]}'
+    failed = []
+    def check(cond, what):
+        if not cond: failed.append(what)
+        step(what + ': ' + ('OK' if cond else 'FAILED'))
+        return cond
+    def state():
+        out = sh('y(){ "$@" >/dev/null 2>&1 && echo y || echo n; }; echo "NANO=$(y apk info -e nano)" "RSYNC=$(y apk info -e rsync)" '
+                 '"TTY4=$(y test -L /var/service/getty-tty4)" "TTY5=$(y test -L /var/service/getty-tty5)" '
+                 '"DIALOUT=$(y sh -c "id -nG jcole | grep -qw dialout")" "FLOPPY=$(y sh -c "id -nG jcole | grep -qw floppy")" '
+                 '"HOST=$(cat /etc/hostname)" "SNAPS=$(ls /.snapshots | grep -c -E "^[0-9]+$")" "state-$((40+2))"', timeout=120)
+        return dict(__import__('re').findall(r'(\w+)=(\S*)', out.split('state-42')[0] if 'state-42' in out else ''))
+    step('waiting for GRUB')
+    boot_serial_entry(p)
+    p.expect(PROMPT, timeout=900); step('logged in on live system')
+    sh('stty cols 160 rows 50; export TERM=vt100')
+    sh(f'echo {repourl} > /usr/share/valence/repo-url')
+    out = sh(f'valence-wish --find --exclude /dev/{DISKNAME}; echo "found=$?"')
+    check('valence-wishlist.txt' in out and 'found=0' in out, 'the live system finds the wish list on the USB stick')
+    sh(f'export VALENCE_DISK={DISKNAME} VALENCE_HOSTNAME=valencetest VALENCE_ROOTPW=valenceroot VALENCE_USER=jcole '
+       'VALENCE_USERPW=valenceuser VALENCE_PROFILE=base VALENCE_YES=1 VALENCE_SERIAL=1 VALENCE_ENCRYPT=n')
+    out = sh('valence-install', timeout=3600)
+    print(out[-2500:])
+    check('Valence is installed' in out, 'installed')
+    check('Applying the wish list' in out and 'not applied' not in out, 'the installer applied the wish list it found')
+    p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300)
+    cmd = diskcmd; spawn()
+    boot_installed(); step('the installed system started')
+    s1 = state(); print(s1)
+    check((s1.get('NANO'), s1.get('TTY4'), s1.get('DIALOUT'), s1.get('HOST')) == ('y', 'y', 'y', 'valencewish'),
+          'the first list is there: its package, service, group and host name')
+    check(s1.get('RSYNC') == 'n' and s1.get('TTY5') == 'n' and s1.get('FLOPPY') == 'n', 'nothing of the second list is there yet')
+    print(sh('sleep 8; sv status /var/service/getty-tty4'))
+    sh("printf '# the second list\\npackages = rsync, nano\\nservices = getty-tty5, getty-tty4\\nhostname = valencewish2\\n"
+       "user.jcole.groups = floppy, dialout\\n' > /root/wish2.txt")
+    out = sh('valence-wish -n /root/wish2.txt', timeout=300); print(out)
+    check('rsync' in out and 'nano' not in out.split('adds:')[-1] and 'getty-tty4' not in out.split('adds:')[-1],
+          'valence-wish -n lists only what the second list adds')
+    check(state().get('RSYNC') == 'n', '-n changed nothing')
+    out = sh('valence-wish /root/wish2.txt', timeout=900); print(out)
+    s2 = state(); print(s2)
+    check((s2.get('RSYNC'), s2.get('TTY5'), s2.get('FLOPPY'), s2.get('HOST')) == ('y', 'y', 'y', 'valencewish2'),
+          'the second list is applied on the running system')
+    check((s2.get('NANO'), s2.get('TTY4'), s2.get('DIALOUT')) == ('y', 'y', 'y'), 'and the first one\'s are still there')
+    check(int(s2.get('SNAPS', 0)) == int(s1.get('SNAPS', 0)) + 1, 'with one snapshot taken first')
+    check('valence-wish' in sh('valence-snapshot list | tail -n 4'), 'the snapshot says it is from before the wish list')
+    print(sh('sleep 8; sv status /var/service/getty-tty5; hostname'))
+    out = sh('valence-wish /root/wish2.txt; echo "rc=$?"', timeout=300); print(out)
+    check('nothing to do' in out and 'rc=0' in out and state().get('SNAPS') == s2.get('SNAPS'), 'applied again, it changes nothing')
+    sh("printf 'packages = no-such-package-at-all\\nhostname = valencebroken\\n' > /root/wish3.txt")
+    out = sh('valence-wish /root/wish3.txt; echo "rc=$?"', timeout=300); print(out)
+    s3 = state()
+    check('rc=1' in out and s3.get('HOST') == 'valencewish2' and s3.get('SNAPS') == s2.get('SNAPS'),
+          'a list that cannot be had changes nothing')
+    out = sh('valence-snapshot rollback -y', timeout=300); print(out)
+    p.sendline('reboot'); p.expect(pexpect.EOF, timeout=300)
+    spawn(); boot_installed(); step('restarted after the rollback')
+    s4 = state(); print(s4)
+    check((s4.get('RSYNC'), s4.get('TTY5'), s4.get('FLOPPY'), s4.get('HOST')) == ('n', 'n', 'n', 'valencewish'),
+          'one rollback takes the second list back')
+    check((s4.get('NANO'), s4.get('TTY4'), s4.get('DIALOUT')) == ('y', 'y', 'y'), 'and keeps the first one\'s')
+    p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300)
+    step('wish test: ' + ('OK' if not failed else 'FAILED: ' + '; '.join(failed)))
     sys.exit(0 if not failed else 1)
 
 if mode == 'live':

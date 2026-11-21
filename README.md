@@ -38,6 +38,7 @@ and what comes next.
 | boot | GRUB 2.14; one ISO and one install boot on both BIOS and UEFI |
 | root fs | Btrfs, with the system, `/home`, `/var/log`, the snapshots and the swap file each in a subvolume of its own; FAT32 `/boot` |
 | snapshots | apk takes one before every change to the installed packages; the boot menu starts any of them, and `valence-snapshot rollback` makes one the default, the way NixOS's generations work |
+| wish lists | a file like `packages = firefox, nano` / `services = sshd` / `hostname = ...` that `valence-wish` (or the installer) applies in one go: it only adds, takes a snapshot first, and changes nothing the second time |
 | documentation | man pages and other docs are in `<package>-doc` packages, translations in `<package>-lang`; `apk add docs` brings the docs of everything installed; `man` is mandoc |
 | desktop | KDE Plasma 6 on Wayland, SDDM, PipeWire, NetworkManager, CUPS; Flatpak and Flathub for big apps |
 | language | US English (the base tools have no translations; Plasma's language can be changed) |

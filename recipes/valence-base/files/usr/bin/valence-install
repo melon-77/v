@@ -12,7 +12,8 @@
 # VALENCE_USERPW and VALENCE_YES=1 (and optionally VALENCE_PROFILE, VALENCE_MODE=alongside|erase,
 # VALENCE_WIFI_SSID/VALENCE_WIFI_PSK,
 # VALENCE_ENCRYPT=y with VALENCE_LUKSPW to encrypt / with LUKS2; /boot stays plain and a small initramfs asks for
-# the passphrase, VALENCE_SERIAL=1 for a serial console on the installed system).
+# the passphrase, VALENCE_SERIAL=1 for a serial console on the installed system, VALENCE_WISHLIST=FILE for a wish
+# list to apply, ROADMAP.md phase 8: without it, a valence-wishlist.txt on a USB stick or another drive is offered).
 #
 # The desktop ISO also has the graphical installer, Calamares (valence-install-gui); this one installs the
 # same thing in a handful of prompts.
@@ -25,11 +26,14 @@ usage: valence-install
 
 Installs Valence from the live ISO onto a disk. It asks for the disk (erased, or on UEFI next to Windows or
 another system in the disk's unallocated space), what to install (base or desktop), the host name, the
-passwords, a Wi-Fi network and disk encryption (LUKS). Needs root.
+passwords, a Wi-Fi network and disk encryption (LUKS). Needs root. A wish list (valence-wish --help) found
+on a USB stick or another drive, as valence-wishlist.txt at the top of a partition, is offered and applied to the
+new system.
 
 Unattended (set as root: doas doesn't pass them on): VALENCE_DISK VALENCE_HOSTNAME VALENCE_ROOTPW VALENCE_USER
 VALENCE_USERPW VALENCE_PROFILE=base|desktop VALENCE_MODE=alongside|erase VALENCE_WIFI_SSID VALENCE_WIFI_PSK
-VALENCE_ENCRYPT=y VALENCE_LUKSPW VALENCE_SERIAL=1 VALENCE_YES=1 (questions with a default take it)
+VALENCE_ENCRYPT=y VALENCE_LUKSPW VALENCE_SERIAL=1 VALENCE_WISHLIST=FILE|none VALENCE_YES=1 (questions with a
+default take it, a wish list that was found among them)
 EOF
   exit 0 ;; esac
 REPO=${VALENCE_REPO:-/media/valence/valence/repo}
@@ -99,6 +103,13 @@ if command -v cryptsetup >/dev/null; then
   ask VALENCE_ENCRYPT "Encrypt the system with a passphrase (LUKS) (y/n)" n
   case $VALENCE_ENCRYPT in y|Y|yes) ENCRYPT=y; askpw VALENCE_LUKSPW "Disk encryption passphrase" ;; esac
 fi
+# a wish list (ROADMAP.md, phase 8): VALENCE_WISHLIST, or a valence-wishlist.txt on a USB stick or another drive
+if [ -z "${VALENCE_WISHLIST:-}" ] && found=$(valence-wish --find --exclude "$DISK" 2>/dev/null); then
+  say "A wish list: $found"; sed 's/^/   /' "$found"
+  ask VALENCE_WISHLIST "Apply it to the new system (the file, or none)" "$found"
+fi
+case ${VALENCE_WISHLIST:-} in none|n|no|N) VALENCE_WISHLIST= ;; esac
+[ -z "${VALENCE_WISHLIST:-}" ] || valence-wish --check "$VALENCE_WISHLIST" || die "the wish list $VALENCE_WISHLIST cannot be used (above)"
 if [ "${VALENCE_YES:-}" != 1 ]; then
   if [ $MODE = alongside ]; then
     printf '\n%sInstall Valence into the free space on %s (the other partitions stay as they are)? Type YES:%s ' "$B" "$DISK" "$R"
@@ -284,6 +295,12 @@ if [ "${VALENCE_SERIAL:-0}" = 1 ]; then   # serial console, for headless machine
   SVCS="$SVCS getty-ttyS0"
 fi
 for s in $SVCS; do if [ -d $TARGET/etc/sv/$s ]; then ln -sfn /etc/sv/$s $TARGET/var/service/$s; fi; done
+if [ -n "${VALENCE_WISHLIST:-}" ]; then
+  say "Applying the wish list"
+  mkdir -p $TARGET/etc/valence; cp "$VALENCE_WISHLIST" $TARGET/etc/valence/wishlist.txt
+  # a wish that cannot be had leaves a system that works: say so and go on
+  valence-wish --root $TARGET "$VALENCE_WISHLIST" || printf '   %sThe wish list was not applied completely (above).%s After the first start: sudo valence-wish /etc/valence/wishlist.txt\n' "$B" "$R"
+fi
 
 if [ $MODE = alongside ]; then
   # its own folder on the shared EFI partition and an entry in the firmware's boot menu (efibootmgr, through

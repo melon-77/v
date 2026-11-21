@@ -35,6 +35,35 @@ Bigger desktop apps come from Flathub instead: Discover (in the launcher) or `fl
 Documentation is not installed by default. `sudo apk add docs` brings the manual pages of everything installed, and
 `man <command>` shows them; `sudo apk add htop-doc` brings one package's. `sudo apk del docs` removes them again.
 
+## A wish list: what you want, written down once
+
+Instead of installing things one by one, you can write what you want into a file and apply it in one go:
+
+```
+# my-wishes.txt
+packages = nano, htop, firefox, steam
+services = sshd
+hostname = workbench
+user.jcole.groups = dialout, kvm
+```
+
+```sh
+valence-wish -n my-wishes.txt     # what it would add (changes nothing)
+sudo valence-wish my-wishes.txt   # add it
+```
+
+It only **adds**: what is already there is left as it is, and nothing is removed because the file does not mention
+it, so applying the same file again changes nothing. A name under `packages` is looked for in Valence's repository
+first and otherwise among the apps on Flathub (Firefox, Steam, VLC, ...; a full Flathub app ID such as
+`org.gimp.GIMP` works too). A snapshot is taken first, so one `sudo valence-snapshot rollback` takes the whole file
+back. If anything in it cannot be had (a package that does not exist, a misspelled service), it says so and changes
+nothing. `valence-wish --help` has the details.
+
+The installers take a wish list too: save it as `valence-wishlist.txt` at the top of a second USB stick (or of any
+drive in the computer other than the one Valence goes on), plug it in before installing, and the installer offers
+to apply it to the new system. Apps from Flathub are then installed at the first login, when there is a network.
+(Wish lists are in the test builds after 0.1.0, not in 0.1.0 itself.)
+
 ## Snapshots
 
 ```sh

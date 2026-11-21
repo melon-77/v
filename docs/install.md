@@ -176,6 +176,10 @@ It lists the disks and asks, in this order (Enter takes the answer in brackets):
 
 When it says **Valence is installed**, type `poweroff`, pull the USB stick out, and switch the computer on.
 
+With a **wish list** (a file `valence-wishlist.txt` on a second USB stick or another drive; see
+[updating.md](updating.md)), the installer shows it after the encryption question and offers to apply it; press
+Enter to do so, or type `none`. (Wish lists are in the test builds after 0.1.0.)
+
 ## 8. The first start
 
 - On a computer with only Valence the boot menu is hidden and the screen stays black for a few seconds (Esc or
