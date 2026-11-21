@@ -839,3 +839,48 @@ pub fn cache_clean(o: &Options) -> Result<bool> {
     Ok(true)
 }
 
+/// Verifies (and unless `o.simulate`, repairs) live-tree files of installed
+/// packages against their copies in `Programs/<name>/<version>/`.
+/// If `names` is empty, checks all installed packages.
+pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
+    let db = if o.simulate { open_readonly(o)? } else { open(o)? };
+    let mut pkgs: Vec<PkgState> = Vec::with_capacity(db.installed.len());
+    let mut targets: HashSet<usize> = HashSet::new();
+    let filter: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+    for n in &filter {
+        if !db.installed.contains_key(*n) {
+            return Err(Error::Msg(format!("{n}: package is not installed")));
+        }
+    }
+    for (idx, (name, ip)) in db.installed.iter().enumerate() {
+        pkgs.push(PkgState::load(&ip.dir, false)?);
+        if filter.is_empty() || filter.contains(name.as_str()) {
+            targets.insert(idx);
+        }
+    }
+    let rep = commit::repair(&db.root, &pkgs, &targets, o.simulate)?;
+    if o.simulate {
+        println!(
+            "OK: checked {} entries ({} ok, {} would be repaired, {} errors)",
+            rep.checked,
+            rep.ok,
+            rep.repaired,
+            rep.errors.len()
+        );
+    } else {
+        println!(
+            "{}: checked {} entries ({} ok, {} repaired, {} errors)",
+            if rep.errors.is_empty() { "OK" } else { "ERRORS" },
+            rep.checked,
+            rep.ok,
+            rep.repaired,
+            rep.errors.len()
+        );
+    }
+    for e in &rep.errors {
+        eprintln!("vpm: {e}");
+    }
+    Ok(rep.errors.is_empty())
+}
+
+

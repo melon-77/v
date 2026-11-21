@@ -162,3 +162,70 @@ fn cache_clean_removes_apks_and_keeps_indexes() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn fix_repairs_live_tree_and_preserves_etc() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = temp_root("fix");
+    seed_root(&root);
+    let pkg_dir = root.join("Programs/hello/1.0-r0");
+    fs::create_dir_all(pkg_dir.join("etc")).unwrap();
+    fs::write(pkg_dir.join("etc/hello.conf"), b"default=1\n").unwrap();
+    fs::write(pkg_dir.join("etc/missing.conf"), b"restore=1\n").unwrap();
+
+    // Update .vpm/files to include a symlink, an edited etc file, and a missing etc file
+    fs::write(
+        pkg_dir.join(".vpm/files"),
+        "\
+d\t0755\troot\troot\t0\t0\t-\t-\t-\tusr
+d\t0755\troot\troot\t0\t0\t-\t-\t-\tusr/bin
+f\t0755\troot\troot\t18\t0\t-\t-\t-\tusr/bin/hello
+l\t0777\troot\troot\t0\t0\t-\thello\t-\tusr/bin/hi
+d\t0755\troot\troot\t0\t0\t-\t-\t-\tetc
+f\t0644\troot\troot\t10\t0\t-\t-\t-\tetc/hello.conf
+f\t0644\troot\troot\t10\t0\t-\t-\t-\tetc/missing.conf
+",
+    )
+    .unwrap();
+
+    // Seed live tree with:
+    // - usr/bin/hello replaced by an unlinked file (wrong inode)
+    // - usr/bin/hi pointing to wrong target
+    // - etc/hello.conf edited by admin (must be preserved!)
+    // - etc/missing.conf missing (must be restored!)
+    fs::create_dir_all(root.join("usr/bin")).unwrap();
+    fs::create_dir_all(root.join("etc")).unwrap();
+    fs::write(root.join("usr/bin/hello"), b"corrupted\n").unwrap();
+    symlink("wrong", root.join("usr/bin/hi")).unwrap();
+    fs::write(root.join("etc/hello.conf"), b"admin_edit=1\n").unwrap();
+
+    let r = root.to_str().unwrap();
+
+    // --simulate reports repairs without changing disk
+    let out = Command::new(vpm_bin()).args(["--root", r, "--simulate", "fix"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("3 would be repaired"), "stdout: {s}");
+    assert!(!root.join("etc/missing.conf").exists());
+
+    // Real `vpm fix` repairs all 3 and keeps admin's etc/hello.conf
+    let out = Command::new(vpm_bin()).args(["--root", r, "fix"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("3 repaired, 0 errors"), "stdout: {s}");
+
+    let src_md = fs::symlink_metadata(pkg_dir.join("usr/bin/hello")).unwrap();
+    let dst_md = fs::symlink_metadata(root.join("usr/bin/hello")).unwrap();
+    assert_eq!((src_md.dev(), src_md.ino()), (dst_md.dev(), dst_md.ino()));
+    assert_eq!(fs::read_link(root.join("usr/bin/hi")).unwrap(), PathBuf::from("hello"));
+    assert_eq!(fs::read_to_string(root.join("etc/hello.conf")).unwrap(), "admin_edit=1\n");
+    assert_eq!(fs::read_to_string(root.join("etc/missing.conf")).unwrap(), "restore=1\n");
+
+    // Second `vpm fix` has 0 repairs
+    let out = Command::new(vpm_bin()).args(["--root", r, "fix", "hello"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("0 repaired, 0 errors"));
+
+    let _ = fs::remove_dir_all(&root);
+}

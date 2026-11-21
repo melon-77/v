@@ -54,6 +54,7 @@ vpm [--root DIR] [--repository INDEX]... [--keys-dir DIR] [--arch ARCH]
   info [-e|-a|-d|-L|-R|-P|-s|-W] [NAME...]
                    show package info (-e installed check, -W who owns PATH;
                    no args lists installed package names)
+  fix [NAME...]    verify and repair live-tree files from /Programs
   cache clean      remove downloaded .apk files from var/cache/vpm
   verify FILE...   check signature, identity and every file's content
   dump FILE [--json], dump-index FILE [--json], manifest FILE
@@ -282,8 +283,8 @@ synthetic edge cases from the spec review match apk too.
 Database and commands:
 - vpm manages its own roots only: no import of an apk-managed system, no
   `apk` database, no `/` without `--initdb` history.
-- No repair command (`apk fix`): corrupt `Programs` entries are skipped
-  with a warning.
+- `vpm fix` repairs the live tree from `Programs/`; corrupt `Programs/`
+  entries themselves still need a reinstall and are skipped with a warning.
 - No dot-files (`.list`, `.trigger`...).
 - No `--latest` or pinning to a tagged repository (`name@tag` is refused).
 

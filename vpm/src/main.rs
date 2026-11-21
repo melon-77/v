@@ -50,6 +50,7 @@ commands:
   info [-e|-a|-d|-L|-R|-P|-s|-W] [NAME...]
                          show package information (-e installed check,
                          -W who owns PATH; no args lists installed names)
+  fix [NAME...]          verify and repair live-tree files from /Programs
   cache clean            remove downloaded .apk files from the cache
   verify FILE...         check signature and contents; print a summary
   dump-index FILE [--json]
@@ -385,6 +386,7 @@ fn main() -> ExitCode {
         "list" => engine::list(&o.engine()),
         "search" => engine::search(&o.engine(), &o.search, &o.args),
         "info" => engine::info(&o.engine(), &o.info, &o.args),
+        "fix" => engine::fix(&o.engine(), &o.args),
         "cache" => match o.args.as_slice() {
             [sub] if sub == "clean" => engine::cache_clean(&o.engine()),
             _ => {

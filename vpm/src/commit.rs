@@ -1034,6 +1034,235 @@ pub fn run_commit_hooks(root: &Path, stage: &str) -> Result<()> {
     Ok(())
 }
 
+/// Summary of a `vpm fix` pass.
+#[derive(Debug, Default)]
+pub struct RepairReport {
+    pub checked: usize,
+    pub ok: usize,
+    pub repaired: usize,
+    pub errors: Vec<String>,
+}
+
+/// Verifies (and unless `simulate`, repairs) live-tree entries for the
+/// packages at `target_indices` inside `pkgs` against their copies in
+/// `Programs/<name>/<version>/`.
+///
+/// - Regular files outside `etc/` are checked by `(dev, ino)` against their
+///   `Programs` copy and re-linked atomically when missing or unlinked.
+/// - Files under `etc/` are restored only when missing, preserving admin edits.
+/// - Symlinks are restored when missing or pointing at a different target.
+/// - Directories are created when missing.
+pub fn repair(
+    root: &Path,
+    pkgs: &[PkgState],
+    target_indices: &HashSet<usize>,
+    simulate: bool,
+) -> Result<RepairReport> {
+    let (own, _) = ownership(pkgs);
+    let ids = IdMap::load(root);
+    let chown = sys::is_root();
+    let mut rfs = RootFs::new(root);
+    let mut rep = RepairReport::default();
+
+    let owner_ids = |r: &FileRec| -> (u32, u32) { (ids.uid(r.user.as_deref()), ids.gid(r.group.as_deref())) };
+
+    let ensure_parents = |rfs: &mut RootFs, p: &[u8]| -> io::Result<()> {
+        let par = parent_dir(p);
+        if !par.is_empty() {
+            rfs.ensure_dir(&par, 0o755, 0, 0)?;
+        }
+        Ok(())
+    };
+
+    for (idx, p) in pkgs.iter().enumerate() {
+        if !target_indices.contains(&idx) {
+            continue;
+        }
+        for (ri, r) in p.recs.iter().enumerate() {
+            if r.is_dir() {
+                rep.checked += 1;
+                let dst = match rfs.resolve(&r.path, false) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy()));
+                        continue;
+                    }
+                };
+                if db::is_reserved(&dst.canon) {
+                    continue;
+                }
+                if fs::symlink_metadata(&dst.host).map_or(false, |m| m.is_dir()) {
+                    rep.ok += 1;
+                    continue;
+                }
+                if simulate {
+                    println!("  would restore dir /{}", r.path_lossy());
+                    rep.repaired += 1;
+                } else {
+                    let (u, g) = owner_ids(r);
+                    match rfs.ensure_dir(&r.path, r.mode, u, g) {
+                        Ok(_) => {
+                            println!("  repaired dir /{}", r.path_lossy());
+                            rep.repaired += 1;
+                        }
+                        Err(e) => rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy())),
+                    }
+                }
+                continue;
+            }
+
+            if own.owner.get(&r.path) != Some(&(idx, ri)) {
+                continue;
+            }
+            rep.checked += 1;
+            let dst = match rfs.resolve(&r.path, false) {
+                Ok(d) => d,
+                Err(e) => {
+                    rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy()));
+                    continue;
+                }
+            };
+            if db::is_reserved(&dst.canon) {
+                rep.errors.push(format!("{}: /{}: path resolves into vpm's own directory", p.meta.nv(), r.path_lossy()));
+                continue;
+            }
+
+            match &r.kind {
+                RecKind::File(FileKind::Symlink(target)) => {
+                    let intact = fs::symlink_metadata(&dst.host)
+                        .map_or(false, |m| {
+                            m.file_type().is_symlink()
+                                && fs::read_link(&dst.host)
+                                    .map_or(false, |t| t.as_os_str().as_bytes() == target.as_slice())
+                        });
+                    if intact {
+                        rep.ok += 1;
+                        continue;
+                    }
+                    if simulate {
+                        println!("  would restore symlink /{}", r.path_lossy());
+                        rep.repaired += 1;
+                        continue;
+                    }
+                    let res = (|| -> io::Result<()> {
+                        ensure_parents(&mut rfs, &r.path)?;
+                        let dst = rfs.resolve(&r.path, false)?;
+                        let tmp = rootfs::tmp_name(&dst.host);
+                        let _ = fs::remove_file(&tmp);
+                        symlink(OsStr::from_bytes(target), &tmp)?;
+                        if chown {
+                            let (u, g) = owner_ids(r);
+                            lchown(&tmp, Some(u), Some(g))?;
+                        }
+                        if let Err(e) = fs::rename(&tmp, &dst.host) {
+                            let _ = fs::remove_file(&tmp);
+                            return Err(e);
+                        }
+                        Ok(())
+                    })();
+                    match res {
+                        Ok(()) => {
+                            println!("  repaired symlink /{}", r.path_lossy());
+                            rep.repaired += 1;
+                        }
+                        Err(e) => rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy())),
+                    }
+                }
+                RecKind::File(FileKind::Regular | FileKind::Hardlink(_)) if is_etc(&r.path) => {
+                    if fs::symlink_metadata(&dst.host).is_ok() {
+                        rep.ok += 1;
+                        continue;
+                    }
+                    let src = p.dir.join(OsStr::from_bytes(&r.path));
+                    if !src.is_file() {
+                        rep.errors.push(format!("{}: /{}: missing in Programs", p.meta.nv(), r.path_lossy()));
+                        continue;
+                    }
+                    if simulate {
+                        println!("  would restore etc /{}", r.path_lossy());
+                        rep.repaired += 1;
+                        continue;
+                    }
+                    let res = (|| -> io::Result<()> {
+                        ensure_parents(&mut rfs, &r.path)?;
+                        let dst = rfs.resolve(&r.path, false)?;
+                        let tmp = rootfs::tmp_name(&dst.host);
+                        let _ = fs::remove_file(&tmp);
+                        let mut i = File::open(&src)?;
+                        let mut o = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+                        io::copy(&mut i, &mut o)?;
+                        if chown {
+                            let (u, g) = owner_ids(r);
+                            fchown(&o, Some(u), Some(g))?;
+                        }
+                        o.set_permissions(fs::Permissions::from_mode(r.mode & 0o7777))?;
+                        let t = UNIX_EPOCH + Duration::from_secs(r.mtime);
+                        o.set_times(FileTimes::new().set_accessed(t).set_modified(t))?;
+                        if let Err(e) = fs::rename(&tmp, &dst.host) {
+                            let _ = fs::remove_file(&tmp);
+                            return Err(e);
+                        }
+                        Ok(())
+                    })();
+                    match res {
+                        Ok(()) => {
+                            println!("  repaired etc /{}", r.path_lossy());
+                            rep.repaired += 1;
+                        }
+                        Err(e) => rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy())),
+                    }
+                }
+                RecKind::File(_) => {
+                    let src = p.dir.join(OsStr::from_bytes(&r.path));
+                    let sm = match fs::symlink_metadata(&src) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            rep.errors.push(format!("{}: /{}: missing in Programs ({e})", p.meta.nv(), r.path_lossy()));
+                            continue;
+                        }
+                    };
+                    let intact = fs::symlink_metadata(&dst.host)
+                        .map_or(false, |dm| dm.dev() == sm.dev() && dm.ino() == sm.ino());
+                    if intact {
+                        rep.ok += 1;
+                        continue;
+                    }
+                    if simulate {
+                        println!("  would relink /{}", r.path_lossy());
+                        rep.repaired += 1;
+                        continue;
+                    }
+                    let res = (|| -> io::Result<()> {
+                        ensure_parents(&mut rfs, &r.path)?;
+                        let dst = rfs.resolve(&r.path, false)?;
+                        let tmp = rootfs::tmp_name(&dst.host);
+                        let _ = fs::remove_file(&tmp);
+                        fs::hard_link(&src, &tmp)?;
+                        if let Err(e) = fs::rename(&tmp, &dst.host) {
+                            let _ = fs::remove_file(&tmp);
+                            return Err(e);
+                        }
+                        Ok(())
+                    })();
+                    match res {
+                        Ok(()) => {
+                            println!("  repaired /{}", r.path_lossy());
+                            rep.repaired += 1;
+                        }
+                        Err(e) => rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy())),
+                    }
+                }
+                RecKind::Dir => {}
+            }
+        }
+    }
+
+    if !simulate && rep.repaired > 0 {
+        sys::sync_fs(&File::open(root)?)?;
+    }
+    Ok(rep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
