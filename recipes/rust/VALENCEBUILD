@@ -1,40 +1,43 @@
 pkgname=rust
 pkgver=1.98.1
-pkgrel=2
+pkgrel=3
 pkgdesc="The Rust compiler (rustc, rustdoc) and standard library, for building Rust programs on Valence"
 license="MIT OR Apache-2.0"
 url=https://www.rust-lang.org
-# Valence's own Rust, built "cross-native": on the build machine, to run on Valence. build = host = target = Valence's musl
-# (x86_64-unknown-linux-musl), so one LLVM (Valence's, linked shared) and one C compiler (Valence's gcc) do everything and
-# there is no second, glibc toolchain to mix in; Valence's musl binaries run on the build machine (AGENTS.md rule 18).
-# Stage 0 is upstream's musl-hosted release of the same version (manifest entries; nothing is downloaded while building).
-# The Rust that cross-compiles other recipes (scripts/host-rust.sh, hosttools/rust) is a separate, glibc-hosted install.
-source=(rustc-1.98.1-src.tar.xz rustc-1.98.1-x86_64-unknown-linux-musl.tar.xz cargo-1.98.1-x86_64-unknown-linux-musl.tar.xz
-        rust-std-1.98.1-x86_64-unknown-linux-musl.tar.xz)
+# Valence's own Rust, built "cross-native": on the build machine, to run on Valence. build = host = target =
+# x86_64-unknown-linux-gnu, which is the build machine's triple too, so Rust's build takes it for a native build and
+# runs the compiler it has just made. It can: options=(runhere) makes what is linked for Valence start through the
+# sysroot's loader (rule 18). One LLVM (Valence's, linked shared) does everything.
+# Stage 0 is the build machine's own Rust of the same version (scripts/host-rust.sh, hosttools/rust), the one that
+# compiles the other recipes written in Rust. Nothing is downloaded while building.
+source=(rustc-1.98.1-src.tar.xz)
 builddir=$srcdir/rustc-1.98.1-src
 # llvm-dev: llvm-config and LLVM's shared library (Rust 1.98 needs LLVM 21 or newer; Valence has 21.1.8)
 makedepends=(llvm-dev zlib-dev openssl-dev curl-dev)
-# rustc links programs with the system C compiler (cc), which brings binutils and musl-dev along
+# rustc links programs with the system C compiler (cc), which brings binutils and glibc-dev along
 depends=(gcc)
 subpackages=(cargo)
 depends_cargo="rust"
 pkgdesc_cargo="Cargo, Rust's package manager and build tool"
-# written in Rust (rule 46)
-options=(rust)
+# written in Rust (rule 46); it runs what it builds (rule 18)
+options=(rust runhere)
 
 prepare(){
-  # stage 0: upstream's musl-hosted rustc, cargo and standard library, unpacked next to the sources
-  local c
-  for c in rustc-1.98.1-x86_64-unknown-linux-musl cargo-1.98.1-x86_64-unknown-linux-musl rust-std-1.98.1-x86_64-unknown-linux-musl; do
-    untar $SRC/$c.tar.xz $srcdir
-    $srcdir/$c/install.sh --prefix=$srcdir/stage0 --disable-ldconfig --without=rust-docs >/dev/null
-  done
+  [ "$($M/hosttools/rust/bin/rustc --version | cut -d' ' -f2)" = "$pkgver" ] || { echo "rust: hosttools/rust is not $pkgver (scripts/host-rust.sh)" >&2; return 1; }
   # llvm-config reports /usr/lib and /usr/include, which are the build machine's; point them at the sysroot
   cat > $srcdir/llvm-config <<WRAP
 #!/bin/sh
 $SYSROOT/usr/bin/llvm-config "\$@" | sed -E 's#(^| )(-[LI])?/usr#\1\2$SYSROOT/usr#g'
 WRAP
+  # The compilers Rust's build is given (the builder's rust_cc): Valence's gcc with runhere's link flags for what is
+  # built for Valence, the build machine's own for the build scripts and proc-macros that run inside its Rust
+  rust_cc $srcdir/cc "$RUNHERE_LDFLAGS"
   chmod +x $srcdir/llvm-config
+  # cargo links the system's libcurl only when "curl-config --features" names HTTP2, and builds a curl of its own
+  # otherwise. The curl-config that answers is the first in PATH: make it Valence's (a shell script in the sysroot),
+  # not the build machine's or none.
+  mkdir -p $srcdir/bin && ln -sf $SYSROOT/usr/bin/curl-config $srcdir/bin/curl-config
+  $srcdir/bin/curl-config --features | grep -qx HTTP2
 }
 
 build(){
@@ -44,11 +47,11 @@ download-ci-llvm = false
 link-shared = true
 
 [build]
-build = "x86_64-unknown-linux-musl"
-host = ["x86_64-unknown-linux-musl"]
-target = ["x86_64-unknown-linux-musl"]
-rustc = "$srcdir/stage0/bin/rustc"
-cargo = "$srcdir/stage0/bin/cargo"
+build = "x86_64-unknown-linux-gnu"
+host = ["x86_64-unknown-linux-gnu"]
+target = ["x86_64-unknown-linux-gnu"]
+rustc = "$M/hosttools/rust/bin/rustc"
+cargo = "$M/hosttools/rust/bin/cargo"
 local-rebuild = true
 submodules = false
 docs = false
@@ -76,23 +79,23 @@ debuginfo-level = 0
 codegen-units-std = 1
 deny-warnings = false
 
-[target.x86_64-unknown-linux-musl]
-cc = "$TARGET-gcc"
-cxx = "$TARGET-g++"
+[target.x86_64-unknown-linux-gnu]
+cc = "$srcdir/cc/cc"
+cxx = "$srcdir/cc/c++"
 ar = "$TARGET-ar"
 ranlib = "$TARGET-ranlib"
-linker = "$TARGET-gcc"
+linker = "$srcdir/cc/cc"
 llvm-config = "$srcdir/llvm-config"
-musl-root = "$SYSROOT/usr"
-crt-static = false
 TOML
+  # (the builder's CC carries runhere's flags after the compiler's name; Rust's build reads the file above instead)
+  unset CC CXX
   # cargo's C dependencies: Valence's OpenSSL, zlib and curl (its bundled libgit2 and libssh2 are built from source)
   export OPENSSL_DIR=$SYSROOT/usr OPENSSL_LIB_DIR=$SYSROOT/usr/lib OPENSSL_INCLUDE_DIR=$SYSROOT/usr/include
-  python3 x.py build --stage 2 -j$JOBS
+  PATH=$srcdir/bin:$PATH python3 x.py build --stage 2 -j$JOBS
 }
 
 package(){
-  DESTDIR=$pkgdir python3 x.py install -j$JOBS
+  PATH=$srcdir/bin:$PATH DESTDIR=$pkgdir python3 x.py install -j$JOBS
   # the installer's bookkeeping, debugger wrappers and docs; Valence's apk tracks the files
   rm -rf $pkgdir/usr/lib/rustlib/{components,install.log,rust-installer-version,uninstall.sh,etc} $pkgdir/usr/lib/rustlib/manifest-* \
     $pkgdir/usr/share/doc $pkgdir/usr/bin/rust-{gdb,gdbgui,lldb}

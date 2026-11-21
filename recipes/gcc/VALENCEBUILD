@@ -1,6 +1,6 @@
 pkgname=gcc
 pkgver=15.2.0
-pkgrel=1
+pkgrel=2
 pkgdesc="GNU C compiler for building on Valence (C; C++ is the g++ package)"
 license="GPL-3.0-or-later WITH GCC-exception-3.1"
 url=https://gcc.gnu.org
@@ -10,7 +10,7 @@ url=https://gcc.gnu.org
 source=(gcc-15.2.0.tar.xz)
 makedepends=(gmp-dev mpfr-dev mpc-dev zlib-dev zstd-dev)
 # i686: link musl's libssp_nonshared.a like the cross toolchain (scripts/toolchain.sh)
-depends=(binutils musl-dev libgcc libatomic libgomp)
+depends=(binutils glibc-dev libgcc libatomic libgomp)
 subpackages=(g++)
 depends_g__="gcc libstdc++-dev"
 pkgdesc_g__="GNU C++ compiler for building on Valence"
@@ -31,8 +31,8 @@ build(){
 }
 package(){
   make -C build DESTDIR=$pkgdir install
-  # (the target libraries install to lib64: into lib first, so the clean-up below finds them)
-  mv $pkgdir/usr/lib64/* $pkgdir/usr/lib/ 2>/dev/null; rmdir $pkgdir/usr/lib64 2>/dev/null
+  # (where the target libraries install to lib64: into lib first, so the clean-up below finds them)
+  if [ -d $pkgdir/usr/lib64 ]; then mv $pkgdir/usr/lib64/* $pkgdir/usr/lib/; rmdir $pkgdir/usr/lib64; fi
   # the runtime libraries and C++ headers belong to gcc-runtime's packages
   rm -f $pkgdir/usr/lib/lib{gcc_s,stdc++,stdc++fs,supc++,atomic,gomp,itm,ssp}*.so* $pkgdir/usr/lib/lib{stdc++,stdc++fs,supc++}*.a \
     $pkgdir/usr/lib/*.py $pkgdir/usr/lib/*.la

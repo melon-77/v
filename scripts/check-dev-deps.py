@@ -147,6 +147,7 @@ def main():
                 text = re.sub(r'(?m)#.*$', '', text)
                 text = live(text)
                 short = os.path.basename(f)
+                if short.startswith('Find'): continue          # a find module (CMake's own FindPkgConfig.cmake): not a package's own files
                 if short.endswith('Config.cmake') or short.endswith('-config.cmake') or 'Dependencies' in short:
                     for m in re.finditer(r'find_dependency\s*\(\s*([A-Za-z0-9_+.-]+)([^)]*)\)', text):
                         pk, rest = m.group(1), m.group(2)

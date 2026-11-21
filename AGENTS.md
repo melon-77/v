@@ -164,8 +164,11 @@ Things the builder gives you:
   start through `scripts/valence-run` (rule 18); a recipe that runs a built program by hand calls
   `$M/scripts/valence-run PROGRAM ARGS...` itself.
 - `cmake_native <args>` configures CMake as a native build with Valence's compilers and sysroot, so that generators
-  the build makes (LLVM's tablegens) are started directly; `recipes/libclc` and `recipes/spirv-llvm-translator` call
-  it. That is Melon's mechanism and is not converted: on glibc such programs need the wrapper (rule 18).
+  the build makes (clang's tablegen) are started directly. It needs `options=(runhere)`, which is what lets them run
+  (rule 18), and passes that option's link flags to CMake. `recipes/clang`, `libclc` and `spirv-llvm-translator`
+  call it; everything else is a cross build with `cmake_setup`.
+- `options=(runhere)`: what the recipe links can run on the build machine (rule 18). `options=(rust)`: the recipe
+  puts Rust code into a package (rule 46).
 - `py_install <name> <dirs...>` installs pure-Python modules into python3's site-packages with a small `.dist-info`
   (`recipes/python3-mako`). Modules with C parts need their build system (`recipes/python3-libxml2`).
 - `options=('!strip')` skips stripping. `options=(keepdirs)` keeps empty directories.
@@ -296,10 +299,26 @@ Rebuilding the kernel takes about an hour on 2 cores.
     66). Autoconf builds are cross builds and don't run test programs: their
     answers are in `scripts/config.site` (rule 25). A second architecture (the planned 64-bit ARM edition) swaps the
     wrapper for an emulator.
-    Melon instead pointed `/lib/ld-musl-x86_64.so.1` and `/etc/ld-musl-x86_64.path` at the sysroot, so that such
-    programs just ran. That is gone: `host-setup.sh` removes those links, `MUSL_LDSO` became `LDSO`, and `MUSL_ARCH`
-    is gone (recipes test `$APK_ARCH`). Recipes that are not converted yet still assume it ("State of the glibc
-    switch").
+    **`options=(runhere)` is for a build that runs what it has just built and cannot be handed a wrapper for it:**
+    perl's Configure and its miniperl, bc's `fbc`, `file` compiling its magic, clang's tablegen in a build configured
+    as native (`cmake_native`), Rust's build running the compiler it has made. Everything such a recipe links gets
+    the sysroot's loader as its program interpreter and the sysroot's library directory as an RPATH
+    (`RUNHERE_LDFLAGS`, which the builder appends to `$CC` and `$CXX`; the old kind of RPATH, which also holds for
+    what those libraries need in turn). Its programs then run on the build machine like the machine's own. Before a
+    package is made, `scripts/elf-unbake.py` puts the system's loader back and takes the RPATH out. **And no
+    package is made, from any recipe, while a file in it still names the sysroot's loader or library path**: that
+    check runs on everything, and the first thing it caught was a plain `-rpath` that bison's configure had added
+    for a library it was pointed to in the sysroot (`--disable-rpath`). A recipe with the option still has to clean
+    what its build wrote down as text: perl records the compiler's command line (rule 48). The option is for the
+    case where build machine and target are the same kind of machine; a second architecture (the planned ARM
+    edition) needs another answer for these recipes.
+    Before a program built for Valence could simply fail to start here, it often ran by accident: built against
+    glibc 2.44 it starts with the build machine's loader and older glibc as long as it uses nothing newer, and then
+    loads the build machine's libraries. bc, file, scdoc and rpcsvc-proto built that way in phase 4's first run.
+    That is not a reason to leave the option off.
+    Melon pointed `/lib/ld-musl-x86_64.so.1` and `/etc/ld-musl-x86_64.path` at the sysroot, so that such programs
+    just ran. That is gone: `host-setup.sh` removes those links, `MUSL_LDSO` became `LDSO`, and `MUSL_ARCH` is gone
+    (recipes test `$APK_ARCH`).
 19. **`meson_setup` drops `-D` options the project doesn't have** (`scripts/meson-filter-opts.py`) and
     unsets the `PKG_CONFIG_*` variables for native lookups. Upstream renames options often; a stale
     option must not fail the whole build.
@@ -378,8 +397,8 @@ Rebuilding the kernel takes about an hour on 2 cores.
 40. **GCC 15 compiles C23 by default**, where `void f()` means "no arguments". Old code and old configure tests
     that call such functions with arguments fail ("too many arguments to function"): build them with
     `CFLAGS="$CFLAGS -std=gnu17"` (gmp). Old `config.sub` files don't know `*-linux-musl`, so on Melon recipes copied
-    the build host's (`/usr/share/misc/config.sub`, `config.guess`); libcanberra and libatasmart, not converted yet,
-    still do. Tools a build runs on the build machine come from `CC_FOR_BUILD=gcc` when the project supports it.
+    the build host's (`/usr/share/misc/config.sub`, `config.guess`); libcanberra, libatasmart, libdaemon and flite
+    still do, since those files do not know `x86_64-valence-linux-gnu` either. Tools a build runs on the build machine come from `CC_FOR_BUILD=gcc` when the project supports it.
 41. **Absolute symlinks in `usr/lib` and `usr/include`** (`libfoo.so -> /usr/lib/libfoo.so.1`) point into the
     build machine's own `/usr` from the sysroot, so the linker can't find the library. valence-build makes them
     relative when packaging; a package built before that needs a pkgrel bump to reach the sysroot (rule 31).
@@ -414,41 +433,47 @@ Rebuilding the kernel takes about an hour on 2 cores.
     scripts, `/etc/profile.d` and the installer's helpers were writable by `nobody`, then run by root. `valence-build`
     gives root every file owned by an account from 1000 up; system accounts a recipe sets on purpose (below 1000)
     stay. The desktop-install test fails if anything under `/usr` or `/etc` belongs to `nobody`.
-46. **Rust recipes cross-compile with the build machine's Rust** (`scripts/host-rust.sh` puts upstream's release
-    binaries in `hosttools/rust`, with the standard library for `$RUST_TARGET`). valence-build points cargo at
-    `$RUST_TARGET`, links with valence's gcc and passes `-C target-feature=-crt-static -C link-self-contained=no` in
-    `RUSTFLAGS` (never `CARGO_TARGET_<triple>_RUSTFLAGS`, which cargo merges with a project's own `.cargo/config.toml`, and
-    ripgrep's turns static linking back on): Rust's musl targets link statically by default, and valence's programs share its libc. Build scripts and proc-macros run on the build
-    machine; their C parts get the build machine's gcc from the triple-named variables (`CC_x86_64_unknown_linux_gnu`,
-    ...), never `HOST_CC`, which other build systems read too. `cargo_fetch` (in `prepare()`) downloads crates from
-    crates.io into `sources/cargo`, pinned by the checksums in the project's `Cargo.lock`; `cargo_build` then builds
-    offline with `--locked`, and `cargo_out` names the output directory. A build script that asks git for a commit
-    hash would find valence's own checkout: valence-build exports `GIT_CEILING_DIRECTORIES=$WORK` for every build (clang's
-    `--version` had named valence's repo). `-sys` crates build their own static copy of
-    a C library for musl targets unless told otherwise (`PCRE2_SYS_STATIC=0` in ripgrep): link valence's. **Every recipe
-    that puts Rust code into a package says `options=(rust)`**, so the Rust packages can be found from the recipes
-    (`grep -l 'options=(.*rust' recipes/*/VALENCEBUILD`).
-    **Not converted to glibc.** `RUST_TARGET` in `env.sh` is now `x86_64-unknown-linux-gnu`, but no Rust recipe has
-    been built on glibc. What this rule says about static linking (`-crt-static`, the `-sys` crates' own copies) was
-    written for Rust's musl target, `x86_64-unknown-linux-musl`, the one `host-rust.sh` still installs a standard
-    library for. And the target's triple is now the build machine's too, so the triple-named variables above no
-    longer tell the two apart.
+46. **Rust recipes are compiled with the build machine's Rust** (`scripts/host-rust.sh` puts upstream's release
+    binaries in `hosttools/rust`). valence-build points cargo at `$RUST_TARGET` and links with Valence's gcc.
+    **On x86_64 that target, `x86_64-unknown-linux-gnu`, is also the build machine's own triple**, so cargo has one
+    set of compiler and linker settings for two kinds of output: Valence's programs, and what runs on the build
+    machine while they are built (build scripts, proc-macros, and the C code their crates compile for themselves).
+    The two can only be told apart by where they are written: given `--target`, cargo puts the target's files under
+    `<triple>/release` and the build machine's under `release`. So cargo's linker and the `cc` crate's compilers are
+    `$WORK/rust-cc/cc` and `c++` (the builder's `rust_cc`), which look at their arguments and at `OUT_DIR` and run
+    Valence's compiler for the first kind and the build machine's for the second; and `cargo_build` always passes
+    `--target`, also where it names the machine's own triple. Without that, build scripts are Valence programs that
+    run here by accident (rule 18), and proc-macros built against Valence's glibc are loaded into the build
+    machine's rustc.
+    `cargo_fetch` (in `prepare()`) downloads crates from crates.io into `sources/cargo`, pinned by the checksums in
+    the project's `Cargo.lock`; `cargo_build` then builds offline with `--locked`, and `cargo_out` names the output
+    directory. A build script that asks git for a commit hash would find Valence's own checkout: valence-build
+    exports `GIT_CEILING_DIRECTORIES=$WORK` for every build (clang's `--version` had named Valence's repo). A `-sys`
+    crate may build its own static copy of a C library when it is not told otherwise or does not find what it looks
+    for: `PCRE2_SYS_STATIC=0` in ripgrep; and cargo's own curl crate links the system's libcurl only if a
+    `curl-config` in `PATH` reports HTTP2 (on Melon's build machine the machine's own answered; `recipes/rust` puts
+    the sysroot's first). `scripts/compare-with-index.py` shows such a copy as a library that is no longer linked.
+    **Every recipe that puts Rust code into a package says `options=(rust)`**, so the Rust packages can be found
+    from the recipes (`grep -l 'options=(.*rust' recipes/*/VALENCEBUILD`).
+    `recipes/rust` builds Valence's own Rust the same way with Rust's `x.py`: stage 0 is `hosttools/rust`, the
+    compilers it is given come from `rust_cc` with runhere's link flags for Valence's side, and `options=(runhere)`
+    lets the build run the compiler it has made (rule 18). 19 minutes on 12 threads.
 
 47. **Flatpak must be built with X11 authorization (`-Dxauth=enabled`, libXau).** Without it, sandboxed X11 apps get
     the host's `DISPLAY` and a path to an Xauthority file that doesn't exist inside the sandbox. Xwayland refuses them
     ("Authorization required, but no authorization protocol specified") and they never open a window: Steam and VLC
     "refused to launch". The desktop-install test checks that `/usr/bin/flatpak` links libXau.
 
-48. **A configure that must run its test programs can run as if native** (rule 18 as it was on Melon, see the end
-    of this rule): perl's `Configure` gets `-Dcc=$CC`
-    and the sysroot's `libpth`/`usrinc`, and the recipe strips the sysroot and the triple from the installed
-    `Config.pm` afterwards, so modules built on valence use `gcc` and `/usr`. The same trick compiles `file`'s magic
-    database with the `file` just built. Perl's MakeMaker writes the directory of every library it finds into the
-    module's RPATH through `LD_RUN_PATH`: `make LD_RUN_PATH=` keeps the sysroot out (a `LEAK:` line otherwise).
-    CMake's own `try_run` checks run the same way: `-DCMAKE_CROSSCOMPILING_EMULATOR=/usr/bin/env` (recipes/cmake).
-    A library built without a SONAME (perl's, Tcl's) gets one on its link line, or the `so:` dependency on it can't be met.
-    Running as if native is Melon's mechanism: there a program built for the target ran directly on the build machine.
-    perl, `file` and cmake have not been built on glibc, and need `scripts/valence-run` (rule 18) when they are converted.
+48. **A configure that must run its test programs runs them here: `options=(runhere)`** (rule 18). perl's
+    `Configure` gets `-Dcc=$CC` and the sysroot's `libpth`/`usrinc`, and afterwards the recipe takes the sysroot,
+    the triple, runhere's link flags and the cross compiler's own search directories out of the installed
+    `Config.pm`, `Config_heavy.pl` and `CORE/config.h`, so that modules built on Valence use `gcc` and `/usr`;
+    `package()` stops if one of those files still names the checkout. The same option lets `file` compile its
+    magic database with the `file` just built, bc run its `fbc`, scdoc write its own man page and rpcsvc-proto run
+    its `rpcgen`. Perl's MakeMaker writes the directory of every library it finds into the module's RPATH through
+    `LD_RUN_PATH`: `make LD_RUN_PATH=` keeps the sysroot out. CMake's own `try_run` checks start through the
+    emulator, like every CMake build's (recipes/cmake). A library built without a SONAME (perl's, Tcl's) gets one on
+    its link line, or the `so:` dependency on it can't be met.
 
 49. **Valence's llvm-dev keeps only five static archives** (LLVMSupport, LLVMDemangle, LLVMTableGen, -Basic, -Common): the
     rest (about 1 GB) would pass GitHub's file limit, and everything links the shared libLLVM. Tablegen tools always link
@@ -460,8 +485,8 @@ Rebuilding the kernel takes about an hour on 2 cores.
     builds with `CC=gcc`, a wrapper that runs valence's cross compiler, so Go on valence calls plain `gcc`. Go programs in
     recipes (recipes/github-cli) build with valence's own `go` from the sysroot; their modules are downloaded in
     `prepare()` into `sources/gomod`, checked against `go.sum` and sum.golang.org, and the build runs with `GOPROXY=off`.
-    Running the sysroot's `go` on the build machine is Melon's mechanism: on glibc it needs `scripts/valence-run`
-    (rule 18), and the Go recipes are not converted yet.
+    The sysroot's `go`, its compiler and linker are statically linked Go programs and run on the build machine as
+    they are; github-cli is built with `CGO_ENABLED=0` and is static too.
 51. **NVIDIA's kernel modules fit one exact kernel.** `nvidia-open` is built against Valence's kernel source with the exact
     `/boot/config-valence` (a full kernel build, for `Module.symvers`, which NVIDIA's configure checks read) and depends on
     that `linux-valence` version-release: **every linux-valence version or pkgrel change needs an nvidia-open pkgrel bump
@@ -471,7 +496,7 @@ Rebuilding the kernel takes about an hour on 2 cores.
     against `System.map`, and loading them in a valence VM (`NVRM: No NVIDIA GPU found`, then a clean exit).
 52. **NVK (recipes/mesa-nvk) is Rust**, so it is its own recipe with `options=(rust)` (the rest of Mesa isn't Rust and
     builds without it). Keep its `pkgver` equal to `mesa`'s. Meson
-    cross-compiles its Rust through an extra cross file (`rust` with rule 46's flags, `bindgen`, `cbindgen`); bindgen and
+    cross-compiles its Rust through an extra cross file (`rust` with its target and Valence's gcc as the linker, `bindgen`, `cbindgen`); bindgen and
     cbindgen are the build machine's (`scripts/host-rust.sh`) and load the build machine's libclang, which needs
     `-resource-dir` to find its own headers (`BINDGEN_EXTRA_CLANG_ARGS`). Mesa's Rust crates come through its meson wraps
     (pinned by hash) into `sources/mesa-packagecache`.
@@ -1100,11 +1125,9 @@ is listed here, only the base system has been rebuilt on glibc ("State of the gl
   packages (`recipes/rust`, rustc 1.98.1 built from source, in the package repository only, not on the ISOs). Built
   and tested on the build machine (29 September 2026): cargo builds and runs a program with a crates.io dependency on
   Valence. `codegen-tests = false` in its `bootstrap.toml`, because Valence's llvm ships no FileCheck. The recipe is
-  still Melon's, not converted to glibc: it builds cross-native with build = host = target = musl
-  (`x86_64-unknown-linux-musl`), from upstream's musl-hosted stage 0 (manifest entries), against Valence's LLVM 21
-  (shared) and its native gcc; `musl-dynamic-by-default.patch` sets musl's `crt_static_default` to false as Alpine
-  and Void do (upstream's own FIXME, compiler-team#422), so `cargo build` on Valence links dynamically like Valence's
-  own programs. The recipe says `options=(rust)` (rule 46). Watch
+  built cross-native with build = host = target = `x86_64-unknown-linux-gnu`, from the build machine's Rust as
+  stage 0, against Valence's LLVM 21 (shared), and `cargo build` on Valence links against the system's glibc like
+  Valence's own programs. The recipe says `options=(rust)` (rule 46). Watch
   for: RAM (rustc wants 2 to 3 GB per job), the size of `librustc_driver` against GitHub's 100 MB file limit
   (rule in "Package repository"), and `LEAK:` lines.
 - **Self-hosting (building Valence on Valence): in progress.** Step 1, the build tools as recipes, is done. The first batch (perl,

@@ -1,11 +1,11 @@
 pkgname=github-cli
 pkgver=2.101.0
-pkgrel=0
+pkgrel=1
 pkgdesc="gh: GitHub on the command line (pull requests, issues, releases)"
 license=MIT
 url=https://cli.github.com
 source=(gh-2.101.0.tar.gz)
-builddir=$srcdir/cli-2.101.0
+builddir=$srcdir/gh-2.101.0     # (git archive: the directory is named after the file)
 makedepends=(go)
 # Built with Valence's own go from the sysroot (a Valence binary, it runs here). Modules come from proxy.golang.org into
 # sources/gomod in prepare(), checked against go.sum and sum.golang.org; the build itself is offline.

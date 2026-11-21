@@ -2,7 +2,7 @@
 # 0.I-1 is 0.9.1 here (0.H would be 0.8.x).
 pkgname=cataclysm-dda
 pkgver=0.9.1
-pkgrel=2
+pkgrel=3
 pkgdesc="Cataclysm: Dark Days Ahead, a turn-based survival roguelike (terminal version)"
 license="CC-BY-SA-3.0 AND OFL-1.1 (fonts)"
 url=https://cataclysmdda.org
@@ -14,17 +14,13 @@ makedepends=(ncurses-dev zlib-dev)
 # which Valence doesn't have yet.
 # No CROSS=: upstream uses it only for Windows and macOS targets and leaves out the Linux install target then. A
 # plain build picks up valence-build's cross CXX, and ncursesw through its sysroot pkg-config.
-#   LOCALIZE=0     no gettext on Valence: English only
-#   BACKTRACE=0    the crash reporter needs glibc's <execinfo.h>
+#   LOCALIZE=0     English only, like the base tools (ROADMAP.md, "Not decided yet")
 #   USE_XDG_DIR=1  saves and settings in ~/.local/share and ~/.config instead of the current directory
 #   TESTS, ASTYLE, LINTJSON=0   upstream's test suite and style checks; the style checks build a host tool
-# musl-flatbuffers-strtoll.patch (applied by valence-build): the bundled flatbuffers parses numbers with strtoll_l and
-# friends, which musl doesn't declare. FLATBUFFERS_LOCALE_INDEPENDENT=0 is no way out (Cataclysm #errors on it); on musl
-# strtoll, strtoull, strtod and strtof are already locale-independent, so the patch uses them when __GLIBC__ is missing.
 #   WARNINGS=      upstream builds with -Werror, which a newer compiler than theirs can break for no real reason
 #   AR=, STRIP=    the Makefile sets them to the build machine's ar and strip
 _ddamake(){
-  make RELEASE=1 TILES=0 SOUND=0 LOCALIZE=0 BACKTRACE=0 USE_XDG_DIR=1 TESTS=0 ASTYLE=0 LINTJSON=0 \
+  make RELEASE=1 TILES=0 SOUND=0 LOCALIZE=0 USE_XDG_DIR=1 TESTS=0 ASTYLE=0 LINTJSON=0 \
     WARNINGS="-Wall -Wextra" AR="$AR" STRIP="$STRIP" PREFIX=/usr "$@"
 }
 build(){ _ddamake -j$JOBS; }

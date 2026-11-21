@@ -81,7 +81,7 @@ qmlcachegen = '$M/hosttools/qt6/libexec/qmlcachegen'
 qmltyperegistrar = '$M/hosttools/qt6/libexec/qmltyperegistrar'
 # the sandbox helper projects compile in; Valence's lives here (the build host needs one too for meson's check)
 bwrap = '/usr/bin/bwrap'
-# Rust (scripts/host-rust.sh): for Valence's musl target, linked by Valence's gcc and dynamically against its libc
+# Rust (scripts/host-rust.sh): for Valence's target, linked by Valence's gcc and dynamically against its libc
 rust = ['$M/hosttools/rust/bin/rustc', '--target', '$RUST_TARGET', '-C', 'linker=$TARGET-gcc', '-C', 'target-feature=-crt-static']
 [properties]
 needs_exe_wrapper = true
@@ -114,8 +114,12 @@ cmake_setup(){ cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TC" -DCMAKE_INSTALL
   -DCMAKE_INSTALL_SBINDIR=bin -DCMAKE_INSTALL_LIBEXECDIR=libexec -DCMAKE_INSTALL_SYSCONFDIR=/etc -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_TESTING=OFF "$@"; }
 # CMake configured as a *native* build with Valence's compilers and sysroot: CMake doesn't know it is cross-compiling,
-# so the programs a build makes and runs (LLVM's tablegens, generators) run here directly (rule 18). recipes/clang.
-cmake_native(){ cmake -G Ninja -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX -DCMAKE_SYSROOT=$SYSROOT \
+# so the programs a build makes and runs (clang's tablegen, generators) are started directly. They can be, because
+# the recipe has options=(runhere) and this passes its link flags to CMake (rule 18). recipes/clang, libclc.
+cmake_native(){ has_opt runhere || { msg "cmake_native needs options=(runhere)"; exit 1; }
+  cmake -G Ninja -DCMAKE_C_COMPILER=$TARGET-gcc -DCMAKE_CXX_COMPILER=$TARGET-g++ -DCMAKE_SYSROOT=$SYSROOT \
+  -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS $RUNHERE_LDFLAGS" -DCMAKE_SHARED_LINKER_FLAGS="$LDFLAGS $RUNHERE_LDFLAGS" \
+  -DCMAKE_MODULE_LINKER_FLAGS="$LDFLAGS $RUNHERE_LDFLAGS" \
   -DCMAKE_FIND_ROOT_PATH=$SYSROOT -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
   -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY -DCMAKE_INSTALL_PREFIX=/usr \
   -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$CFLAGS" -DCMAKE_CXX_FLAGS="$CXXFLAGS" "$@"; }
@@ -131,25 +135,37 @@ py_install(){ local name=$1 py site di; shift; py=$(cd $SYSROOT/usr/lib && ls -d
   di=$site/$(printf '%s' "$name" | tr 'A-Z.-' 'a-z__')-$pkgver.dist-info; install -d $di
   printf 'Metadata-Version: 2.1\nName: %s\nVersion: %s\n' "$name" "$pkgver" > $di/METADATA; echo valence > $di/INSTALLER; }
 
-# Rust (scripts/host-rust.sh, AGENTS.md rule 46). Cargo builds for $RUST_TARGET with Valence's gcc as the linker and links
-# dynamically against Valence's musl: Rust's musl targets link statically by default (-crt-static turns that off).
-# Build scripts and proc-macros run on the build machine, so the C compiler variables named after the build machine's
-# triple keep their C parts on its own gcc (CC is the cross compiler). Crates come from crates.io into sources/cargo,
-# pinned by the checksums in the project's Cargo.lock: cargo_fetch in prepare(), cargo_build builds offline.
+# Rust (scripts/host-rust.sh, AGENTS.md rule 46). Cargo builds for $RUST_TARGET with the build machine's Rust and
+# Valence's gcc as the linker. On x86_64 that target is also the build machine's own triple, so cargo has one set of
+# compiler and linker settings for two kinds of output: Valence's programs, and what runs on the build machine while
+# they are built (build scripts, proc-macros, and the C code their crates compile for themselves). They are told
+# apart by where they are written: cargo puts the target's files under <triple>/release and the build machine's
+# under release. $WORK/rust-cc/{cc,c++} look at that and run Valence's compiler or the build machine's.
+# Crates come from crates.io into sources/cargo, pinned by the checksums in the project's Cargo.lock: cargo_fetch in
+# prepare(), cargo_build builds offline.
 [ -x $M/hosttools/rust/bin/cargo ] && export PATH=$M/hosttools/rust/bin:$PATH
 _rt=${RUST_TARGET//-/_}; _RT=${_rt^^}
 export CARGO_HOME=$SRC/cargo CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never PKG_CONFIG_ALLOW_CROSS=1
-export "CARGO_TARGET_${_RT}_LINKER=$TARGET-gcc"
-export "CC_$_rt=$TARGET-gcc" "CXX_$_rt=$TARGET-g++" "AR_$_rt=$TARGET-ar"
-export CC_x86_64_unknown_linux_gnu=gcc CXX_x86_64_unknown_linux_gnu=g++ AR_x86_64_unknown_linux_gnu=ar \
-  CFLAGS_x86_64_unknown_linux_gnu=-O2 CXXFLAGS_x86_64_unknown_linux_gnu=-O2
+rust_cc(){ # rust_cc DIR [link flags for Valence's programs]: writes DIR/cc and DIR/c++
+  local dir=$1 extra=${2:-} n cross host; mkdir -p $dir
+  for n in cc c++; do
+    if [ $n = cc ]; then cross=$TARGET-gcc host=gcc; else cross=$TARGET-g++ host=g++; fi
+    cat > $dir/$n <<WRAP
+#!/bin/sh
+for a in "\$OUT_DIR" "\$@"; do
+  case \$a in */$RUST_TARGET/release/*|*/$RUST_TARGET/debug/*) exec $cross "\$@" $extra ;; esac
+done
+exec $host "\$@"
+WRAP
+    chmod +x $dir/$n
+  done; }
+rust_cc $WORK/rust-cc
+export "CARGO_TARGET_${_RT}_LINKER=$WORK/rust-cc/cc" "CC_$_rt=$WORK/rust-cc/cc" "CXX_$_rt=$WORK/rust-cc/c++" "AR_$_rt=$TARGET-ar"
 need_rust(){ command -v cargo >/dev/null || { echo "no host Rust: run scripts/host-rust.sh" >&2; exit 1; }; }
 cargo_fetch(){ need_rust; cargo fetch --locked --target $RUST_TARGET "$@"; }
-# RUSTFLAGS, not CARGO_TARGET_<triple>_RUSTFLAGS: cargo merges that with a project's own .cargo/config.toml, and ripgrep's asks for
-# +crt-static and link-self-contained=yes on musl, which wins (-static-pie, "cannot find -lpcre2-8"). RUSTFLAGS replaces every
-# config-file rustflags, and with --target it reaches only target artifacts, not build scripts and proc-macros.
-cargo_build(){ need_rust; RUSTFLAGS="-C target-feature=-crt-static -C link-self-contained=no" CARGO_NET_OFFLINE=true \
-  cargo build --release --locked --target $RUST_TARGET "$@"; }
+# (--target is given even where it is the build machine's own triple: without it cargo makes no difference between
+# the two kinds of output, and the build scripts would be Valence programs)
+cargo_build(){ need_rust; CARGO_NET_OFFLINE=true cargo build --release --locked --target $RUST_TARGET "$@"; }
 # where cargo_build leaves the binaries
 cargo_out(){ echo target/$RUST_TARGET/release; }
 
@@ -165,6 +181,18 @@ export srcdir pkgdir builddir startdir pkgname pkgver
 # 64 MiB dictionary, and Rust's release tarballs use 128 MiB ("tar: corrupted data"). Recipes can call it too.
 untar(){ case $1 in *.xz|*.txz) xz -dc "$1" | tar -xf - -C "${2:-.}";; *) tar -xf "$1" -C "${2:-.}";; esac; }
 has_opt(){ local o; for o in "${options[@]:-}"; do [ "$o" = "$1" ] && return 0; done; return 1; }
+
+# ---------- programs that have to run where they are built (rule 18) ----------
+# options=(runhere) is for a build that runs what it has just built and cannot be handed a wrapper for it: perl's
+# Configure and its miniperl, bc's fbc, file compiling its magic. Everything the recipe links is told to start
+# through the sysroot's loader and to look for libraries in the sysroot: the loader's path goes into it as the
+# program interpreter, the sysroot's library directory as an RPATH (the old kind, which also holds for what those
+# libraries need in turn). Its programs then run on the build machine like the machine's own. normalise() takes
+# both out of every file again before a package is made, and no package is made that still has either.
+# CMake and meson builds do not need this: they start built programs through scripts/valence-run by themselves.
+case $APK_ARCH in x86) SYSTEM_INTERP=/lib/$LDSO ;; *) SYSTEM_INTERP=/lib64/$LDSO ;; esac
+RUNHERE_LDFLAGS="-Wl,--dynamic-linker=$SYSROOT/usr/lib/$LDSO -Wl,--disable-new-dtags -Wl,-rpath,$SYSROOT/usr/lib"
+if has_opt runhere; then export CC="$CC $RUNHERE_LDFLAGS" CXX="$CXX $RUNHERE_LDFLAGS" RUNHERE_LDFLAGS; fi
 
 # ---------- the sysroot: what this recipe declares, and nothing else ----------
 # Every build starts with a sysroot that holds $BUILD_BASE and the recipe's makedepends, with the packages those
@@ -289,6 +317,10 @@ normalise(){ local d=$1
   find "$d/usr/lib" "$d/usr/include" -type l 2>/dev/null | while read -r l; do
     t=$(readlink "$l"); case $t in /usr/*) ln -sfn "$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
       "$t" "$(dirname "${l#$d}")")" "$l";; esac; done || true
+  # options=(runhere): the sysroot's loader and library path come out of everything that was linked with them
+  # (its list goes to a file: piped into head, a long one would end the tool half-way through)
+  if has_opt runhere; then python3 $M/scripts/elf-unbake.py "$SYSROOT" "$SYSTEM_INTERP" "$d" > $WORK/unbake.log
+    [ ! -s $WORK/unbake.log ] || msg "runhere: the sysroot's loader or library path taken out of $(cut -d: -f2 $WORK/unbake.log | sort -u | wc -l) files"; fi
   if ! has_opt '!strip'; then
     find "$d" -type f \( -perm -u+x -o -name '*.so*' \) 2>/dev/null | while read -r f; do
       case $(file -b "$f") in *ELF*relocatable*) ;; *ELF*) $STRIP --strip-unneeded "$f" 2>/dev/null || true;; esac; done
@@ -316,8 +348,16 @@ lib_needed(){ # prints "N needed" for what the shared libraries (files with a SO
     $READELF -d "$f" 2>/dev/null | awk '/\(SONAME\)/{so=1} /\(NEEDED\)/{gsub(/[\[\]]/,"",$5); n[$5]} END{if (so) for (x in n) print "N", x}'
   done | sort -u; }
 
+_has_pc(){ local d   # is the pkg-config module $1 in the sysroot or in one of this recipe's packages?
+  for d in "$SYSROOT"/usr/lib/pkgconfig "$SYSROOT"/usr/share/pkgconfig "$pkgdir"/usr/lib/pkgconfig "$pkgdir"/usr/share/pkgconfig \
+           "$pkgbase"/*/usr/lib/pkgconfig "$pkgbase"/*/usr/share/pkgconfig; do
+    [ ! -e "$d/$1.pc" ] || return 0; done; return 1; }
+
 make_apk(){ local sub=$1 dir=$2 desc=$3; shift 3; local deps=("$@")
   normalise "$dir"
+  # a program that would look for its loader or its libraries in the build machine's sysroot must not be packaged
+  if ! python3 $M/scripts/elf-unbake.py --check "$SYSROOT" "$SYSTEM_INTERP" "$dir"; then
+    msg "$sub: files that name the sysroot's loader or library path (see above)"; exit 1; fi
   local scan provides=() sonames=() n
   scan=$(elf_scan "$dir")
   while read -r t so; do [ "$t" = P ] && provides+=("so:$so=0") && sonames+=("$so"); done <<< "$scan"
@@ -332,7 +372,14 @@ make_apk(){ local sub=$1 dir=$2 desc=$3; shift 3; local deps=("$@")
     pcn=$(basename "$pc" .pc); provides+=("pc:$pcn=$pkgver-r$pkgrel")
     for req in $(sed -n 's/^Requires\(\.private\)\{0,1\}:[ \t]*//p' "$pc" | tr ',' ' ' |
                  awk '{ for (i = 1; i <= NF; i++) { if ($i ~ /^[<>=!]+$/) { i++; continue }; sub(/[<>=!].*/, "", $i); if ($i != "") print $i } }'); do
-      [ -e "$dir/usr/lib/pkgconfig/$req.pc" ] || [ -e "$dir/usr/share/pkgconfig/$req.pc" ] || deps+=("pc:$req"); done
+      [ -e "$dir/usr/lib/pkgconfig/$req.pc" ] || [ -e "$dir/usr/share/pkgconfig/$req.pc" ] || {
+        deps+=("pc:$req")
+        # Such a module must have been in this build's sysroot, or come from this recipe. apk finds the package that
+        # has it when this one is installed, but valence-build orders builds by what recipes declare: a module this
+        # build never saw may be made by a recipe that comes later, and then nothing that needs this package can be
+        # built until that one is (gpgme-glib.pc and glib, in the first build from an empty repository: rule 70).
+        _has_pc "$req" || { msg "$sub: $pcn.pc requires $req, and neither this build's sysroot nor this recipe has $req.pc: add the -dev package that has it to makedepends"; exit 1; }; }
+    done
   done
   # <pkg>-doc and <pkg>-lang install themselves next to <pkg> once "docs" or "lang" is installed (apk add docs) and
   # leave with it; a -doc package with man pages brings the program that shows them

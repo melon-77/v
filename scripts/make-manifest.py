@@ -52,11 +52,8 @@ URL = {  # upstream downloads (Ubuntu 26.04 has Cataclysm: DDA 0.H, Rust 1.93 an
     'cataclysm-dda-0.9.1.tar.gz': 'https://github.com/CleverRaven/Cataclysm-DDA/archive/refs/tags/0.I-1.tar.gz',
     'cargo-1.98.1-x86_64-unknown-linux-gnu.tar.xz': 'https://static.rust-lang.org/dist/cargo-1.98.1-x86_64-unknown-linux-gnu.tar.xz',
     'rust-std-1.98.1-x86_64-unknown-linux-gnu.tar.xz': 'https://static.rust-lang.org/dist/rust-std-1.98.1-x86_64-unknown-linux-gnu.tar.xz',
-    'rust-std-1.98.1-x86_64-unknown-linux-musl.tar.xz': 'https://static.rust-lang.org/dist/rust-std-1.98.1-x86_64-unknown-linux-musl.tar.xz',
     'rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz': 'https://static.rust-lang.org/dist/rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz',
     'rustc-1.98.1-src.tar.xz': 'https://static.rust-lang.org/dist/rustc-1.98.1-src.tar.xz',
-    'rustc-1.98.1-x86_64-unknown-linux-musl.tar.xz': 'https://static.rust-lang.org/dist/rustc-1.98.1-x86_64-unknown-linux-musl.tar.xz',
-    'cargo-1.98.1-x86_64-unknown-linux-musl.tar.xz': 'https://static.rust-lang.org/dist/cargo-1.98.1-x86_64-unknown-linux-musl.tar.xz',
     'make-4.4.1.tar.gz': 'https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz',
     # self-hosting build tools (GNU tarballs checked against gnu-keyring.gpg, file against its .asc)
     'm4-1.4.21.tar.xz': 'https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.xz',

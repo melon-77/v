@@ -663,7 +663,6 @@ readline-8.3.tar.gz	-	link	deb/readline_8.3.orig.tar.gz
 ripgrep-15.2.0.tar.gz	ee2948c93aa14c00eebdf34feb2b4bfade0774c0dcd293eddd462bf056289d1a	git	https://github.com/BurntSushi/ripgrep 15.2.0
 runit-2.3.0.tar.gz	-	link	deb/runit_2.3.0.orig.tar.gz
 rust-std-1.98.1-x86_64-unknown-linux-gnu.tar.xz	fa3ff450172a16c026944030230c5069947af93c728d9179971d44e5e0cfb561	url	https://static.rust-lang.org/dist/rust-std-1.98.1-x86_64-unknown-linux-gnu.tar.xz
-rust-std-1.98.1-x86_64-unknown-linux-musl.tar.xz	bd9f35880de21dab0e387e84009c00001ae7836a4ba565cb16823f13f75f325f	url	https://static.rust-lang.org/dist/rust-std-1.98.1-x86_64-unknown-linux-musl.tar.xz
 rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz	e974f036b28565f37c0f3bd92ddefa809bee16c04f9dcf07b9ed96e05aaaf7c4	url	https://static.rust-lang.org/dist/rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz
 sbc-2.1.tar.gz	-	link	deb/sbc_2.1.orig.tar.gz
 sddm-0.21.0+git20250502.4fe234b.tar.gz	-	link	deb/sddm_0.21.0+git20250502.4fe234b.orig.tar.gz
@@ -715,8 +714,6 @@ zstd-1.5.7.tar.xz	-	link	deb/libzstd_1.5.7+dfsg.orig.tar.xz
 deb/zxing-cpp_2.3.0.orig.tar.xz	2fac5e5dd48337d24f41cd23bfaacf619280c245fa40c6c31d31d213ac0e4380	apt	zxing-cpp=2.3.0-5
 zxing-cpp-2.3.0.tar.xz	-	link	deb/zxing-cpp_2.3.0.orig.tar.xz
 rustc-1.98.1-src.tar.xz	be1816e7f6c40abb90245ad6e024bed2a7e88d7dda4561e4d5470207df616b9f	url	https://static.rust-lang.org/dist/rustc-1.98.1-src.tar.xz
-rustc-1.98.1-x86_64-unknown-linux-musl.tar.xz	dea916164b47437402d8041cbba90c1ff9ce859948b1ece8e36b08100ff92063	url	https://static.rust-lang.org/dist/rustc-1.98.1-x86_64-unknown-linux-musl.tar.xz
-cargo-1.98.1-x86_64-unknown-linux-musl.tar.xz	2bced641e198f9c4e7b129770de65cb052f2486a8f58d577792ea57c66c91b1c	url	https://static.rust-lang.org/dist/cargo-1.98.1-x86_64-unknown-linux-musl.tar.xz
 perl-5.44.0.tar.xz	505cf43912e9480495c344c70260452e32aa2a73c546a026b3f100053b23ce91	url	https://www.cpan.org/src/5.0/perl-5.44.0.tar.xz
 m4-1.4.21.tar.xz	f25c6ab51548a73a75558742fb031e0625d6485fe5f9155949d6486a2408ab66	url	https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.xz
 bison-3.8.2.tar.xz	9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2	url	https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz

@@ -127,6 +127,8 @@ PKGREL = {'sqlite': 1, 'npth': 1, 'libjpeg-turbo': 1, 'networkmanager': 2, 'powe
           'shared-mime-info': 1}
 # +1: their makedepends changed when the desktop was rebuilt on glibc in clean sysroots (ROADMAP phase 6)
 for _n in ('gdk-pixbuf gnupg gst-plugins-base libsm libva libxcursor libxfont2 libxft libxi libxrandr libxtst libxxf86vm ostree pipewire xcb-util-cursor xcb-util-image').split(): PKGREL[_n] = PKGREL.get(_n, 0) + 1
+# +1: built on glibc with the rest of the repository (ROADMAP phase 4)
+for _n in ('libxcomposite libxdamage libxinerama gpgme').split(): PKGREL[_n] = PKGREL.get(_n, 0) + 1
 # makedepends beyond a row's own: what Melon's packages linked without the row saying so (they were built one after
 # another in one sysroot), from scripts/suggest-makedepends.py, and what clean builds showed after that
 MORE_DEPS = {
@@ -146,6 +148,10 @@ MORE_DEPS = {
     'xcb-util-cursor': 'libxcb-dev',
     'xcb-util-image': 'libxcb-dev',
     'gdk-pixbuf': 'shared-mime-info-dev',   # its shared-mime-info.pc is in the -dev package
+    'libxcomposite': 'libx11-dev',
+    'libxdamage': 'libx11-dev',
+    'libxinerama': 'libx11-dev',
+    'gpgme': 'glib-dev',   # gpgme-glib.pc requires glib-2.0, so gpgme-dev depends on glib-dev: the build has to see it (rule 70)
 }
 # extra VALENCEBUILD lines (the scripts they name live next to the generated VALENCEBUILD)
 EXTRA = {

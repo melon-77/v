@@ -50,12 +50,55 @@ ORDER = [
  ('lximage-qt', '2.4.0', '', False, 'LXImage-Qt, the LXQt image viewer and screenshot tool'),
 ]
 
+# makedepends: what Melon's packages were linked against (scripts/suggest-makedepends.py) and what each source's
+# CMake files look for with find_package(). Every recipe but the first also gets lxqt-build-tools.
+DEPS = {
+    'lxqt-build-tools': 'qt6-qtbase-dev',
+    'libqtxdg': 'glib-dev qt6-qtbase-dev qt6-qtsvg-dev',
+    'qtxdg-tools': 'libqtxdg-dev qt6-qtbase-dev',
+    'lxqt-menu-data': 'qt6-qtbase-dev',
+    'liblxqt': 'kf6-kwindowsystem-dev libqtxdg-dev libx11-dev libxscrnsaver-dev polkit-qt-1-dev qt6-qtbase-dev',
+    'libdbusmenu-lxqt': 'qt6-qtbase-dev',
+    'lxqt-globalkeys': 'liblxqt-dev libx11-dev qt6-qtbase-dev',
+    'libsysstat': 'qt6-qtbase-dev',
+    'libfm-qt': 'glib-dev libexif-dev libxcb-dev lxqt-menu-data menu-cache-dev qt6-qtbase-dev',
+    'lxqt-panel': 'alsa-lib-dev kf6-kwindowsystem-dev kf6-solid-dev layer-shell-qt-dev libdbusmenu-lxqt-dev liblxqt-dev libqtxdg-dev libsysstat-dev libx11-dev libxcb-dev libxkbcommon-dev libxtst-dev lm-sensors-dev lxqt-globalkeys-dev lxqt-menu-data pulseaudio-dev qt6-qtbase-dev qt6-qtwayland-dev',
+    'pcmanfm-qt': 'glib-dev layer-shell-qt-dev libfm-qt-dev libxcb-dev qt6-qtbase-dev',
+    'lxqt-qtplugin': 'libdbusmenu-lxqt-dev libfm-qt-dev libqtxdg-dev qt6-qtbase-dev',
+    'lxqt-themes': 'qt6-qtbase-dev',
+    'lxqt-session': 'eudev-dev kf6-kwindowsystem-dev layer-shell-qt-dev liblxqt-dev libproc2-dev libqtxdg-dev libx11-dev qt6-qtbase-dev qtxdg-tools-dev xdg-user-dirs',   # libproc2-dev (procps-ng): found with pkg-config (it stops lingering processes at logout)
+    'lxqt-runner': 'kf6-kwindowsystem-dev layer-shell-qt-dev liblxqt-dev libqtxdg-dev lxqt-globalkeys-dev qt6-qtbase-dev',
+    'lxqt-notificationd': 'kf6-kwindowsystem-dev layer-shell-qt-dev liblxqt-dev libqtxdg-dev qt6-qtbase-dev',
+    'lxqt-policykit': 'liblxqt-dev polkit-qt-1-dev qt6-qtbase-dev',
+    'lxqt-powermanagement': 'kf6-kidletime-dev kf6-kwindowsystem-dev kf6-solid-dev liblxqt-dev libxcb-dev lxqt-globalkeys-dev qt6-qtbase-dev qt6-qtsvg-dev',
+    'lxqt-config': 'libkscreen-dev liblxqt-dev libqtxdg-dev libx11-dev libxcb-dev libxcursor-dev libxfixes-dev lxqt-menu-data qt6-qtbase-dev qt6-qtsvg-dev zlib-dev',
+    'lxqt-wayland-session': 'liblxqt-dev qt6-qtbase-dev xdg-user-dirs',
+    'qtermwidget': 'qt6-qtbase-dev',
+    'qterminal': 'layer-shell-qt-dev libcanberra-dev libx11-dev qt6-qtbase-dev qtermwidget-dev',
+    'pavucontrol-qt': 'glib-dev pulseaudio-dev qt6-qtbase-dev',
+    'lximage-qt': 'glib-dev libexif-dev libfm-qt-dev libx11-dev libxfixes-dev qt6-qtbase-dev qt6-qtsvg-dev',
+}
+
+# What a -dev package needs beside it that the builder cannot see (scripts/check-dev-deps.py): asked for by its CMake
+# files, linked by nothing.
+DEV_MORE = {
+    'liblxqt': 'lxqt-build-tools',   # lxqt-config.cmake: find_dependency(lxqt2-build-tools)
+    'qtxdg-tools': 'libqtxdg-dev',   # qtxdg-tools-config.cmake: find_dependency(Qt6Xdg); the tool itself is what links it
+}
+
 # pkgrel 1: docs and translations are no longer deleted, the builder puts them in <pkg>-doc and <pkg>-lang (ROADMAP phase 3)
+# pkgrel 2: built on glibc, each from the makedepends it declares (ROADMAP phase 4)
 def write(name, ver, extra, dev, desc):
-    lines = [f'pkgname={name}', f'pkgver={ver}', 'pkgrel=1', f'pkgdesc="{desc}"',
+    lines = [f'pkgname={name}', f'pkgver={ver}', 'pkgrel=2', f'pkgdesc="{desc}"',
              'license="LGPL-2.1-or-later (see sources)"', 'url=https://lxqt-project.org',
              f'source=({name}-{ver}.tar.xz)']
-    if dev: lines.append(f'subpackages=({name}-dev)')
+    md = sorted(set(DEPS.get(name, '').split()) | (set() if name == 'lxqt-build-tools' else {'lxqt-build-tools'}))
+    lines.append(f'makedepends=({" ".join(md)})')
+    if dev:
+        lines.append(f'subpackages=({name}-dev)')
+        # LXQt installs its CMake package files under usr/share/cmake, which default_dev does not take
+        lines.append('pkg_dev(){ default_dev; amove usr/share/cmake; }')
+        if name in DEV_MORE: lines.append(f'depends_{name.replace("-", "_")}_dev=("{name}=$pkgver-r$pkgrel" {DEV_MORE[name]})')
     lines.append(f'build(){{ cmake_setup -B build {QT}{extra}; ninja -C build -j$JOBS; }}')
     lines.append('package(){ DESTDIR=$pkgdir ninja -C build install; }')
     d = f'{M}/recipes/{name}'; os.makedirs(d, exist_ok=True)

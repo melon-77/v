@@ -1,16 +1,17 @@
 pkgname=python3-libxml2
 pkgver=2.15.2
-pkgrel=0
+pkgrel=1
 pkgdesc="Python bindings for libxml2 (itstool needs them)"
 license=MIT
 url=https://gitlab.gnome.org/GNOME/libxml2
 source=(libxml2-2.15.2.tar.xz)   # keep pkgver equal to libxml2's
 builddir=$srcdir/libxml2-2.15.2
-makedepends=(python3-dev zlib-dev)
+makedepends=(python3-dev zlib-dev libxml2-dev)
 depends=(python3)
 # The same libxml2 source with its Python part on; only the module is packaged (libxml2 itself stays its own
 # package). The bindings are generated from doxygen's XML, which the release ships in dist-doc/xml: a stand-in
-# "doxygen" copies it. meson asks Valence's own python3 (it runs here, rule 18) for the module's headers and suffix.
+# "doxygen" copies it. meson asks Valence's own python3 for the module's headers and suffix: the one in the sysroot,
+# which starts through the builder's wrapper (rule 66).
 build(){
   install -d $srcdir/bin
   printf '#!/bin/sh\nrm -rf "$BUILD_ROOT/doc/xml"; mkdir -p "$BUILD_ROOT/doc/html"\ncp -r "$SOURCE_ROOT/dist-doc/xml" "$BUILD_ROOT/doc/xml"\n' > $srcdir/bin/doxygen
