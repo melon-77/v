@@ -1,5 +1,0 @@
-#!/bin/sh
-# poweroff the system through runit
-[ "$(id -u)" = 0 ] || { echo "poweroff: must be root" >&2; exit 1; }
-sync
-exec runit-init 0

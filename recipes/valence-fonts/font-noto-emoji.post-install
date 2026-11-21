@@ -1,3 +1,0 @@
-#!/bin/sh
-fc-cache -s >/dev/null 2>&1
-exit 0

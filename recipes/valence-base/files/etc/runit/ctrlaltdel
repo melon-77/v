@@ -1,2 +1,0 @@
-#!/bin/sh
-touch /etc/runit/stopit /etc/runit/reboot; chmod 100 /etc/runit/stopit /etc/runit/reboot

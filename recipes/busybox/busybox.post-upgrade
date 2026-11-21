@@ -1,3 +1,0 @@
-#!/bin/sh
-/usr/bin/busybox --install -s 2>/dev/null
-exit 0

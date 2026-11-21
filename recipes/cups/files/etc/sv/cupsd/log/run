@@ -1,4 +1,0 @@
-#!/bin/sh
-name=$(basename "$(dirname "$(pwd -P)")")
-mkdir -p /var/log/$name
-exec svlogd -tt /var/log/$name
