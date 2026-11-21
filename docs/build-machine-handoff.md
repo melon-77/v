@@ -128,6 +128,11 @@ VALENCE_EDITION=desktop "$PWD/scripts/mkiso.sh"
 # 3. Run the automated QEMU tests (8 console + 3 desktop)
 "$PWD/scripts/test-console.sh" out/valence-*-x86_64.iso
 "$PWD/scripts/test-desktop.sh" out/valence-desktop-*-x86_64.iso
+
+# 4. Phase 10 (vpm): build and QEMU-test a vpm-managed console ISO
+( cd vpm && cargo build --release )
+VALENCE_PKG=vpm "$PWD/scripts/mkiso.sh"
+"$PWD/scripts/test-console.sh" out/valence-*-x86_64.iso
 ```
 
 ---
