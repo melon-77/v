@@ -35,10 +35,15 @@ pub struct Options {
     pub root: PathBuf,
     pub repositories: Vec<String>,
     pub keys_dir: Option<PathBuf>,
+    pub arch: Option<String>,
     pub initdb: bool,
     pub plain: bool,
     pub allow_untrusted: bool,
     pub no_scripts: bool,
+    pub no_commit_hooks: bool,
+    pub simulate: bool,
+    /// For `add`: upgrade named packages even if already installed (`-u`).
+    pub upgrade: bool,
     /// Worker threads for fetch/unpack (0: one per CPU, at most 16).
     pub jobs: usize,
     /// Accept an index older than the one used before (see
@@ -58,17 +63,24 @@ impl Options {
     }
 }
 
-fn abs_root(o: &Options) -> Result<PathBuf> {
+fn abs_root(o: &Options, create_if_initdb: bool) -> Result<PathBuf> {
     let r = if o.root.is_absolute() { o.root.clone() } else { std::env::current_dir()?.join(&o.root) };
-    if o.initdb {
+    if create_if_initdb && o.initdb {
         fs::create_dir_all(&r)?;
     }
     Ok(r)
 }
 
+pub fn arches(o: &Options, root: &Path) -> Vec<String> {
+    match &o.arch {
+        Some(a) => vec![a.clone()],
+        None => repo::root_arches(root),
+    }
+}
+
 /// Opens a root: lock, recovery of an interrupted switch, cleanup.
 pub fn open(o: &Options) -> Result<Db> {
-    let root = abs_root(o)?;
+    let root = abs_root(o, true)?;
     let mut db = Db::open(&root, o.initdb)?;
     if let Some(j) = JournalFile::open(&root)? {
         println!("vpm: finishing an interrupted switch ({} package changes)", j.plan.ops.len());
@@ -81,6 +93,12 @@ pub fn open(o: &Options) -> Result<Db> {
     }
     gc(&root, &db)?;
     Ok(db)
+}
+
+/// Opens a root read-only without taking the lock or modifying anything.
+pub fn open_readonly(o: &Options) -> Result<Db> {
+    let root = abs_root(o, false)?;
+    Db::open_readonly(&root, o.initdb)
 }
 
 /// Deletes `.partial` directories and version directories that are not
@@ -145,7 +163,13 @@ fn load_keys(o: &Options, root: &Path) -> Result<TrustedKeys> {
     Ok(keys)
 }
 
-fn load_repos(o: &Options, root: &Path, arch: &str, keys: &TrustedKeys) -> Result<(Vec<Repo>, Option<Http>)> {
+fn load_repos(
+    o: &Options,
+    root: &Path,
+    arch: &str,
+    keys: &TrustedKeys,
+    save_freshness: bool,
+) -> Result<(Vec<Repo>, Option<Http>)> {
     let specs = if o.repositories.is_empty() { repo::read_repositories_file(root)? } else { o.repositories.clone() };
     if specs.is_empty() {
         return Err(Error::Msg(format!(
@@ -162,7 +186,9 @@ fn load_repos(o: &Options, root: &Path, arch: &str, keys: &TrustedKeys) -> Resul
     for s in &specs {
         repos.push(repo::load(s, arch, keys, &vo, http.as_ref(), &cache, &fresh)?);
     }
-    fresh.save(&repos)?;
+    if save_freshness {
+        fresh.save(&repos)?;
+    }
     Ok((repos, http))
 }
 
@@ -319,9 +345,10 @@ fn world_strings(world: &[Dependency]) -> Vec<String> {
 fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh: HashSet<String>, use_repos: bool) -> Result<bool> {
     let t0 = Instant::now();
     let root = db.root.clone();
-    let arches = repo::root_arches(&root);
+    let arches = arches(o, &root);
     let keys = load_keys(o, &root)?;
-    let (repos, http) = if use_repos { load_repos(o, &root, &arches[0], &keys)? } else { (Vec::new(), None) };
+    let (repos, http) =
+        if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate)? } else { (Vec::new(), None) };
     let u = Universe::with_arches(&repos, &db.installed, &arches);
     if use_repos {
         warn_newer_installed(db, &u);
@@ -372,7 +399,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     }
     let new_world = world_strings(&world);
     if ops.is_empty() {
-        if new_world != world_strings(&db.world) {
+        if !o.simulate && new_world != world_strings(&db.world) {
             db::write_atomic(&Db::state(&root).join("world"), db::format_world(&world).as_bytes())?;
         }
         println!("OK: nothing to do; {} packages installed", db.installed.len());
@@ -401,6 +428,15 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         "{ni} to install, {nu} to upgrade, {nr} to remove ({} to unpack)",
         human(unpack_bytes)
     );
+    if o.simulate {
+        println!("OK: simulated (no changes made)");
+        return Ok(true);
+    }
+
+    let run_hooks = !o.no_scripts && !o.no_commit_hooks;
+    if run_hooks {
+        commit::run_commit_hooks(&root, "pre-commit")?;
+    }
 
     // fetch and unpack
     let t1 = Instant::now();
@@ -454,10 +490,19 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let rep = commit::switch(&root, &db.installed, jf, &o.switch_opts())?;
     db.reload()?;
     let t_switch = t2.elapsed();
+
+    let mut hook_err = None;
+    if run_hooks {
+        if let Err(e) = commit::run_commit_hooks(&root, "post-commit") {
+            hook_err = Some(e);
+        }
+    }
+
+    let ok = rep.errors.is_empty() && hook_err.is_none();
     println!(
         "{}: {} packages installed ({ni} new, {nu} upgraded, {nr} removed); {} files placed, {} removed; \
          resolve {:.2}s, fetch+unpack {:.2}s, switch {:.2}s, total {:.2}s",
-        if rep.errors.is_empty() { "OK" } else { "ERRORS" },
+        if ok { "OK" } else { "ERRORS" },
         db.installed.len(),
         rep.placed,
         rep.removed,
@@ -471,9 +516,11 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         for e in &rep.errors {
             eprintln!("  {e}");
         }
-        return Ok(false);
     }
-    Ok(true)
+    if let Some(e) = hook_err {
+        eprintln!("vpm: {e}");
+    }
+    Ok(ok)
 }
 
 fn parse_names(names: &[String]) -> Result<Vec<Dependency>> {
@@ -485,12 +532,17 @@ fn parse_names(names: &[String]) -> Result<Vec<Dependency>> {
 
 /// `add`: the names go into the world. A name that is already installed
 /// keeps its installed version when that satisfies the request (as apk
-/// without `-u`); a new name gets the newest version.
+/// without `-u`); with `o.upgrade` (`-u`), named packages upgrade to the
+/// newest version.
 pub fn add(o: &Options, names: &[String]) -> Result<bool> {
     let deps = parse_names(names)?;
-    let mut db = open(o)?;
+    let mut db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let added: HashSet<String> = deps.iter().map(|d| d.name.clone()).collect();
-    let fresh: HashSet<String> = added.iter().filter(|n| !db.installed.contains_key(*n)).cloned().collect();
+    let fresh: HashSet<String> = if o.upgrade {
+        added.clone()
+    } else {
+        added.iter().filter(|n| !db.installed.contains_key(*n)).cloned().collect()
+    };
     let mut world: Vec<Dependency> = db.world.iter().filter(|d| !added.contains(&d.name)).cloned().collect();
     world.extend(deps);
     transact(o, &mut db, world, Mode::Keep, fresh, true)
@@ -498,7 +550,7 @@ pub fn add(o: &Options, names: &[String]) -> Result<bool> {
 
 pub fn del(o: &Options, names: &[String]) -> Result<bool> {
     let deps = parse_names(names)?;
-    let mut db = open(o)?;
+    let mut db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let gone: HashSet<String> = deps.iter().map(|d| d.name.clone()).collect();
     for n in &gone {
         if !db.world.iter().any(|d| &d.name == n) {
@@ -507,22 +559,24 @@ pub fn del(o: &Options, names: &[String]) -> Result<bool> {
     }
     let world: Vec<Dependency> = db.world.iter().filter(|d| !gone.contains(&d.name)).cloned().collect();
     let ok = transact(o, &mut db, world, Mode::Keep, HashSet::new(), false)?;
-    for n in &gone {
-        if db.installed.contains_key(n) {
-            println!("vpm: {n} stays installed: other packages need it");
+    if !o.simulate {
+        for n in &gone {
+            if db.installed.contains_key(n) {
+                println!("vpm: {n} stays installed: other packages need it");
+            }
         }
     }
     Ok(ok)
 }
 
 pub fn upgrade(o: &Options) -> Result<bool> {
-    let mut db = open(o)?;
+    let mut db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let world = db.world.clone();
     transact(o, &mut db, world, Mode::Upgrade, HashSet::new(), true)
 }
 
 pub fn list(o: &Options) -> Result<bool> {
-    let db = open(o)?;
+    let db = open_readonly(o)?;
     let world: HashSet<&str> = db.world.iter().map(|d| d.name.as_str()).collect();
     for (name, ip) in &db.installed {
         let i = &ip.meta.info;
@@ -538,3 +592,250 @@ pub fn list(o: &Options) -> Result<bool> {
     }
     Ok(true)
 }
+
+/// Refreshes all configured repository indexes and saves freshness state.
+pub fn update(o: &Options) -> Result<bool> {
+    let db = open(o)?;
+    let root = &db.root;
+    let arches = arches(o, root);
+    let keys = load_keys(o, root)?;
+    let (repos, _) = load_repos(o, root, &arches[0], &keys, true)?;
+    let total: usize = repos.iter().map(|r| r.index.packages.len()).sum();
+    for r in &repos {
+        println!("  {} ({} packages)", r.index_url, r.index.packages.len());
+    }
+    println!("OK: {} repositories, {} packages available", repos.len(), total);
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SearchOpts {
+    pub exact: bool,
+    pub description: bool,
+}
+
+fn pattern_matches(pat: &str, name: &str, desc: &str, so: &SearchOpts) -> bool {
+    if so.exact {
+        return name == pat;
+    }
+    if pat.contains('*') || pat.contains('?') {
+        if sys::glob_match(pat.as_bytes(), name.as_bytes()) {
+            return true;
+        }
+        return so.description && sys::glob_match(pat.as_bytes(), desc.as_bytes());
+    }
+    let p = pat.to_ascii_lowercase();
+    if name.to_ascii_lowercase().contains(&p) {
+        return true;
+    }
+    so.description && desc.to_ascii_lowercase().contains(&p)
+}
+
+/// Searches configured repositories for packages matching `patterns` (or all
+/// packages if `patterns` is empty).
+pub fn search(o: &Options, so: &SearchOpts, patterns: &[String]) -> Result<bool> {
+    let root = abs_root(o, false)?;
+    let arches = arches(o, &root);
+    let keys = load_keys(o, &root)?;
+    let (repos, _) = load_repos(o, &root, &arches[0], &keys, false)?;
+    let mut matches: std::collections::BTreeMap<(String, String), String> = std::collections::BTreeMap::new();
+    for r in &repos {
+        for p in &r.index.packages {
+            if !p.arch.is_empty() && p.arch != "noarch" && !arches.iter().any(|a| a == &p.arch) {
+                continue;
+            }
+            let ok = patterns.is_empty()
+                || patterns.iter().any(|pat| pattern_matches(pat, &p.name, &p.description, so));
+            if ok {
+                matches.entry((p.name.clone(), p.version.clone())).or_insert_with(|| p.description.clone());
+            }
+        }
+    }
+    for ((name, ver), desc) in matches {
+        if so.exact || desc.is_empty() {
+            println!("{name}-{ver}");
+        } else {
+            println!("{name}-{ver} - {desc}");
+        }
+    }
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InfoOpts {
+    pub installed: bool,
+    pub all: bool,
+    pub description: bool,
+    pub contents: bool,
+    pub depends: bool,
+    pub provides: bool,
+    pub size: bool,
+    pub who_owns: bool,
+}
+
+impl InfoOpts {
+    fn any_section(&self) -> bool {
+        self.all || self.description || self.contents || self.depends || self.provides || self.size
+    }
+}
+
+fn print_pkg_info(
+    info: &crate::adb::PkgInfo,
+    dir: Option<&Path>,
+    io: &InfoOpts,
+) -> Result<()> {
+    let nv = info.nv();
+    let default_view = !io.any_section();
+    if default_view || io.all || io.description {
+        println!("{nv} description:\n{}", info.description);
+        if !info.url.is_empty() {
+            println!("{nv} webpage:\n{}", info.url);
+        }
+    }
+    if default_view || io.all || io.size {
+        println!("{nv} installed size:\n{} ({})", human(info.installed_size), info.installed_size);
+    }
+    if io.all {
+        if !info.arch.is_empty() {
+            println!("{nv} arch:\n{}", info.arch);
+        }
+        if !info.license.is_empty() {
+            println!("{nv} license:\n{}", info.license);
+        }
+        if !info.origin.is_empty() {
+            println!("{nv} origin:\n{}", info.origin);
+        }
+    }
+    if io.all || io.depends {
+        println!("{nv} depends on:");
+        for d in &info.depends {
+            println!("{d}");
+        }
+    }
+    if io.all || io.provides {
+        println!("{nv} provides:");
+        for p in &info.provides {
+            println!("{p}");
+        }
+    }
+    if io.all || io.contents {
+        if let Some(d) = dir {
+            println!("{nv} contains:");
+            for r in db::read_files(d)? {
+                println!("{}", r.path_lossy());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shows information about installed (or repository) packages, checks
+/// whether packages are installed (`-e`), or looks up file ownership (`-W`).
+pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
+    let db = open_readonly(o)?;
+    if io.who_owns {
+        if args.is_empty() {
+            return Err(Error::Msg("info -W needs at least one PATH".into()));
+        }
+        let mut all_found = true;
+        // Build path -> package nv lookup once across installed packages.
+        let mut owners: std::collections::HashMap<Vec<u8>, String> = std::collections::HashMap::new();
+        for ip in db.installed.values() {
+            let nv = ip.meta.nv();
+            if let Ok(recs) = db::read_files(&ip.dir) {
+                for r in recs {
+                    owners.entry(r.path).or_insert_with(|| nv.clone());
+                }
+            }
+        }
+        for arg in args {
+            let rel = arg.trim_start_matches('/');
+            if let Some(nv) = owners.get(rel.as_bytes()) {
+                println!("{arg} is owned by {nv}");
+            } else {
+                eprintln!("vpm: {arg}: not owned by any installed package");
+                all_found = false;
+            }
+        }
+        return Ok(all_found);
+    }
+    if args.is_empty() {
+        for name in db.installed.keys() {
+            println!("{name}");
+        }
+        return Ok(true);
+    }
+    if io.installed {
+        let mut all_ok = true;
+        for name in args {
+            let found = db.installed.contains_key(name)
+                || db.installed.values().any(|ip| ip.meta.info.provides.iter().any(|p| p.name == *name));
+            if found {
+                println!("{name}");
+            } else {
+                all_ok = false;
+            }
+        }
+        return Ok(all_ok);
+    }
+
+    let mut repos_cache: Option<Vec<Repo>> = None;
+    let mut all_ok = true;
+    for (idx, name) in args.iter().enumerate() {
+        if idx > 0 {
+            println!();
+        }
+        if let Some(ip) = db.installed.get(name) {
+            print_pkg_info(&ip.meta.info, Some(&ip.dir), io)?;
+            continue;
+        }
+        // Fallback to repositories if not installed
+        if repos_cache.is_none() {
+            let root = &db.root;
+            let arches = arches(o, root);
+            let keys = load_keys(o, root)?;
+            match load_repos(o, root, &arches[0], &keys, false) {
+                Ok((repos, _)) => repos_cache = Some(repos),
+                Err(_) => repos_cache = Some(Vec::new()),
+            }
+        }
+        let best = repos_cache
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r.index.packages.iter())
+            .filter(|p| p.name == *name)
+            .max_by(|a, b| crate::version::cmp(&a.version, &b.version));
+        if let Some(p) = best {
+            print_pkg_info(p, None, io)?;
+        } else {
+            eprintln!("vpm: {name}: package not found");
+            all_ok = false;
+        }
+    }
+    Ok(all_ok)
+}
+
+/// Removes downloaded `.apk` files from `ROOT/var/cache/vpm/`, keeping
+/// cached repository indexes.
+pub fn cache_clean(o: &Options) -> Result<bool> {
+    let db = open(o)?;
+    let cache = db.root.join(db::CACHE_DIR);
+    let mut count: u64 = 0;
+    let mut bytes: u64 = 0;
+    if let Ok(rd) = fs::read_dir(&cache) {
+        for e in rd.flatten() {
+            let n = e.file_name();
+            let nb = n.as_encoded_bytes();
+            if nb.ends_with(b".apk") && e.file_type().map_or(false, |t| t.is_file()) {
+                let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
+                fs::remove_file(e.path())?;
+                count += 1;
+                bytes += sz;
+            }
+        }
+    }
+    println!("OK: removed {count} cached packages ({} freed)", human(bytes));
+    Ok(true)
+}
+

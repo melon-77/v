@@ -517,7 +517,7 @@ pub struct Db {
     pub root: PathBuf,
     pub installed: BTreeMap<String, Installed>,
     pub world: Vec<Dependency>,
-    _lock: File,
+    _lock: Option<File>,
 }
 
 impl Db {
@@ -534,19 +534,23 @@ impl Db {
         root.join(STATE_DIR).join("journal")
     }
 
+    fn own_dirs(root: &Path) -> [PathBuf; 6] {
+        [
+            root.join("var"),
+            root.join("var/lib"),
+            root.join("var/cache"),
+            Self::state(root),
+            root.join(CACHE_DIR),
+            root.join(PROGRAMS),
+        ]
+    }
+
     /// Opens (or with `initdb` creates) the database and takes the lock.
     pub fn open(root: &Path, initdb: bool) -> Result<Db> {
         let state = Self::state(root);
         // vpm's own directories must be real directories, not symlinks
         // that would lead its writes and deletions elsewhere
-        let own = [
-            root.join("var"),
-            root.join("var/lib"),
-            root.join("var/cache"),
-            state.clone(),
-            root.join(CACHE_DIR),
-            root.join(PROGRAMS),
-        ];
+        let own = Self::own_dirs(root);
         for d in &own {
             real_dir(d).map_err(Error::Io)?;
         }
@@ -580,7 +584,29 @@ impl Db {
             use std::os::unix::io::AsRawFd;
             sys::set_lock_fd(lock.as_raw_fd());
         }
-        let mut db = Db { root: root.to_path_buf(), installed: BTreeMap::new(), world: Vec::new(), _lock: lock };
+        let mut db = Db { root: root.to_path_buf(), installed: BTreeMap::new(), world: Vec::new(), _lock: Some(lock) };
+        db.reload()?;
+        Ok(db)
+    }
+
+    /// Opens the database read-only without taking a lock or creating
+    /// directories. With `allow_missing`, a root without a database yet
+    /// opens as empty (for `--initdb --simulate`).
+    pub fn open_readonly(root: &Path, allow_missing: bool) -> Result<Db> {
+        let state = Self::state(root);
+        for d in &Self::own_dirs(root) {
+            real_dir(d).map_err(Error::Io)?;
+        }
+        if !state.join("world").exists() {
+            if allow_missing {
+                return Ok(Db { root: root.to_path_buf(), installed: BTreeMap::new(), world: Vec::new(), _lock: None });
+            }
+            return Err(Error::Msg(format!(
+                "{} has no vpm database (create one with --initdb)",
+                root.display()
+            )));
+        }
+        let mut db = Db { root: root.to_path_buf(), installed: BTreeMap::new(), world: Vec::new(), _lock: None };
         db.reload()?;
         Ok(db)
     }
@@ -593,15 +619,17 @@ impl Db {
     pub fn reload(&mut self) -> Result<()> {
         self.installed.clear();
         let programs = self.root.join(PROGRAMS);
-        let mut names: Vec<_> = fs::read_dir(&programs)?.collect::<io::Result<Vec<_>>>()?;
-        names.sort_by_key(|e| e.file_name());
-        for e in names {
-            match Self::load_installed(&e.path()) {
-                Ok(Some(ip)) => {
-                    self.installed.insert(ip.meta.info.name.clone(), ip);
+        if programs.exists() {
+            let mut names: Vec<_> = fs::read_dir(&programs)?.collect::<io::Result<Vec<_>>>()?;
+            names.sort_by_key(|e| e.file_name());
+            for e in names {
+                match Self::load_installed(&e.path()) {
+                    Ok(Some(ip)) => {
+                        self.installed.insert(ip.meta.info.name.clone(), ip);
+                    }
+                    Ok(None) => {}
+                    Err(why) => eprintln!("vpm: warning: {}: {why}; ignored", e.path().display()),
                 }
-                Ok(None) => {}
-                Err(why) => eprintln!("vpm: warning: {}: {why}; ignored", e.path().display()),
             }
         }
         self.world = read_world(&self.root)?;

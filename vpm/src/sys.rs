@@ -154,7 +154,9 @@ impl ChrootPrep {
         if self.lock_fd >= 0 {
             libc::fcntl(self.lock_fd, libc::F_SETFD, 0);
         }
-        check(chroot(self.root.as_ptr()))?;
+        if self.root.as_bytes() != b"/" {
+            check(chroot(self.root.as_ptr()))?;
+        }
         check(chdir(self.slash.as_ptr()))
     }
 }

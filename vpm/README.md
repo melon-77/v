@@ -38,15 +38,23 @@ There is no async runtime. Parallel work uses std threads.
 ## Commands
 
 ```
-vpm [--root DIR] [--repository INDEX]... [--keys-dir DIR] [--initdb] [--plain]
-    [--no-scripts] [--jobs N] [--allow-rollback] [--allow-untrusted] COMMAND
+vpm [--root DIR] [--repository INDEX]... [--keys-dir DIR] [--arch ARCH]
+    [--print-arch] [--initdb] [--plain] [--simulate|-s] [--no-scripts]
+    [--no-commit-hooks] [--jobs N] [--allow-rollback] [--allow-untrusted] COMMAND
 
-  add NAME...      add to the world and install. NAME may carry a constraint
+  add [-u] NAME... add to the world and install. NAME may carry a constraint
                    ('foo>=1.2') or be a provided name ('so:libz.so.1').
-                   An already installed NAME keeps its version.
+                   An already installed NAME keeps its version unless -u is given.
   del NAME...      remove from the world; uninstall what is no longer needed
   upgrade          move everything to the newest versions
+  update           refresh repository indexes
   list             the installed packages ([world] = asked for)
+  search [-x] [-d] [PAT...]
+                   search repositories (-x exact name, -d descriptions)
+  info [-e|-a|-d|-L|-R|-P|-s|-W] [NAME...]
+                   show package info (-e installed check, -W who owns PATH;
+                   no args lists installed package names)
+  cache clean      remove downloaded .apk files from var/cache/vpm
   verify FILE...   check signature, identity and every file's content
   dump FILE [--json], dump-index FILE [--json], manifest FILE
 ```
@@ -274,13 +282,10 @@ synthetic edge cases from the spec review match apk too.
 Database and commands:
 - vpm manages its own roots only: no import of an apk-managed system, no
   `apk` database, no `/` without `--initdb` history.
-- No repair command: corrupt `Programs` entries are skipped with a
-  warning.
-- No `apk fix`, `search`, `info` or dot-files (`.list`, `.trigger`...).
-  No cache cleanup command; the cache is only trimmed of interrupted
-  downloads.
-- No `--simulate`. No `add -u`, `--latest` or pinning to a tagged
-  repository (`name@tag` is refused).
+- No repair command (`apk fix`): corrupt `Programs` entries are skipped
+  with a warning.
+- No dot-files (`.list`, `.trigger`...).
+- No `--latest` or pinning to a tagged repository (`name@tag` is refused).
 
 Repositories and packages:
 - Only v3 indexes. A keyword-less base URL is treated as v3, where apk

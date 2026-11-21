@@ -941,3 +941,148 @@ fn lock_old_version(dir: &Path) {
     }
 }
 
+/// Directories inside a root searched for commit hooks, in precedence order.
+const COMMIT_HOOK_DIRS: &[&[u8]] = &[
+    b"etc/vpm/commit_hooks.d",
+    b"usr/lib/vpm/commit_hooks.d",
+    b"lib/vpm/commit_hooks.d",
+    b"etc/apk/commit_hooks.d",
+    b"usr/lib/apk/commit_hooks.d",
+    b"lib/apk/commit_hooks.d",
+];
+
+/// Discovers executable commit hooks inside `root`, returning
+/// `(name, inside_path)` pairs sorted by filename and deduplicated by
+/// `(dev, ino)` (so merged `/lib -> usr/lib` never runs a hook twice).
+pub fn discover_commit_hooks(root: &Path) -> Vec<(String, String)> {
+    let rfs = RootFs::new(root);
+    let mut seen_ino: HashSet<(u64, u64)> = HashSet::new();
+    let mut seen_name: HashSet<String> = HashSet::new();
+    let mut hooks: Vec<(String, String)> = Vec::new();
+    for dir in COMMIT_HOOK_DIRS {
+        let Ok(res) = rfs.resolve(dir, true) else { continue };
+        let Ok(rd) = fs::read_dir(&res.host) else { continue };
+        for e in rd.flatten() {
+            let fname = e.file_name();
+            let fb = fname.as_bytes();
+            if fb.is_empty() || fb.starts_with(b".") {
+                continue;
+            }
+            let Ok(name) = std::str::from_utf8(fb) else { continue };
+            let mut rel = res.canon.clone();
+            if !rel.is_empty() {
+                rel.push(b'/');
+            }
+            rel.extend_from_slice(fb);
+            let Ok(fres) = rfs.resolve(&rel, true) else { continue };
+            let Ok(md) = fs::symlink_metadata(&fres.host) else { continue };
+            if !md.is_file() || (md.mode() & 0o111) == 0 {
+                continue;
+            }
+            if !seen_ino.insert((md.dev(), md.ino())) {
+                continue;
+            }
+            if !seen_name.insert(name.to_string()) {
+                continue;
+            }
+            let Ok(inside_rel) = std::str::from_utf8(&fres.canon) else { continue };
+            hooks.push((name.to_string(), format!("/{inside_rel}")));
+        }
+    }
+    hooks.sort_by(|a, b| a.0.cmp(&b.0));
+    hooks
+}
+
+/// Runs commit hooks inside `root` for `stage` (`"pre-commit"` or
+/// `"post-commit"`), matching apk's `commit_hooks.d` contract.
+/// A failing hook aborts immediately and returns an error.
+pub fn run_commit_hooks(root: &Path, stage: &str) -> Result<()> {
+    let hooks = discover_commit_hooks(root);
+    if hooks.is_empty() {
+        return Ok(());
+    }
+    let snap_text = std::env::var("VALENCE_SNAPSHOT_TEXT").ok();
+    for (name, inside) in hooks {
+        println!("  executing hook {name} {stage}");
+        let prep = sys::ChrootPrep::new(root)?;
+        let mut cmd = Command::new(&inside);
+        cmd.arg(stage)
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .stdin(std::process::Stdio::null());
+        if let Some(ref t) = snap_text {
+            cmd.env("VALENCE_SNAPSHOT_TEXT", t);
+        }
+        // SAFETY: ChrootPrep::apply only makes async-signal-safe calls with
+        // strings prepared before the fork.
+        unsafe {
+            cmd.pre_exec(move || prep.apply());
+        }
+        let out = cmd
+            .output()
+            .map_err(|e| Error::Msg(format!("commit hook {name} ({stage}): cannot execute: {e}")))?;
+        for l in String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .chain(String::from_utf8_lossy(&out.stderr).lines())
+        {
+            println!("  * {l}");
+        }
+        if !out.status.success() {
+            return Err(Error::Msg(format!("commit hook {name} ({stage}) exited with {}", out.status)));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_hooks_discover_dedup_and_order() {
+        let dir = std::env::temp_dir().join(format!("vpm-hooks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("usr/lib/apk/commit_hooks.d")).unwrap();
+        fs::create_dir_all(dir.join("etc/vpm/commit_hooks.d")).unwrap();
+        // merged /usr: lib -> usr/lib
+        symlink("usr/lib", dir.join("lib")).unwrap();
+
+        // executable hook in usr/lib/apk/commit_hooks.d
+        let h1 = dir.join("usr/lib/apk/commit_hooks.d/20-snap");
+        fs::write(&h1, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&h1, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // non-executable file should be skipped
+        let h_noexec = dir.join("usr/lib/apk/commit_hooks.d/15-disabled");
+        fs::write(&h_noexec, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&h_noexec, fs::Permissions::from_mode(0o644)).unwrap();
+
+        // dotfile should be skipped
+        let h_dot = dir.join("usr/lib/apk/commit_hooks.d/.hidden");
+        fs::write(&h_dot, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&h_dot, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // higher-precedence hook in etc/vpm/commit_hooks.d
+        let h2 = dir.join("etc/vpm/commit_hooks.d/10-first");
+        fs::write(&h2, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&h2, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // override of same name in etc/vpm/commit_hooks.d
+        let h_override = dir.join("etc/vpm/commit_hooks.d/20-snap");
+        fs::write(&h_override, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&h_override, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let hooks = discover_commit_hooks(&dir);
+        assert_eq!(
+            hooks,
+            vec![
+                ("10-first".into(), "/etc/vpm/commit_hooks.d/10-first".into()),
+                ("20-snap".into(), "/etc/vpm/commit_hooks.d/20-snap".into()),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+

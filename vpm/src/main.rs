@@ -23,21 +23,34 @@ options:
                          default: the lines of ROOT/etc/apk/repositories)
   --keys-dir DIR         trusted public keys (default ROOT/etc/apk/keys,
                          then ROOT/lib/apk/keys)
+  --arch ARCH            override target architecture
+  --print-arch           print the architecture of ROOT and exit
   --initdb               create vpm's database in ROOT
   --plain                plain progress lines instead of the full-screen view
-  --no-scripts           do not run package scripts and triggers
+  --simulate, -s         show what add/del/upgrade would do without changing
+                         anything
+  --upgrade, -u          with add: upgrade named packages if already installed
+  --no-scripts           do not run package scripts, triggers or commit hooks
+  --no-commit-hooks      do not run commit hooks (pre-commit / post-commit)
   --jobs N               fetch/unpack threads (default: one per CPU, max 16)
   --allow-rollback       accept a repository index older than the one used
                          before (refused by default: replay protection)
   --allow-untrusted      accept unsigned or untrusted files (testing only)
 
 commands:
-  add NAME...            add to the world and install (NAME may carry a
+  add [-u] NAME...       add to the world and install (NAME may carry a
                          version constraint, e.g. 'foo>=1.2')
   del NAME...            remove from the world; uninstall what is no longer
                          needed
   upgrade                upgrade everything to the newest versions
+  update                 refresh repository indexes
   list                   list the installed packages ([world] = asked for)
+  search [-x] [-d] [PAT...]
+                         search repositories (-x exact name, -d descriptions)
+  info [-e|-a|-d|-L|-R|-P|-s|-W] [NAME...]
+                         show package information (-e installed check,
+                         -W who owns PATH; no args lists installed names)
+  cache clean            remove downloaded .apk files from the cache
   verify FILE...         check signature and contents; print a summary
   dump-index FILE [--json]
                          print an index (JSON as `apk adbdump --format json`)
@@ -57,13 +70,20 @@ struct Opts {
     root: PathBuf,
     repositories: Vec<String>,
     keys_dir: Option<PathBuf>,
+    arch: Option<String>,
+    print_arch: bool,
     initdb: bool,
     plain: bool,
     allow_untrusted: bool,
     allow_rollback: bool,
     no_scripts: bool,
+    no_commit_hooks: bool,
+    simulate: bool,
+    upgrade: bool,
     jobs: usize,
     json: bool,
+    search: engine::SearchOpts,
+    info: engine::InfoOpts,
     cmd: String,
     args: Vec<String>,
 }
@@ -74,11 +94,15 @@ impl Opts {
             root: self.root.clone(),
             repositories: self.repositories.clone(),
             keys_dir: self.keys_dir.clone(),
+            arch: self.arch.clone(),
             initdb: self.initdb,
             plain: self.plain,
             allow_untrusted: self.allow_untrusted,
             allow_rollback: self.allow_rollback,
             no_scripts: self.no_scripts,
+            no_commit_hooks: self.no_commit_hooks,
+            simulate: self.simulate,
+            upgrade: self.upgrade,
             jobs: self.jobs,
             crash_at: std::env::var("VPM_CRASH_AT").ok().filter(|s| !s.is_empty()),
         }
@@ -90,13 +114,20 @@ fn parse_args() -> Result<Opts, String> {
         root: PathBuf::from("/"),
         repositories: Vec::new(),
         keys_dir: None,
+        arch: None,
+        print_arch: false,
         initdb: false,
         plain: false,
         allow_untrusted: false,
         allow_rollback: false,
         no_scripts: false,
+        no_commit_hooks: false,
+        simulate: false,
+        upgrade: false,
         jobs: 0,
         json: false,
+        search: engine::SearchOpts::default(),
+        info: engine::InfoOpts::default(),
         cmd: String::new(),
         args: Vec::new(),
     };
@@ -104,24 +135,45 @@ fn parse_args() -> Result<Opts, String> {
     let mut positional = Vec::new();
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
+        let cmd = positional.first().map(|s: &String| s.as_str()).unwrap_or("");
         match a.as_str() {
             "--root" | "-p" => o.root = PathBuf::from(val("--root")?),
             "--repository" | "-X" => o.repositories.push(val("--repository")?),
             "--keys-dir" => o.keys_dir = Some(PathBuf::from(val("--keys-dir")?)),
+            "--arch" => o.arch = Some(val("--arch")?),
+            "--print-arch" => o.print_arch = true,
             "--initdb" => o.initdb = true,
             "--plain" => o.plain = true,
             "--no-scripts" => o.no_scripts = true,
+            "--no-commit-hooks" => o.no_commit_hooks = true,
+            "--simulate" => o.simulate = true,
+            "--upgrade" | "-u" => o.upgrade = true,
             "--jobs" | "-j" => {
                 o.jobs = val("--jobs")?.parse().map_err(|_| "--jobs needs a number".to_string())?
             }
             "--allow-untrusted" => o.allow_untrusted = true,
             "--allow-rollback" => o.allow_rollback = true,
             "--json" => o.json = true,
+            "-s" if cmd == "info" => o.info.size = true,
+            "-s" => o.simulate = true,
+            "-x" | "--exact" if cmd == "search" => o.search.exact = true,
+            "-d" | "--description" if cmd == "search" => o.search.description = true,
+            "-e" | "--installed" if cmd == "info" => o.info.installed = true,
+            "-a" | "--all" if cmd == "info" => o.info.all = true,
+            "-d" | "--description" if cmd == "info" => o.info.description = true,
+            "-L" | "--contents" if cmd == "info" => o.info.contents = true,
+            "-R" | "--depends" if cmd == "info" => o.info.depends = true,
+            "-P" | "--provides" if cmd == "info" => o.info.provides = true,
+            "--size" if cmd == "info" => o.info.size = true,
+            "-W" | "--who-owns" if cmd == "info" => o.info.who_owns = true,
             "-h" | "--help" => return Err(String::new()),
             "--" => positional.extend(it.by_ref()),
-            s if s.starts_with("--") => return Err(format!("unknown option {s}")),
+            s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option {s}")),
             _ => positional.push(a),
         }
+    }
+    if o.print_arch {
+        return Ok(o);
     }
     if positional.is_empty() {
         return Err(String::new());
@@ -312,6 +364,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if o.print_arch {
+        let arch = o.arch.clone().unwrap_or_else(|| vpm::repo::root_arch(&o.root));
+        println!("{arch}");
+        return ExitCode::SUCCESS;
+    }
     let r = match o.cmd.as_str() {
         "verify" => cmd_verify(&o),
         "dump-index" => cmd_dump(&o, true),
@@ -319,12 +376,22 @@ fn main() -> ExitCode {
         "manifest" => cmd_manifest(&o),
         "add" => engine::add(&o.engine(), &o.args),
         "del" => engine::del(&o.engine(), &o.args),
-        "upgrade" | "list" if !o.args.is_empty() => {
+        "upgrade" | "list" | "update" if !o.args.is_empty() => {
             eprintln!("vpm: '{}' takes no arguments", o.cmd);
             return ExitCode::from(2);
         }
         "upgrade" => engine::upgrade(&o.engine()),
+        "update" => engine::update(&o.engine()),
         "list" => engine::list(&o.engine()),
+        "search" => engine::search(&o.engine(), &o.search, &o.args),
+        "info" => engine::info(&o.engine(), &o.info, &o.args),
+        "cache" => match o.args.as_slice() {
+            [sub] if sub == "clean" => engine::cache_clean(&o.engine()),
+            _ => {
+                eprintln!("vpm: usage: vpm cache clean");
+                return ExitCode::from(2);
+            }
+        },
         c => {
             eprintln!("vpm: unknown command '{c}'");
             eprint!("{USAGE}");
