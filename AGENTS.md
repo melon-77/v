@@ -109,6 +109,8 @@ scripts/console-packages.txt   what the console system is made of (mkiso.sh and 
 scripts/valence-run     start a program built for Valence on the build machine, through the sysroot's loader (rule 18)
 scripts/elf-unbake.py   take the sysroot's loader and library path out of what an options=(runhere) recipe linked;
                         with --check, refuse any package that still names them (rule 18)
+scripts/test-console.sh the eight console tests on an ISO ("Testing"); scripts/test-desktop.sh the three desktop ones
+scripts/release.sh      a release's files from the tested ISOs: renamed ISOs, SHA256SUMS, its signature, the key
 scripts/suggest-makedepends.py   what a recipe's source asks for, as -dev packages; writes scripts/kde-deps.json,
                         the generated KDE recipes' makedepends (rule 67)
 scripts/compare-with-index.py    what the built packages link, against another index: finds a feature that a missing
@@ -736,6 +738,9 @@ scripts/qemu-gui.py start cd [--uefi]                                     # Cala
 ```
 
 The tests run the console installer by name (`valence-install`, with the `VALENCE_*` variables from "Installers").
+`scripts/test-console.sh [ISO]` runs the eight console tests above in order and `scripts/test-desktop.sh [ISO]` the
+three desktop ones (on the newest ISO in `out/` when none is named). Each prints PASS or FAIL per test, with the end
+of a failed test's log; `test-console.sh` stops at the first failure unless `ALL=1`.
 `desktop-install` does too: it installs the desktop profile with the console installer, on BIOS and with `--uefi`.
 
 **The graphical installer is tested by hand**, because Calamares cannot be scripted and the system it installs has no
@@ -960,8 +965,7 @@ of `valence-install`, `valence-update-grub`, `valence-mkinitramfs` and `/etc/run
   takes the device from `root=` on the command line when the name is not a device node; `valence-snapshot` asks for
   the device of `/.snapshots`, which `mount -a` mounted by UUID.
 - **What is not there.** No space accounting (snapshots hold on to the data of what was replaced; ten of them bound
-  it), no snapshots of `/home`, no graphical front end, and Calamares does not make this layout yet ("State of the
-  glibc switch"). Subvolumes someone creates inside `@` are not part of its snapshots, and stop a replaced `@` from
+  it), no snapshots of `/home`, and no graphical front end. Subvolumes someone creates inside `@` are not part of its snapshots, and stop a replaced `@` from
   being deleted.
 - **Mine, not the owner's, and listed in ROADMAP.md under "Not decided yet":** ten snapshots kept, `/home` and
   `/var/log` outside them, zstd level 1 compression, and the name `valence-snapshot`.
@@ -1039,9 +1043,12 @@ firmware is its own package for that reason). Publish after building packages pe
 
 ## Releases
 
-Valence has had no release yet, and how releases are named is not decided (Melon named its releases after fruit
-varieties; that scheme stayed with Melon). Tags are `v<version>`. A release
-is marked Latest, carries every ISO and `SHA256SUMS`,
+Releases are numbered, starting at 0.1.0 (the owner's choice, 20 November 2026; Melon named its releases after
+fruit varieties, and that stayed with Melon). Tags are `v<version>`; test builds between releases are pre-releases
+with a dated tag (`valence-20261120-2`). A release is marked Latest, carries every ISO, `SHA256SUMS`,
+`SHA256SUMS.sig` and `valence-signing.rsa.pub` (`scripts/release.sh <version>` makes them from the tested ISOs in
+`out/`, named `valence-<version>-x86_64.iso` and `valence-desktop-<version>-x86_64.iso`; `docs/install.md` tells
+users how to check them and gives the key's fingerprint),
 has notes written for users (what's new, which file to download, `doas apk upgrade` for installed systems), and the
 release it replaces is retitled "(superseded)" with a link to the new one.
 
@@ -1054,11 +1061,14 @@ tested (see Testing) and added to a GitHub release:
 
 1. Build and test the ISOs on a machine with the signing key (the owner's computer, or a cloud session the owner has given the key: it can
    sign packages and push the package repo through git).
-2. Create the release (name, notes, every ISO and `SHA256SUMS`), mark it Latest, retitle the one it replaces. **A cloud session can't do
+2. Publish the packages the ISOs were made from (`scripts/publish-repo.sh`), then create the release (name, notes,
+   the files `scripts/release.sh` made), mark it Latest, retitle the one it replaces. **A cloud session can't do
    this step**: GitHub answers 403 "not permitted for this session type" for release creation and asset uploads, so the ISOs go to the
    owner's computer (WSL, or through `/mnt/project-files/releases/<tag>/`) and `gh release create` / `gh release upload` run there.
 
-Where the ISOs are hosted besides GitHub's release assets is an open decision (`docs/iso-hosting.md`).
+The ISOs are hosted as this repository's release assets and nowhere else (the owner's decision, 20 November 2026:
+ROADMAP.md, "Decided"); the package repository is its `packages` branch. Both reach everyone once the repository is
+public. `docs/iso-hosting.md` compares other hosts and is kept for if that changes.
 
 A change that touches only recipes in the online repository or docs doesn't need new ISOs.
 
@@ -1072,7 +1082,8 @@ Installed systems are meant to trust two keys, both shipped in `/etc/apk/keys` b
 
 **Valence has no backup key yet** (18 November 2026). Its everyday key was made new on the first Valence build machine
 (Melon's keys are not trusted), and `apk-tools` ships a backup key only when `keys/valence-backup.rsa.pub` exists.
-Before the first release, make one on a machine that is not the build machine (`openssl genrsa`, as in step 1 below),
+This section wanted one before the first release; the owner chose to release 0.1.0 without one (20 November
+2026). To add one, make it on a machine that is not the build machine (`openssl genrsa`, as in step 1 below),
 commit its `.pub` to `keys/` and `keys/trusted/`, and bump `pkgrel` of `apk-tools`. Until then a lost or leaked
 everyday key can't be rotated the way this section describes.
 
@@ -1085,7 +1096,7 @@ If `valence-signing.rsa` leaks or is lost:
    build it signed with the backup key: `VALENCE_SIGN_KEY=/path/to/valence-backup.rsa scripts/valence-build apk-tools`.
    Installed systems accept it because they already trust the backup key.
 3. Publish that transition repo (its index is signed with the backup key too) and let systems upgrade.
-4. Rebuild and re-sign everything with the new key (`build-everything.sh` with an empty `repo/`), publish.
+4. Rebuild and re-sign everything with the new key (`scripts/valence-build` with an empty `repo/`), publish.
    Systems that upgraded in step 3 trust only the new key and the backup key from then on.
 5. Make a new backup key the same way, ship its public half in `apk-tools` (bump `pkgrel`), put the private
    half offline.

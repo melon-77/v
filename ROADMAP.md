@@ -235,10 +235,6 @@ These are open on purpose. Each gets settled before the phase that needs it.
   console system without?
 - **Sources of the desktop's recipes.** About 150 of them (Qt, KDE, X.Org, Mesa) still build from Ubuntu's `orig`
   tarballs, as on Melon. The rule is upstream's own releases, verified; moving them is a piece of work of its own.
-- **Hosting.** Where the package repository and the ISOs live.
-- **Translations of the base tools.** bash, coreutils, grep and 38 other recipes are built with `--disable-nls`,
-  as on Melon, so they build no translations and have no `-lang` package: their messages are English only. Turning
-  it on is a rebuild of those recipes. (Before phase 7.)
 - **The man-page reader.** mandoc for now: one small package, which the `-doc` packages bring in. The usual
   alternative is man-db with groff, about 15 MB, which is what Arch and Debian use.
 - **Documentation on the ISO.** The ISO's own package repository carries only a few extras, so `apk add docs` needs
@@ -248,6 +244,19 @@ These are open on purpose. Each gets settled before the phase that needs it.
 - **Website**, and the font for the wordmark (the current one is a stand-in).
 
 ## Decided
+- **The first release is 0.1.0, signed with the everyday key only** (20 November 2026). Tags are `v<version>`; the
+  owner chose 0.1.0 over a date (`v2026.11.21`) and 1.0.0. AGENTS.md wanted a backup signing key before the first
+  release; the owner chose to release without one, so until one exists a lost everyday key cannot be rotated the
+  way AGENTS.md describes.
+- **English only** (20 November 2026): "we only need English". The base tools stay built with `--disable-nls` (bash,
+  coreutils, grep and 38 other recipes), so their messages are English and they have no `-lang` package. The
+  `-lang` packages the other recipes make stay as they are: optional, and installed by nothing by default.
+- **Hosting is the repository itself** (20 November 2026): "hosting will be done on the repo itself because it'll be
+  made public soon after everything is done". The package repository is the `packages` branch of
+  github.com/melon-77/v (`scripts/publish-repo.sh`, AGENTS.md "Package repository"), which installed systems already
+  point at, and the ISOs are that repository's release assets. Both reach everyone once the repository is public,
+  after the phases here are done; until then they need a GitHub account with access. The other hosts in
+  `docs/iso-hosting.md` are not used.
 
 - **The wish-list file comes before the ARM edition** (20 November 2026): "wishlist should be before arm edition".
   It is phase 8 now; the ARM edition is phase 9 and Valence's own package manager phase 10.

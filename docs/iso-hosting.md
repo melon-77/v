@@ -1,5 +1,9 @@
 # Hosting the ISOs on real file hosts
 
+**Decided (20 November 2026): not used.** The owner chose to host on the repository itself: the ISOs are release
+assets of github.com/melon-77/v and the package repository is its `packages` branch, reaching everyone once the
+repository is public (ROADMAP.md, "Decided"). This note is kept for if that changes.
+
 Today the ISOs are release assets on GitHub (`releases/download/<tag>/...`). That works and costs nothing, but the link says
 "github.com", and the owner wants downloads that look more polished. This note compares the free options, says what each needs
 from the owner, and what Valence had set up. (Written 7 October 2026; check a host's current limits before relying on one.

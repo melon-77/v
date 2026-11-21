@@ -3,180 +3,130 @@
 > **Contributing: open pull requests against the `testing` branch only, never `main`.**
 > `main` is the stable branch that ISOs and the package repository are built from. Changes reach it only
 > when the owner has personally reviewed and tested them on `testing` and decides to bring them over.
-> Pull requests against `main` will be closed.
+> Pull requests against `main` will be closed. More in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Status: being ported from Melon Linux
+Valence is a rolling Linux distribution for 64-bit PCs, built from source: glibc and the GNU tools, runit as init,
+apk-tools 3 for signed packages, and a Btrfs root that takes a snapshot of itself before every update, so a bad
+update can be taken back from a command or from the boot menu. Its desktop is KDE Plasma 6 on Wayland, with Flatpak
+for apps such as Firefox and Steam. It is the successor to [Melon Linux](https://github.com/melon-77/melon-os).
 
-Valence is the successor to [Melon Linux](https://github.com/melon-77/melon-os). It starts as a port of Melon's
-engineering (this tree was imported from Melon's `main` at `8849e5a` on 18 November 2026) and then changes a handful
-of things: glibc instead of musl, documentation and translations in their own packages instead of deleted, a builder
-that orders builds itself, and a Btrfs root with a snapshot before every update. **[ROADMAP.md](ROADMAP.md) is the
-plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
+## Get it
 
-Test builds of both ISOs are on the repository's Releases page; there is no online package repository yet. The
-system is on glibc: the cross toolchain and all 451 recipes build on it, from an empty repository with one command,
-in an order the builder works out from the recipes, each in a sysroot holding only what its recipe declares. 345 of
-them make the two ISOs (58 are on the console ISO; the desktop ISO adds Mesa, Qt 6, KDE Plasma 6, SDDM, PipeWire,
-Flatpak and the Calamares installer); the other 106 are the developer tools, the NVIDIA packages and an LXQt
-desktop, which build and were tried in a root made of the packages, but are on no ISO and in no test
-(ROADMAP.md has the test status). Its documentation is in packages of its own: a fresh install has no man pages, and
-`apk add docs` from a package repository adds them, with `man`, for everything installed. Its root is Btrfs,
-whichever installer made it, and apk takes a snapshot before every change to the installed packages; the boot menu
-starts any of them, and a command makes one the system again ("Snapshots and rolling back" below). The desktop's
-look is Valence's own: a plain black wallpaper and the logo's greys. The rest is still as inherited from
-Melon: the 32-bit edition, building Valence on Valence, and dated status notes that are Melon's history. Where this
-file, `AGENTS.md` and `BUILDING.md` describe those parts, they describe Melon's system.
+- **[Install guide](docs/install.md)**: which ISO, checking it, writing it to a USB stick, both installers,
+  installing next to Windows, the first start.
+- **[Updating and repairing](docs/updating.md)**: updates, software, snapshots and going back, repairing from the
+  USB stick.
+- The ISOs are on the [Releases page](https://github.com/melon-77/v/releases): `valence-desktop-<version>` (KDE
+  Plasma, live and installable) and `valence-<version>` (the console system), with `SHA256SUMS` signed by
+  Valence's key.
+
+**Status.** 0.1.0 is the first release. Both ISOs, both installers, encryption, installing next to Windows and
+rolling back pass automated tests in virtual machines (QEMU), on BIOS and UEFI; **Valence has not been tried on a
+real computer yet.** The package repository becomes reachable when this repository is made public; until then an
+installed system has what the ISO brought and cannot update. [ROADMAP.md](ROADMAP.md) is the plan, with what is done
+and what comes next.
 
 ## What it is
-
-A from-scratch, rolling x86_64 distribution:
 
 | | |
 |---|---|
 | libc | glibc 2.44 |
 | userland | the GNU tools (coreutils, findutils, grep, sed, tar, gzip, diffutils) with less, procps-ng, iproute2 and shadow; BusyBox 1.37 for `/bin/sh`, the initramfs and the small daemons |
-| documentation | man pages, info pages and docs are in `<package>-doc`, translations in `<package>-lang`; installing `docs` or `lang` brings them for everything installed; `man` is mandoc |
+| packages | apk-tools 3: signed packages, built from the recipes in this repository |
 | init | runit 2.3 |
-| packages | apk-tools 3 (signed apk v3 packages, binary + source recipes) |
-| kernel | Linux 7.0, generic flavour |
-| boot | GRUB 2.14, one ISO and one install that boot on both BIOS and UEFI |
-| root fs | Btrfs, with the system, `/home`, `/var/log`, the snapshots and the swap file each in a subvolume of its own (FAT32 `/boot`) |
+| kernel | Linux 7.0 |
+| boot | GRUB 2.14; one ISO and one install boot on both BIOS and UEFI |
+| root fs | Btrfs, with the system, `/home`, `/var/log`, the snapshots and the swap file each in a subvolume of its own; FAT32 `/boot` |
 | snapshots | apk takes one before every change to the installed packages; the boot menu starts any of them, and `valence-snapshot rollback` makes one the default, the way NixOS's generations work |
+| documentation | man pages and other docs are in `<package>-doc` packages, translations in `<package>-lang`; `apk add docs` brings the docs of everything installed; `man` is mandoc |
+| desktop | KDE Plasma 6 on Wayland, SDDM, PipeWire, NetworkManager, CUPS; Flatpak and Flathub for big apps |
+| language | US English (the base tools have no translations; Plasma's language can be changed) |
 | shell | bash 5.3 |
-| desktop | KDE Plasma 6 on Wayland; Flatpak for Steam and other apps; more desktops as online installs |
-| 32-bit edition | i686 (Pentium M, Pentium 4, Atom netbooks such as the MSI Wind U100) with LXQt on Wayland (labwc); Melon's, not built on glibc, and undecided for Valence (ROADMAP.md) |
 
-## Layout
+## Documentation
 
-```
-scripts/toolchain.sh   builds the x86_64-valence-linux-gnu cross toolchain (binutils 2.46, GCC 15.2, glibc 2.44)
-scripts/valence-build    builds packages into signed .apk files, in the order their recipes' dependencies give, each in a clean sysroot
-scripts/valence-run    runs a program built for Valence on the build machine, through the sysroot's loader
-scripts/mkiso.sh       assembles the hybrid BIOS/UEFI live ISO from the repo
-recipes/<pkg>/VALENCEBUILD   package recipes (APKBUILD-like)
-iso-files/init         live initramfs init
-branding/              the logo (SVG and PNGs)
-art/logo.py            the logo: a folded V in greys
-art/desktop.py         the desktop's wallpaper, splash and boot pictures (plain black) and its colours (the logo's greys)
-ROADMAP.md             the plan and its phases
-recipes/calamares-valence/   graphical installer: Calamares settings, branding and finishing scripts
-```
+| | |
+|---|---|
+| [docs/install.md](docs/install.md) | installing, for someone who has never installed Linux |
+| [docs/updating.md](docs/updating.md) | keeping it up to date, snapshots, repairing |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | how to send changes: branches, recipes, sources, tests |
+| [ROADMAP.md](ROADMAP.md) | the plan: phases, what is decided, what is open |
+| [BUILDING.md](BUILDING.md) | setting up a build machine (Ubuntu, Debian, WSL2 on Windows) and how long builds take |
+| [AGENTS.md](AGENTS.md) | the build system's manual: recipe format, the numbered rules, the installers, testing |
 
 ## Building
 
-Sources come from upstream releases (`scripts/fetch-sources.sh`, into `sources/`; older recipes still use the Ubuntu
-source archive's copies of the same tarballs, and new ones come straight from upstream). Then:
-
 ```sh
-scripts/toolchain.sh
-scripts/valence-build --edition console   # the console system and all it needs, in the order the recipes give
-scripts/mkiso.sh
+scripts/host-setup.sh                         # the build tools and the host's own Qt, Rust, GRUB (once)
+scripts/fetch-sources.sh                      # the sources, checked against sources/MANIFEST.tsv
+scripts/toolchain.sh                          # the x86_64-valence-linux-gnu cross toolchain
+scripts/valence-build                         # every package, in the order the recipes' dependencies give
+scripts/mkiso.sh                              # the console ISO; VALENCE_EDITION=desktop for the desktop ISO
 ```
 
-The build machine can be Ubuntu 24.04 (or WSL2, also on Windows 10: see BUILDING.md for its traps), Debian or Devuan, or **Valence itself**: `scripts/host-setup.sh`
-notices which one it runs on and installs the build tools with `apt` or with Valence's own `apk`. Building on Valence
-itself was set up when it was a musl system and is untested on glibc. `BUILDING.md` has
-them all, including what to keep and what to rebuild when moving a build machine.
+`scripts/valence-build` works the order out itself, builds each package in a sysroot that holds only what its recipe
+declares, and builds nothing that is already built: from an empty repository, all 451 recipes take about five hours
+on a 12-thread laptop. `--edition console` or `--edition desktop` builds only what that ISO needs. Packages are signed
+with `keys/valence-signing.rsa`, which is not in the repository: make your own with
+`openssl genrsa -out keys/valence-signing.rsa 4096` and put its public half in `keys/` and `keys/trusted/`.
+`BUILDING.md` has the details and the traps.
 
-Packages are signed with `keys/valence-signing.rsa` (not committed; generate your own with
-`openssl genrsa -out keys/valence-signing.rsa 4096` and put the public half in `keys/`).
-
-## Installing
-
-Boot the ISO. The desktop ISO's graphical installer is Calamares ("Install Valence" on the live desktop, or
-`valence-install-gui`). Both ISOs also have a console installer, `valence-install` (it needs root and runs itself through
-doas otherwise): base or desktop system, a whole disk or next to Windows on UEFI, optional LUKS encryption, and
-`VALENCE_*` variables for unattended installs (`valence-install --help`).
-
-The ISOs are published as GitHub release assets; `docs/iso-hosting.md` compares other free file hosts (SourceForge,
-Internet Archive, Cloudflare R2). Where else to host them is still open.
-
-## Snapshots and rolling back
-
-The system is on Btrfs, and apk takes a snapshot of it before every change to the installed packages (`apk upgrade`,
-`apk add`, `apk del`). Going back works the way NixOS's generations do: every snapshot is in the boot menu and can be
-started, and one command makes a snapshot the system that starts by default.
-
-**While the system still starts:**
-
-```sh
-sudo valence-snapshot              # the snapshots: number, when, and before what
-sudo valence-snapshot rollback     # back to before the last package change (rollback 12: to snapshot 12)
-sudo reboot                        # it takes effect at the next start
 ```
-
-**When it does not start any more:** switch the computer on and press Esc while it starts (next to Windows the boot
-menu shows by itself). Choose "Valence snapshots", then the snapshot from before the update. The system starts as it
-was then, with the kernel that snapshot was taken with, so this also works after a kernel update that does not boot.
-Starting a snapshot changes nothing by itself: restart, and the default system is back. To stay with what you
-started:
-
-```sh
-sudo valence-snapshot rollback     # this system is now the one that starts by default; no restart needed
+scripts/toolchain.sh        the cross toolchain (binutils 2.46, GCC 15.2, glibc 2.44)
+scripts/valence-build       the builder: recipes -> signed .apk packages in repo/
+scripts/mkiso.sh            the hybrid BIOS/UEFI live ISOs, from the packages
+scripts/qemu-test.py        the automated tests (scripts/test-console.sh and test-desktop.sh run them all)
+recipes/<pkg>/VALENCEBUILD  the package recipes
+recipes/valence-base/       Valence's own commands: valence-install, valence-snapshot, valence-wifi, ...
+recipes/calamares-valence/  the graphical installer's settings, look and finishing scripts
+art/                        the logo and the desktop's pictures and colours, made by scripts
 ```
-
-A snapshot holds `/`: the programs, the settings in `/etc`, the package database and the kernel. It does not hold
-`/home` or `/var/log`, so going back never touches your files, and the logs of what went wrong are still there
-afterwards. A rollback loses nothing either: the system it replaces is kept as a snapshot too (`valence-snapshot`
-lists it as "before rolling back to ..."), and rolling back to that one undoes it. Between starting a snapshot and
-keeping it, and between a rollback and the restart, apk refuses to change packages, because the change would land in
-a system that is about to be put aside.
-
-apk keeps its ten newest snapshots (`KEEP=` in `/etc/valence/snapshot.conf` changes the number, `AUTO=no` there
-switches them off). `sudo valence-snapshot create a note` takes one by hand; it stays until
-`sudo valence-snapshot delete <number>` removes it. A system installed from one of the first two test ISOs has an XFS
-root and no snapshots: only installing again gives it this layout.
-
-## 32-bit edition (old netbooks)
-
-This is Melon's 32-bit edition as inherited. It has not been built on glibc, and whether Valence keeps it is undecided
-(ROADMAP.md). Its desktop's recipes (LXQt, labwc) build on glibc for x86_64; nothing has been built for i686.
-
-Valence also builds for 32-bit PCs with SSE2 (Pentium M, Pentium 4, Intel Atom: the MSI Wind U100 and similar netbooks).
-Its desktop is **LXQt** on Wayland with the labwc compositor, lighter than Plasma and comfortable in 1–2 GB of RAM,
-with zram swap and drivers for every graphics and network chip an old 32-bit netbook or laptop is likely to have: Intel GMA, old Radeon (r300, r600) and GeForce (nouveau) graphics; Atheros, Ralink, Realtek, Intel 3945/4965 and Broadcom Wi-Fi, USB Wi-Fi sticks and the usual wired chips; the MSI Wind's Fn keys and radio switch (msi-laptop). It
-uses the same installers (Calamares and the console installer). Flatpak and the NVIDIA drivers are
-64-bit only. Build it with `VALENCE_ARCH=x86` (`BUILDING.md`); the ISOs are `valence-*-i686.iso` and
-`valence-desktop-*-i686.iso`. Status (7 October 2026): both ISOs are built, signed with Valence's key and pass their install tests on an emulated
-Atom N270 with 2 GB of RAM (LXQt logs in through SDDM, printing works); the 32-bit packages are in the online
-repository (`packages/x86`); the ISOs are on the pre-release `i686-20261007`; a test on a real U100 comes next. The QEMU
-guest agent isn't in the 32-bit edition yet.
 
 ## Developer tools
 
-Compilers and build tools come from the package repository (they're not on the ISOs). They build on glibc (GCC 15.2,
-clang 21, Rust 1.98, Go 1.27, perl, Python, cmake, meson, git and the rest), and each did a small job in a root made
-of the packages; there is no online repository to get them from yet, and no test installs them on a running
-system. For example:
+Compilers and build tools are in the package repository, not on the ISOs: GCC 15.2, clang 21, Rust 1.98, Go 1.27,
+perl, Python, cmake, meson, git and more. Each has been tried in a root made of the packages, not yet on an
+installed system.
 
 ```sh
-sudo apk add gcc g++ make pkgconf      # also offered on first login
+sudo apk add gcc g++ make pkgconf      # also offered at the first login
 sudo apk add clang go cmake meson git github-cli
-sudo apk add qemu ovmf                  # virtual machines with KVM, BIOS and UEFI
+sudo apk add qemu ovmf                 # virtual machines, BIOS and UEFI
 ```
 
-**Claude Code** is not packaged; it installs with Anthropic's own installer. On Melon the installer recognised musl
-and installed its musl build for your user, with the commands below. Valence is now a glibc system, where software
-prebuilt for glibc can run on the system itself; the installer has not been tested on it yet:
+**Claude Code** is not packaged; it installs with Anthropic's own installer, which has not been tried on Valence
+yet:
 
 ```sh
 sudo apk add bash curl ca-certificates libgcc libstdc++ ripgrep
 curl -fsSL https://claude.ai/install.sh | bash
-echo 'export USE_BUILTIN_RIPGREP=0' >> ~/.bashrc    # Claude Code then searches with valence's ripgrep
+echo 'export USE_BUILTIN_RIPGREP=0' >> ~/.bashrc    # Claude Code then searches with Valence's ripgrep
 ```
+
+## NVIDIA graphics
+
+On a computer with an NVIDIA card (GTX 16/RTX 20 and newer), the first login offers a driver: the open one
+(`sudo apk add linux-firmware-nvidia mesa-nvk`: nouveau with NVK, the desktop and games use the card) or NVIDIA's own
+kernel driver (`sudo apk add nvidia-open`: games from Flathub get NVIDIA's libraries from Flathub). Restart after
+installing either. Neither has been tried on a real card yet.
 
 ## Boot time
 
-An installed system that has no other operating system next to it skips its boot menu after 1 second (hold Shift or press Esc
-to open it; "safe graphics" is in there; `GRUB_TIMEOUT` and `GRUB_TIMEOUT_STYLE` in `/etc/default/grub` change this, and
-`sudo valence-update-grub` applies it). Next to Windows the menu still shows for 5 seconds. Startup no longer waits for every
-device to be probed: it mounts as soon as the disks are there and lets the graphics driver, Wi-Fi and sound finish while the
-services start (`valence.udev=sync` on the kernel command line brings the old, slower order back if a machine misbehaves), and
-services that wait for each other check every 20 ms instead of every 0.42 s. `valence-boottime` shows where a boot's time went:
-the milestones of stage 1 and when the main daemons started, to 10 ms.
+On a computer with only Valence, the boot menu is skipped after 1 second (hold Shift or press Esc to open it; it
+has a "safe graphics" entry). `GRUB_TIMEOUT` and `GRUB_TIMEOUT_STYLE` in `/etc/default/grub` change that, and
+`sudo valence-update-grub` applies it. Next to Windows the menu shows for 5 seconds. Startup mounts the disks as soon
+as they are there and lets the graphics, Wi-Fi and sound drivers finish while the services start
+(`valence.udev=sync` on the kernel command line brings back the slower, stricter order if a machine misbehaves).
+`valence-boottime` shows where a start's time went.
 
-**NVIDIA graphics:** on a computer with an NVIDIA card (GTX 16/RTX 20 and newer), `valence-first-boot` offers the open
-driver (`sudo apk add linux-firmware-nvidia mesa-nvk`: nouveau with NVK, the desktop and games use the card) or NVIDIA's
-own kernel driver (`sudo apk add nvidia-open`: Flatpak games get NVIDIA's libraries from Flathub). Restart after
-installing either. On Melon the desktop couldn't use NVIDIA's libraries, as they need glibc; on glibc it could, but
-Valence has no package of them, and neither driver has been tested on glibc.
+## 32-bit edition
+
+Melon had a 32-bit edition with LXQt for old netbooks. It has not been built on Valence's glibc, and whether Valence
+keeps it is undecided (ROADMAP.md). Its desktop's recipes (LXQt, labwc) build for x86_64.
+
+## History
+
+This tree was imported from Melon's `main` at `8849e5a` on 18 November 2026 and changed from there: glibc instead of
+musl, the GNU tools instead of BusyBox's, documentation and translations in their own packages instead of deleted,
+a builder that works out the build order itself, Btrfs with snapshots and rollback, and its own look. Notes in
+`AGENTS.md` and `BUILDING.md` that are dated before then describe Melon.
