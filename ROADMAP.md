@@ -237,6 +237,8 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   usual tree as hard links, survived 310 upgrades killed at random moments, and installs the base system 1.6 to 2.2
   times faster than apk. Not yet measured against xbps, and no installed system uses it yet; the `-dev`, `-doc` and
   `-lang` parts are folders of their own for now, since they are packages of their own.
+  *Handed over (21 November 2026):* the owner gave phase 10 to another of the project's developers after stage 1;
+  `vpm/HANDOVER.md` is where to start.
 
 ## Not decided yet
 

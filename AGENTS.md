@@ -786,6 +786,9 @@ name is a working name. Stage 1, "the engine first ... next to apk and measured 
 Its tests: `cargo test --release` in `vpm/` (the real-data tests read `repo/x86_64`), `vpm/tools/killtest/` and
 `vpm/tools/bench/` (`vpm/tools/README.md`).
 
+**Phase 10 is another developer's since 21 November 2026** (the owner handed it over after stage 1;
+`vpm/HANDOVER.md`): leave `vpm/` and `recipes/vpm` alone unless the owner asks for something there.
+
 ## Testing (required before you commit a change that affects boot or install)
 
 ```sh
