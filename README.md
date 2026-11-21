@@ -14,18 +14,18 @@ that orders builds itself, and a Btrfs root with a snapshot before every update.
 plan**: what stays, what changes, the phases with their "done when", and what is still undecided.
 
 Test builds of both ISOs are on the repository's Releases page; there is no online package repository yet. The
-system is on glibc: the cross toolchain and the 345 recipes the two ISOs are made of build on it (58 are on the
-console ISO; the desktop ISO adds Mesa, Qt 6, KDE Plasma 6, SDDM, PipeWire, Flatpak and the Calamares installer), in
-an order the builder works out from the recipes, each in a sysroot holding only what its recipe declares
+system is on glibc: the cross toolchain and all 451 recipes build on it, from an empty repository with one command,
+in an order the builder works out from the recipes, each in a sysroot holding only what its recipe declares. 345 of
+them make the two ISOs (58 are on the console ISO; the desktop ISO adds Mesa, Qt 6, KDE Plasma 6, SDDM, PipeWire,
+Flatpak and the Calamares installer); the other 106 are the developer tools, the NVIDIA packages and an LXQt
+desktop, which build and were tried in a root made of the packages, but are on no ISO and in no test
 (ROADMAP.md has the test status). Its documentation is in packages of its own: a fresh install has no man pages, and
 `apk add docs` from a package repository adds them, with `man`, for everything installed. Its root is Btrfs,
 whichever installer made it, and apk takes a snapshot before every change to the installed packages; the boot menu
 starts any of them, and a command makes one the system again ("Snapshots and rolling back" below). The desktop's
 look is Valence's own: a plain black wallpaper and the logo's greys. The rest is still as inherited from
-Melon: the 106 recipes beyond the two ISOs (the developer tools, the NVIDIA packages, the 32-bit edition's LXQt
-desktop: not yet rebuilt on glibc, with Melon's musl workarounds still in them), the 32-bit edition, and dated
-status notes that are Melon's history. Where this file, `AGENTS.md` and `BUILDING.md` describe those parts, they
-describe Melon's system.
+Melon: the 32-bit edition, building Valence on Valence, and dated status notes that are Melon's history. Where this
+file, `AGENTS.md` and `BUILDING.md` describe those parts, they describe Melon's system.
 
 ## What it is
 
@@ -130,7 +130,7 @@ root and no snapshots: only installing again gives it this layout.
 ## 32-bit edition (old netbooks)
 
 This is Melon's 32-bit edition as inherited. It has not been built on glibc, and whether Valence keeps it is undecided
-(ROADMAP.md).
+(ROADMAP.md). Its desktop's recipes (LXQt, labwc) build on glibc for x86_64; nothing has been built for i686.
 
 Valence also builds for 32-bit PCs with SSE2 (Pentium M, Pentium 4, Intel Atom: the MSI Wind U100 and similar netbooks).
 Its desktop is **LXQt** on Wayland with the labwc compositor, lighter than Plasma and comfortable in 1–2 GB of RAM,
@@ -144,7 +144,10 @@ guest agent isn't in the 32-bit edition yet.
 
 ## Developer tools
 
-Compilers and build tools come from the package repository (they're not on the ISOs), for example:
+Compilers and build tools come from the package repository (they're not on the ISOs). They build on glibc (GCC 15.2,
+clang 21, Rust 1.98, Go 1.27, perl, Python, cmake, meson, git and the rest), and each did a small job in a root made
+of the packages; there is no online repository to get them from yet, and no test installs them on a running
+system. For example:
 
 ```sh
 sudo apk add gcc g++ make pkgconf      # also offered on first login

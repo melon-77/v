@@ -47,6 +47,11 @@ build 19041 or newer.
 
 5. Build inside the Linux file system (`~/valence`), not under `/mnt/c`: it is many times faster, and keep the helper scripts there too. Start long builds detached (`setsid nohup script >log 2>&1 < /dev/null &`) and keep one
    `wsl.exe -d Ubuntu-24.04 -- sleep infinity` open, so WSL keeps its VM while no terminal is attached.
+   `vmIdleTimeout=-1` keeps the VM, not the distribution: when the last `wsl.exe` leaves, WSL shuts Ubuntu down a few
+   seconds later, with everything started in it, detached or not. With systemd that shutdown can take longer than WSL
+   waits: the next `wsl` command then sits for a minute, prints "Timed out waiting for distribution process ... to
+   exit after 60000 ms" and starts Ubuntu afresh, and the load average stays at 50 to 70 on an idle machine (the old
+   instance's stuck processes are counted; `top` shows the CPUs idle). Both seen on the Victus in November 2026.
 
 6. **Do not let Windows sleep.** Modern/connected standby freezes the WSL2 VM: after it wakes, every new `wsl` command hangs
    (even `wsl --shutdown` and `wsl --exec /bin/true`) and the builds inside do not progress, although `wsl -l -v` says
@@ -78,9 +83,7 @@ build 19041 or newer.
    Then `scripts/valence-build <recipe>` the recipes you changed. It builds what they need first, if the copied
    repository lacks it or lacks its record (copy `repo/<arch>/.state` too), and sets the sysroot up for each build
    from the recipe's own `makedepends` (clean builds, AGENTS.md "Recipe format"); a `-dev` package's pkg-config
-   requirements are apk dependencies now, so they come along. That works for the base. A KDE recipe (`breeze`) still
-   has no `makedepends` at all (Melon's full build relied on every earlier package being in the one sysroot), so it
-   cannot be built this way until the generator gives it some (AGENTS.md, "State of the glibc switch"). The packages in the online repository were built on a
+   requirements are apk dependencies now, so they come along. That works for every recipe since phase 4. The packages in Melon's online repository were built on a
    machine whose checkout was `/home/hi/valence`, and some of their CMake files name that path (`KF6::WindowSystem` includes
    `/home/hi/valence/sysroot/usr/include`: "includes non-existent path"). Until you have rebuilt those packages yourself, let the
    path resolve: `mkdir -p /home/hi/valence && ln -s ~/valence-r2/sysroot /home/hi/valence/sysroot && ln -s ~/valence/hosttools /home/hi/valence/hosttools`.
@@ -91,6 +94,14 @@ build 19041 or newer.
    and `sbin` links to them **before** `apk --initdb`, or apk makes `lib/` a real directory for its database and the first install
    fails with `valence-layout-1.0-r0: failed to commit lib: Is a directory`. WSL also keeps Windows' time zone; `mkiso.sh` dates
    the ISOs in UTC so they aren't named after the day before.
+
+10. **Another virtual machine on the host takes the memory `.wslconfig` promised.** `memory=24GB` on a 32 GB machine
+    is right while WSL is the only VM. With a second one running (a Hyper-V VM for testing an ISO, say), Linux still
+    fills its 24 GB with file cache during a long build, Windows runs out and pages, and every compiler crawls: the
+    load went to 54 with each `cc1plus` at half a CPU, the kernel log filled with soft lockups, and builds took ten
+    times as long (the Victus, 20 November 2026; Windows had 0.3 GB free). Shut the other VM down, or lower `memory`.
+    Without touching Windows, inside WSL: `sync; echo 1 > /proc/sys/vm/drop_caches` gives the cache back at once, and
+    a loop that does it whenever `Cached` in `/proc/meminfo` passes 6 GB kept a whole build at full speed.
 
 Measured on that laptop (12 jobs): `host-setup.sh` about 35 minutes for apt and the 2 GB of sources, a few minutes for GRUB, Python and Rust,
 then 50 minutes for the host Qt; cross toolchain 14 to 21 minutes; `linux-valence` 22 minutes; `grub` 3 minutes; small recipes seconds;
@@ -129,6 +140,15 @@ rest a minute or less each. A run after it built nothing. The packages are 897 M
 35 seconds to make and is 804 MB; the console ISO is still 408 MB, with the same files as before but for the four
 that changed. Without KVM the `desktop` test takes 3 minutes and `desktop-install` 9 to 14 minutes on each of BIOS
 and UEFI (two rounds that night: 9 and 9, then 14 and 11).
+
+Everything from nothing (phase 4, 20 November 2026): with `repo/`, `sysroot/`, `tools/` and `work/toolchain` moved
+away, `toolchain.sh` took 10 minutes and one `scripts/valence-build` then built all 451 recipes in 5 hours 3 minutes
+without a failure: the longest were LLVM (25 minutes), clang (18), Qt Declarative (18), Rust (17), nvidia-open (14)
+and the kernel (14), and the ten longest took 140 minutes together. The same command again built nothing, in 2
+seconds. The repository is 1102 packages, 1.6 GB. The eight console tests took 13 minutes on the ISO made of them and
+the three desktop tests 21. A loop kept Linux's file cache small throughout (item 10 above). A first run from
+nothing, earlier that day, had built 231 recipes in 72 minutes when it was stopped: one recipe had failed for its
+place in the order (AGENTS.md, rule 70), and a run that needs a second start proves nothing.
 
 Every time in the paragraphs before "On glibc" is from a musl build.
 

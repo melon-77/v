@@ -48,24 +48,31 @@ path (rule 60). The signing key can stay where it is:
 
 ### State of the glibc switch
 
-Valence's C library was musl, as in Melon, and is now glibc (ROADMAP.md, phase 2). Two editions build on it and pass
-their tests (ROADMAP.md has the status): the console system, which is the cross toolchain and the 58 recipes the
-console ISO is made of, the GNU tools among them (with mandoc, `docs` and `lang` beside them, for its
-documentation); and the Plasma desktop (`--edition desktop`, 345 recipes with the console's: LLVM and Mesa, Qt 6,
-KDE Frameworks, Plasma, SDDM, PipeWire, Flatpak, CUPS, Calamares and the applications).
-Not converted yet:
+Valence's C library was musl, as in Melon, and is now glibc (ROADMAP.md, phase 2). **Every recipe builds on it:**
+`scripts/valence-build` built all 451 from an empty repository in one run (ROADMAP.md, phase 4). Two editions are
+made of them and pass their tests (ROADMAP.md has the status): the console system, which is the cross toolchain and
+the 58 recipes the console ISO is made of, the GNU tools among them (with mandoc, `docs` and `lang` beside them,
+for its documentation); and the Plasma desktop (`--edition desktop`, 345 recipes with the console's: LLVM and Mesa,
+Qt 6, KDE Frameworks, Plasma, SDDM, PipeWire, Flatpak, CUPS, Calamares and the applications).
 
-- **The 106 recipes outside the two editions** still contain musl workarounds and have not been built on glibc:
-  the developer tools (binutils, gcc, clang, cmake, meson, ninja, git, perl, Rust, Go, qemu, ...), the 32-bit
-  edition's desktop (LXQt, labwc, wlroots and their libraries), and what the online repository offered beside the
-  ISOs (nvidia-open, linux-firmware-nvidia, mesa-nvk, xfsprogs, cataclysm-dda, ...). Compare `ls recipes` with
-  `scripts/valence-build --edition desktop --order` for the list.
-- **Recipes that run what they have just built.** `cmake_native` (libclc and spirv-llvm-translator call it), and the
-  rules and recipe comments that say a freshly built program runs directly on the build machine "(rule 18)" (the
-  clang, perl, Go and Rust recipes among them), describe Melon's mechanism. Those recipes need `scripts/valence-run`
-  (rule 18) when they are converted, the way `recipes/llvm` was (rule 66).
+The other 106 recipes are on no ISO: the developer tools (binutils, gcc, clang, cmake, meson, ninja, git, perl, Rust,
+Go, qemu, ...), the LXQt desktop that Melon's 32-bit edition used (LXQt, labwc, wlroots and their libraries, built
+here for x86_64), and what Melon's online repository offered beside the ISOs (nvidia-open, linux-firmware-nvidia,
+mesa-nvk, xfsprogs, cataclysm-dda, ...). Compare `ls recipes` with `scripts/valence-build --edition desktop --order`
+for the list. Phase 4 took the musl workarounds out of them and gave them their `makedepends`, and checked the
+result three ways: `scripts/compare-with-index.py` against Melon's packages (what differs is meant, and the recipe
+says why); `scripts/check-dev-deps.py`; and a root made of the packages with apk, in which gcc, g++, clang, rustc,
+cargo, Go (with and without cgo), perl, python3, cmake, meson, git, ripgrep, gh, bison, nasm, rsync and the others
+each did a small job, and none of the 1644 programs and libraries in it lacked a library (all three checks run
+again on the repository the from-empty run made).
+**That is all the testing they have had.** No QEMU test adds a compiler to an installed Valence and builds with it,
+LXQt has not been started, and the NVIDIA packages have never met a card.
+
+Not converted yet, or not checked:
+
 - **Self-hosting.** "Valence as the build machine" in BUILDING.md, rule 53 and `valence_deps` in `host-setup.sh` were
-  written for a musl system and are untested on glibc.
+  written for a musl system and are untested on glibc. The tools it needs build on glibc now (above); building
+  Valence on Valence has not been tried.
 - **The 32-bit edition** has not been built on glibc; whether it stays is undecided (ROADMAP.md).
 - **shadow has no PAM.** The base system has no linux-pam, so `recipes/shadow` is built without it and a console
   login does not go through PAM (BusyBox's login never did either). The desktop is converted now and linux-pam is in
@@ -78,14 +85,11 @@ Not converted yet:
 - **Extended attributes.** `valence-install` copies the system with `tar --xattrs --xattrs-include='*'` (valence-base
   44), so file capabilities would survive the copy. No package on either ISO has any (`getcap -r` on the desktop's
   system image finds none), so nothing tests that yet.
-- **What the recipes outside the editions need.** A build gets only what its recipe declares (clean builds). The
-  two editions' recipes declare it (rules 63, 67 and 68). Nobody has checked the other 106, and
-  `scripts/valence-build -n` names one of them that asks for a package nothing makes (libclc: `musl-dev`).
-- **Docs and translations outside the editions.** No recipe deletes them any more. The two editions' recipes make
-  107 `-doc` and 93 `-lang` packages, none near GitHub's 100 MB limit. The other recipes make theirs the first time
-  they are built on glibc. Watch then for two packages shipping the same page, for a program that reads its own
-  files from `usr/share/doc` at run time (it needs `options=(keepdocs)`), and for a `-doc` package over the limit
-  ("Package repository").
+- **Docs and translations.** No recipe deletes them any more: the 451 recipes make 158 `-doc` and 97 `-lang`
+  packages. The largest package of any kind is 88 MB (linux-firmware-intel-wifi), under GitHub's 100 MB limit
+  ("Package repository"). All 1102 packages go into one root together (apk, without their scripts, 20 November
+  2026): nothing is refused and no file belongs to two packages. Not looked for: a program that reads its own files
+  from `usr/share/doc` at run time (it needs `options=(keepdocs)`).
 - **Sources still from Ubuntu's archive.** "Sources" says a recipe that is touched moves to its upstream tarball.
   Phase 6 changed 153 recipes (their `makedepends`, mostly) and moved none: the KDE, Qt and X.Org recipes still build
   from Ubuntu 26.04's `orig` tarballs. That is its own piece of work (about 150 downloads to verify).
@@ -103,6 +107,8 @@ scripts/valence-build-recipe   the step it runs for each: ONE recipe -> signed .
                         sysroot that holds what the recipe declares and nothing else; reindex
 scripts/console-packages.txt   what the console system is made of (mkiso.sh and --edition console read it)
 scripts/valence-run     start a program built for Valence on the build machine, through the sysroot's loader (rule 18)
+scripts/elf-unbake.py   take the sysroot's loader and library path out of what an options=(runhere) recipe linked;
+                        with --check, refuse any package that still names them (rule 18)
 scripts/suggest-makedepends.py   what a recipe's source asks for, as -dev packages; writes scripts/kde-deps.json,
                         the generated KDE recipes' makedepends (rule 67)
 scripts/compare-with-index.py    what the built packages link, against another index: finds a feature that a missing
@@ -215,7 +221,9 @@ what failed and what waited for it). Each recipe's output is in `logs/pkg-<recip
 - **No list says in which order recipes are built.** A recipe is built after the recipes that make its
   `makedepends` and the build base, and after the recipes that make whatever those packages depend on (declared
   `depends`, and a `-dev` package's main package), since apk installs all of that into the build's sysroot. Recipes
-  that need each other are reported and nothing is built.
+  that need each other are reported and nothing is built. What apk goes by and no recipe declares (the libraries
+  a package links, the modules its `.pc` files require) is only known once the package is made; rule 70 is what
+  keeps that from mattering.
 - **Clean builds (the owner's decision, 19 November 2026).** `valence-build-recipe` sets the sysroot up for every
   build: the build base (`BUILD_BASE` there: `glibc-dev libgcc libstdc++`) and the recipe's `makedepends`, with the
   packages those depend on, and no other package. apk works out the difference from the last build's sysroot
@@ -457,7 +465,7 @@ Rebuilding the kernel takes about an hour on 2 cores.
     from the recipes (`grep -l 'options=(.*rust' recipes/*/VALENCEBUILD`).
     `recipes/rust` builds Valence's own Rust the same way with Rust's `x.py`: stage 0 is `hosttools/rust`, the
     compilers it is given come from `rust_cc` with runhere's link flags for Valence's side, and `options=(runhere)`
-    lets the build run the compiler it has made (rule 18). 19 minutes on 12 threads.
+    lets the build run the compiler it has made (rule 18). 17 to 19 minutes on 12 threads.
 
 47. **Flatpak must be built with X11 authorization (`-Dxauth=enabled`, libXau).** Without it, sandboxed X11 apps get
     the host's `DISPLAY` and a path to an Xauthority file that doesn't exist inside the sandbox. Xwayland refuses them
@@ -667,6 +675,19 @@ Rebuilding the kernel takes about an hour on 2 cores.
     declare libxcrypt-dev. And the patches written to make a source build on musl go, with the stand-in libraries
     they needed: elfutils lost its patches, and the recipes `argp-standalone`, `musl-fts` and `musl-obstack`, which
     only it used, are deleted; cairo lost one patch, elogind eight.
+70. **A package may only need what its own build saw.** `valence-build` orders builds by what recipes declare. apk
+    sets a sysroot up by what packages need, and part of that the builder only works out when it makes the package:
+    the libraries it links (`so:`) and the modules its `.pc` files require (`pc:`). A linked library was in the
+    build's sysroot, so its recipe had been built first. A `.pc` file can require a module the build never looked
+    for: gpgme installs `gpgme-glib.pc` (`Requires: glib-2.0`) without using glib, so gpgme-dev depends on glib-dev,
+    and nothing said that glib comes before whatever uses gpgme-dev. Every build before the first one from an empty
+    repository had glib in the repository already. That one reached gpgmepp four places before glib, could not set
+    its sysroot up ("pc:glib-2.0 (no such package)"), and would have left everything that needs gpgmepp untried.
+    So `make_apk` stops when a `.pc` file requires a module that neither the build's sysroot nor the recipe itself
+    has: add the `-dev` package that has it to `makedepends` (gpgme: glib-dev), or leave the `.pc` file out if it
+    is for something the recipe does not build. Checked for the whole tree at the time, against the complete
+    repository of before: with every recipe's sysroot as apk resolves it, the order `--order` prints had this one
+    gap among 451 recipes, and gpgme was the only recipe with such a `.pc` file among 497 modules.
 
 To resume a failed long build without unpacking again (for example the kernel):
 `VALENCE_KEEP_SRC=1 scripts/valence-build-recipe linux-valence`. `valence-build` does that by itself (`VALENCE_AUTO_RESUME=1`), but
@@ -1091,7 +1112,8 @@ that is the only place Ubuntu is still needed.
 ## Roadmap
 
 The stages and status notes in this section are Melon's, kept as its history: Valence's plan is `ROADMAP.md`. Of what
-is listed here, only the base system has been rebuilt on glibc ("State of the glibc switch" above).
+is listed here, everything builds on glibc for x86_64 ("State of the glibc switch" above); the 32-bit edition does
+not, and the tests these notes speak of were Melon's, on musl.
 
 - **Stage 1 (base): done.** Toolchain, base packages, the console ISO and the quick console installer, BIOS and
   UEFI, LUKS encryption, dual boot next to Windows, VM guest tools.

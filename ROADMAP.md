@@ -4,7 +4,7 @@ Valence is a from-scratch, rolling x86_64 Linux distribution. It is the serious 
 [Melon Linux](https://github.com/melon-77/melon-os): the same engineering, without the jokes, and with a handful
 of fixes where Melon chose small over sensible.
 
-Status, 20 November 2026: phases 1 to 3, 5 and 6 are done. The system is on glibc 2.44 and its commands are the
+Status, 20 November 2026: phases 1 to 6 are done. The system is on glibc 2.44 and its commands are the
 GNU tools. Both ISOs build: the console ISO (58 recipes on it) and the Plasma desktop ISO (345 recipes with the
 console's: LLVM, Mesa, Qt 6, KDE Frameworks and Plasma 6, SDDM, PipeWire, Flatpak, Calamares). The console ISO passes
 its eight tests in QEMU (install and boot on BIOS, boot on UEFI, an encrypted install and its boot, dual boot next
@@ -14,10 +14,11 @@ Wi-Fi), and an install on BIOS and one on UEFI that each log in to Plasma throug
 run by hand on BIOS, on UEFI and with an encrypted disk. BusyBox stays for `/bin/sh`, the initramfs and the small
 daemons. Documentation and translations are packages of their own: the builder makes `<pkg>-doc` and `<pkg>-lang`
 from what a recipe installs, no recipe deletes them any more, and a fresh install has no documentation files until
-`apk add docs` (or one `-doc` package) brings them, with `man`. Phase 4's builder builds both editions in an order
-worked out from the recipes, each package in a sysroot that holds only what its recipe declares, and a second run
-builds nothing; the 106 recipes outside the two ISOs (the developer tools, the NVIDIA packages, the 32-bit edition's
-desktop) are not rebuilt on glibc yet, which is what keeps phase 4 open. Both installers make a Btrfs root in
+`apk add docs` (or one `-doc` package) brings them, with `man`. Phase 4's builder builds everything, 451 recipes,
+from an empty repository with one command: in an order worked out from the recipes, each package in a sysroot that
+holds only what its recipe declares, and a second run builds nothing. The 106 recipes outside the two ISOs (the
+developer tools, the NVIDIA packages, an LXQt desktop) build on glibc with the rest; they were tried in a root made
+of the packages, not on an installed system. Both installers make a Btrfs root in
 subvolumes, and apk takes a snapshot before every change to the installed packages. Going back works the way
 NixOS's generations do: the boot menu lists every snapshot and starts the one chosen, and `valence-snapshot rollback`
 makes a snapshot the system that starts by default. The tests break an update on purpose both ways: one program,
@@ -121,16 +122,19 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   *Done when:* a base install has no docs and is no bigger for it, and installing a `-doc` package makes
   `man` work for that package.
 
-- [ ] **4. `valence-build`.**
+- [x] **4. `valence-build`.**
   The dependency-ordered builder replaces the queue, retry and resume scripts.
   *Done when:* one command rebuilds the whole repository from empty with no order written down anywhere, and a
   second run with nothing changed builds nothing.
-  *So far (20 November 2026):* true for the console system from an empty repository (65 recipes then), and for the
-  desktop edition in the sense that one run rebuilt the 153 recipes phase 6 changed, LLVM, Mesa, Qt and all of KDE
-  among them, without a failure, and the next run built nothing. The desktop's generated recipes now declare what
-  they need. The queue, retry, resume and build-all scripts and the ordered lists in `build-everything.sh` are
-  gone. Open: one run of everything from an empty repository, and the 106 recipes outside the two ISOs, which must
-  first build on glibc and declare their dependencies.
+  *Done (20 November 2026):* with the repository, the sysroot and the cross toolchain moved away,
+  `scripts/toolchain.sh` and then one `scripts/valence-build` built all 451 recipes, 1102 packages, in 5 hours 3
+  minutes without a failure; the same command again built nothing, in 2 seconds. Both ISOs made of those packages
+  pass their tests (eight and three). It was the second such run. The first stopped being one after 72 minutes:
+  gpgmepp was built before glib, which gpgme's `-dev` package turned out to need, something no build with a full
+  repository could show. The builder now refuses a package like that when it is made (AGENTS.md, rule 70).
+  Before those runs the 106 recipes outside the two ISOs were made to build on glibc and to declare what they need;
+  AGENTS.md, "State of the glibc switch", says how far they were tested. The queue, retry, resume and build-all
+  scripts and the ordered lists in `build-everything.sh` are gone.
 
 - [x] **5. Btrfs and snapshots.**
   The installer creates a Btrfs root with subvolumes. Updating takes a snapshot first. Rolling back is
