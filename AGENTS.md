@@ -759,6 +759,33 @@ the whole system. Everything is `valence-wish` in valence-base, with a few lines
   the second list back and keep the first. Calamares' part is the same command; it is not tested automatically.
   Flathub is not in the test (it needs the internet).
 
+## Valence's own package manager: vpm (phase 10, stage 1)
+
+ROADMAP.md, phase 10. The source is `vpm/` (Rust; `vpm/README.md` is its manual: commands, layout, transaction and
+recovery, trust), the package `recipes/vpm` (built from that folder; Valence's libzstd and OpenSSL, rule 46). The
+name is a working name. Stage 1, "the engine first ... next to apk and measured against apk", is done:
+
+- It reads apk-tools 3's formats itself, written against a specification taken from apk-tools 3.0.8's source
+  (compression wrapper, ADB value encoding, signatures and key ids, index and package schemas, versions and
+  dependencies) and checked against apk on the real repository: every entry of the index, the files and hashes of
+  real packages, the signatures (a byte flipped anywhere is refused, so is an untrusted key).
+- It manages roots it made (`vpm --root DIR --initdb add ...`): each package is unpacked into
+  `Programs/<name>/<version>`, the usual tree is hard links to those files (copies under `etc/`, kept on upgrade
+  when changed), downloads and unpacking run in parallel, and one short switch at the end writes a journal first,
+  so the next run finishes it after a kill. Scripts and triggers run as apk runs them.
+- Checked: the same files as apk for valence-base (799 entries) and after an add and a del; 310 upgrades killed at
+  random moments, every file the old or the new version and the next run completing; a security review with a
+  malicious mirror and crafted packages (its findings fixed: bounded memory before any trust check, no replay of an
+  older index once a newer was seen, bounded downloads, vpm's own directories out of reach); a review against the
+  specification (package choices match apk's on 23 real requests); 1.6 to 2.2 times faster than apk (valence-base
+  0.15 to 0.25 s against 0.28 to 0.40 s; 244 packages 5 to 6.5 s against 11 to 12.5 s).
+- Not yet: xbps measured; installed systems using it (the installers, snapshots before changes, a running system's
+  upgrades, apk leaving); a signed timestamp in the index, without which a root that never saw the repository
+  accepts a replayed old index.
+
+Its tests: `cargo test --release` in `vpm/` (the real-data tests read `repo/x86_64`), `vpm/tools/killtest/` and
+`vpm/tools/bench/` (`vpm/tools/README.md`).
+
 ## Testing (required before you commit a change that affects boot or install)
 
 ```sh

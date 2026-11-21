@@ -232,6 +232,11 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   on the same machine.
   Open: its name. Whether `-dev`, `-doc` and `-lang` parts get folders of their own or live inside the program's
   folder. And when: before the desktop, the desktop is fitted to the layout once.
+  *So far (21 November 2026):* stage 1, the engine, under the working name vpm (`vpm/`, AGENTS.md "Valence's own
+  package manager"): it reads the signed indexes and packages itself, installs into a folder per program with the
+  usual tree as hard links, survived 310 upgrades killed at random moments, and installs the base system 1.6 to 2.2
+  times faster than apk. Not yet measured against xbps, and no installed system uses it yet; the `-dev`, `-doc` and
+  `-lang` parts are folders of their own for now, since they are packages of their own.
 
 ## Not decided yet
 

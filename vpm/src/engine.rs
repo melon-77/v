@@ -1,0 +1,540 @@
+//! The commands `add`, `del`, `upgrade` and `list`: one transaction each.
+//!
+//! 1. open the root: take the lock, finish a leftover journal (roll
+//!    forward), delete leftover `.partial` and never-current version
+//!    directories;
+//! 2. resolve the new world against the indexes and what is installed;
+//! 3. fetch and unpack the new packages in parallel threads into
+//!    `Programs/<name>/<version>` (nothing live is touched), while a helper
+//!    thread keeps flushing the file system so that the sync before the
+//!    journal has little left to write;
+//! 4. check that no two packages claim the same file;
+//! 5. `syncfs`, write the journal, run the switch ([`crate::commit`]).
+
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
+
+use crate::adb::Dependency;
+use crate::commit::{self, PkgState, SwitchOptions};
+use crate::db::{self, Db, Journal, JournalFile, Op};
+use crate::error::{Error, Result};
+use crate::fetch::{self, Http};
+use crate::progress::{human, Phase, Progress};
+use crate::repo::{self, Repo};
+use crate::solver::{self, Mode, Universe};
+use crate::sys;
+use crate::unpack::{self, IdMap};
+use crate::verify::{TrustedKeys, VerifyOptions};
+
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    pub root: PathBuf,
+    pub repositories: Vec<String>,
+    pub keys_dir: Option<PathBuf>,
+    pub initdb: bool,
+    pub plain: bool,
+    pub allow_untrusted: bool,
+    pub no_scripts: bool,
+    /// Worker threads for fetch/unpack (0: one per CPU, at most 16).
+    pub jobs: usize,
+    /// Accept an index older than the one used before (see
+    /// [`repo::Freshness`]).
+    pub allow_rollback: bool,
+    /// Test hook (`VPM_CRASH_AT`): kill the process at a named point of the
+    /// switch.
+    pub crash_at: Option<String>,
+}
+
+impl Options {
+    fn switch_opts(&self) -> SwitchOptions {
+        SwitchOptions { no_scripts: self.no_scripts, crash_at: self.crash_at.clone(), verbose: false }
+    }
+    fn fancy(&self) -> bool {
+        !self.plain && sys::is_tty(1)
+    }
+}
+
+fn abs_root(o: &Options) -> Result<PathBuf> {
+    let r = if o.root.is_absolute() { o.root.clone() } else { std::env::current_dir()?.join(&o.root) };
+    if o.initdb {
+        fs::create_dir_all(&r)?;
+    }
+    Ok(r)
+}
+
+/// Opens a root: lock, recovery of an interrupted switch, cleanup.
+pub fn open(o: &Options) -> Result<Db> {
+    let root = abs_root(o)?;
+    let mut db = Db::open(&root, o.initdb)?;
+    if let Some(j) = JournalFile::open(&root)? {
+        println!("vpm: finishing an interrupted switch ({} package changes)", j.plan.ops.len());
+        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts())?;
+        println!(
+            "vpm: switch finished: {} files placed, {} already in place, {} removed",
+            rep.placed, rep.unchanged, rep.removed
+        );
+        db.reload()?;
+    }
+    gc(&root, &db)?;
+    Ok(db)
+}
+
+/// Deletes `.partial` directories and version directories that are not
+/// current (left by an interrupted run before its journal was written, or
+/// after it was deleted), and interrupted downloads in the cache. Entries
+/// of `Programs` that are not real directories, or whose `Current` is not
+/// valid, are left alone (and reported by [`Db::reload`]).
+fn gc(root: &Path, db: &Db) -> Result<()> {
+    let programs = Db::programs(root);
+    for e in fs::read_dir(&programs)? {
+        let e = e?;
+        if !e.file_type()?.is_dir() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        let current = match db.installed.get(&name) {
+            Some(i) => Some(i.meta.info.version.clone()),
+            // a Current link that is there but was not accepted: keep all
+            None if fs::symlink_metadata(e.path().join(db::CURRENT)).is_ok() => continue,
+            None => None,
+        };
+        for v in fs::read_dir(e.path())? {
+            let v = v?;
+            let vn = v.file_name().to_string_lossy().into_owned();
+            if vn == db::CURRENT || Some(&vn) == current.as_ref() {
+                continue;
+            }
+            let p = v.path();
+            if v.file_type()?.is_dir() {
+                fs::remove_dir_all(&p)?;
+            } else {
+                fs::remove_file(&p)?;
+            }
+        }
+        if current.is_none() {
+            let _ = fs::remove_dir(e.path());
+        }
+    }
+    if let Ok(rd) = fs::read_dir(root.join(db::CACHE_DIR)) {
+        for e in rd.flatten() {
+            let n = e.file_name();
+            let n = n.as_encoded_bytes();
+            if (n.ends_with(b".part") || n.ends_with(b".new")) && e.file_type().map_or(false, |t| t.is_file()) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_keys(o: &Options, root: &Path) -> Result<TrustedKeys> {
+    let keys = match &o.keys_dir {
+        Some(d) => TrustedKeys::from_dir(d)?,
+        None => TrustedKeys::from_root(root)?,
+    };
+    for (name, why) in &keys.skipped {
+        eprintln!("vpm: warning: key file {name} skipped: {why}");
+    }
+    if keys.is_empty() && !o.allow_untrusted {
+        eprintln!("vpm: warning: no trusted keys loaded");
+    }
+    Ok(keys)
+}
+
+fn load_repos(o: &Options, root: &Path, arch: &str, keys: &TrustedKeys) -> Result<(Vec<Repo>, Option<Http>)> {
+    let specs = if o.repositories.is_empty() { repo::read_repositories_file(root)? } else { o.repositories.clone() };
+    if specs.is_empty() {
+        return Err(Error::Msg(format!(
+            "no repositories (give --repository, or list them in {}/etc/apk/repositories)",
+            root.display()
+        )));
+    }
+    let remote = specs.iter().any(|s| repo::is_remote(&repo::locate(s, arch).0));
+    let http = if remote { Some(Http::new()?) } else { None };
+    let vo = VerifyOptions { allow_untrusted: o.allow_untrusted, ..Default::default() };
+    let cache = root.join(db::CACHE_DIR);
+    let mut fresh = repo::Freshness::load(root, o.allow_rollback);
+    let mut repos = Vec::new();
+    for s in &specs {
+        repos.push(repo::load(s, arch, keys, &vo, http.as_ref(), &cache, &fresh)?);
+    }
+    fresh.save(&repos)?;
+    Ok((repos, http))
+}
+
+struct JobSpec {
+    job: unpack::Job,
+    url: Option<String>,
+    work: u64,
+}
+
+/// Fetches and unpacks all jobs on worker threads.
+fn run_jobs(
+    o: &Options,
+    root: &Path,
+    jobs: &[JobSpec],
+    keys: &TrustedKeys,
+    http: Option<&Http>,
+    ids: &IdMap,
+) -> Result<Vec<String>> {
+    let n = jobs.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(jobs[i].work));
+    let workers = if o.jobs > 0 {
+        o.jobs
+    } else {
+        std::thread::available_parallelism().map(|p| p.get()).unwrap_or(4).min(16)
+    }
+    .min(n)
+    .max(1);
+    let items = jobs.iter().map(|j| (format!("{}-{}", j.job.name, j.job.version), j.work)).collect();
+    let progress = Progress::new(&format!("{n} packages to unpack, {workers} threads"), items, o.fancy());
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let errors: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let warnings: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let workers_done = AtomicUsize::new(0);
+    let worker = || loop {
+        if failed.load(Ordering::Relaxed) {
+            break;
+        }
+        let k = next.fetch_add(1, Ordering::Relaxed);
+        if k >= n {
+            break;
+        }
+        let i = order[k];
+        let js = &jobs[i];
+        let nv = format!("{}-{}", js.job.name, js.job.version);
+        let fail = |e: Error| {
+            errors.lock().unwrap().push(format!("{nv}: {e}"));
+            progress.finish_item(i, false, e.to_string());
+            failed.store(true, Ordering::Relaxed);
+        };
+        if let Some(url) = &js.url {
+            progress.set_phase(i, Phase::Fetching, None);
+            let Some(http) = http else {
+                fail(Error::Msg("no HTTP client".into()));
+                continue;
+            };
+            let r = fetch::fetch(
+                http,
+                url,
+                &js.job.src,
+                &js.job.index_info,
+                keys,
+                o.allow_untrusted,
+                &mut |b| progress.advance(i, b),
+            );
+            if let Err(e) = r {
+                fail(e);
+                continue;
+            }
+        }
+        progress.set_phase(i, Phase::Unpacking, None);
+        match unpack::unpack(root, &js.job, keys, ids, o.allow_untrusted, &mut |b| progress.advance(i, b)) {
+            Ok(st) => {
+                warnings.lock().unwrap().extend(st.warnings.iter().map(|w| format!("{nv}: {w}")));
+                progress.finish_item(i, true, format!("{} entries, {}", st.entries, human(st.bytes)));
+            }
+            Err(e) => fail(e),
+        }
+    };
+    std::thread::scope(|sc| {
+        // writeback overlapping the unpacking: a helper thread syncs the
+        // file system over and over while the workers write, so that the
+        // syncfs before the journal finds little left to do (the workers
+        // themselves never wait for it)
+        let wd = &workers_done;
+        sc.spawn(move || {
+            let Ok(f) = fs::File::open(root) else { return };
+            while wd.load(Ordering::Relaxed) < workers {
+                let _ = sys::sync_fs(&f);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        for _ in 0..workers {
+            sc.spawn(|| {
+                worker();
+                workers_done.fetch_add(1, Ordering::Relaxed);
+            });
+        }
+    });
+    progress.finish();
+    let errors = errors.into_inner().unwrap();
+    if !errors.is_empty() {
+        return Err(Error::Msg(errors.join("\n")));
+    }
+    Ok(warnings.into_inner().unwrap())
+}
+
+/// Removes the version directories a failed transaction unpacked.
+fn cleanup_new(root: &Path, db: &Db, ops: &[Op]) {
+    for op in ops {
+        if let Some(v) = op.new_version() {
+            if db.installed.get(op.name()).map(|i| i.meta.info.version.as_str()) == Some(v) {
+                continue;
+            }
+            // only through real directories
+            let Ok(pdir) = db::checked_pkg_parent(root, op.name()) else { continue };
+            let d = pdir.join(v);
+            if fs::symlink_metadata(&d).map_or(false, |m| m.is_dir()) {
+                let _ = fs::remove_dir_all(&d);
+            }
+            let _ = fs::remove_dir(&pdir);
+        }
+    }
+}
+
+/// Warns about installed packages that every repository offers only in
+/// older versions (a mirror serving an old index, or a downgrade).
+fn warn_newer_installed(db: &Db, u: &Universe) {
+    let mut best: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for c in u.cands.iter().filter(|c| c.repo.is_some()) {
+        let e = best.entry(c.info.name.as_str()).or_insert(c.info.version.as_str());
+        if crate::version::cmp(&c.info.version, e) == std::cmp::Ordering::Greater {
+            *e = c.info.version.as_str();
+        }
+    }
+    for (name, ip) in &db.installed {
+        if let Some(v) = best.get(name.as_str()) {
+            if crate::version::cmp(&ip.meta.info.version, v) == std::cmp::Ordering::Greater {
+                eprintln!(
+                    "vpm: warning: {name} {} is installed, but the repositories offer only up to {v}",
+                    ip.meta.info.version
+                );
+            }
+        }
+    }
+}
+
+fn world_strings(world: &[Dependency]) -> Vec<String> {
+    db::format_world(world).lines().filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+/// Resolves `world` and carries out the changes.
+fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh: HashSet<String>, use_repos: bool) -> Result<bool> {
+    let t0 = Instant::now();
+    let root = db.root.clone();
+    let arches = repo::root_arches(&root);
+    let keys = load_keys(o, &root)?;
+    let (repos, http) = if use_repos { load_repos(o, &root, &arches[0], &keys)? } else { (Vec::new(), None) };
+    let u = Universe::with_arches(&repos, &db.installed, &arches);
+    if use_repos {
+        warn_newer_installed(db, &u);
+    }
+    let sol = solver::solve(&u, &world, mode, &fresh)?;
+    let t_solve = t0.elapsed();
+
+    let mut ops: Vec<Op> = Vec::new();
+    let mut jobs: Vec<JobSpec> = Vec::new();
+    let mut chosen: HashSet<&str> = HashSet::new();
+    let cache = root.join(db::CACHE_DIR);
+    for &c in &sol.order {
+        let cand = &u.cands[c];
+        let name = cand.info.name.as_str();
+        chosen.insert(name);
+        let new = cand.info.version.clone();
+        let op = match db.installed.get(name) {
+            Some(ip) if ip.meta.info.version == new => continue,
+            Some(ip) => Op::Upgrade { name: name.into(), old: ip.meta.info.version.clone(), new: new.clone() },
+            None => Op::Install { name: name.into(), new: new.clone() },
+        };
+        if !db::safe_component(name) || !db::safe_version(&new) {
+            return Err(Error::Schema(format!("unsafe package name or version '{}'", cand.info.nv())));
+        }
+        let Some(ri) = cand.repo else {
+            return Err(Error::Msg(format!("{}: not in any repository", cand.info.nv())));
+        };
+        let r = &repos[ri];
+        let (src, url) = fetch::source_path(r, &cand.info, &cache)?;
+        let work = cand.info.installed_size + if url.is_some() { cand.info.file_size } else { 0 };
+        jobs.push(JobSpec {
+            job: unpack::Job {
+                name: name.into(),
+                version: new,
+                src,
+                index_info: cand.info.clone(),
+                source: r.package_url(&cand.info)?,
+            },
+            url,
+            work,
+        });
+        ops.push(op);
+    }
+    for (name, ip) in &db.installed {
+        if !chosen.contains(name.as_str()) {
+            ops.push(Op::Remove { name: name.clone(), old: ip.meta.info.version.clone() });
+        }
+    }
+    let new_world = world_strings(&world);
+    if ops.is_empty() {
+        if new_world != world_strings(&db.world) {
+            db::write_atomic(&Db::state(&root).join("world"), db::format_world(&world).as_bytes())?;
+        }
+        println!("OK: nothing to do; {} packages installed", db.installed.len());
+        return Ok(true);
+    }
+
+    let (mut ni, mut nu, mut nr) = (0, 0, 0);
+    for op in &ops {
+        match op {
+            Op::Install { name, new } => {
+                ni += 1;
+                println!("  install  {name} {new}");
+            }
+            Op::Upgrade { name, old, new } => {
+                nu += 1;
+                println!("  upgrade  {name} {old} -> {new}");
+            }
+            Op::Remove { name, old } => {
+                nr += 1;
+                println!("  remove   {name} {old}");
+            }
+        }
+    }
+    let unpack_bytes: u64 = jobs.iter().map(|j| j.job.index_info.installed_size).sum();
+    println!(
+        "{ni} to install, {nu} to upgrade, {nr} to remove ({} to unpack)",
+        human(unpack_bytes)
+    );
+
+    // fetch and unpack
+    let t1 = Instant::now();
+    let ids = IdMap::load(&root);
+    let warnings = match run_jobs(o, &root, &jobs, &keys, http.as_ref(), &ids) {
+        Ok(w) => w,
+        Err(e) => {
+            cleanup_new(&root, db, &ops);
+            return Err(e);
+        }
+    };
+    for w in &warnings {
+        eprintln!("vpm: warning: {w}");
+    }
+    let t_unpack = t1.elapsed();
+
+    // file ownership of the final set
+    let changed: HashSet<&str> = ops.iter().map(|o| o.name()).collect();
+    let mut finals: Vec<PkgState> = Vec::new();
+    let mut check = || -> Result<()> {
+        for (name, ip) in &db.installed {
+            if !changed.contains(name.as_str()) {
+                finals.push(PkgState::load(&ip.dir, false)?);
+            }
+        }
+        for op in &ops {
+            if let Some(v) = op.new_version() {
+                finals.push(PkgState::load(&Db::pkg_dir(&root, op.name(), v), true)?);
+            }
+        }
+        let (_, conflicts) = commit::ownership(&finals);
+        if !conflicts.is_empty() {
+            return Err(Error::Msg(format!("file conflicts:\n  {}", conflicts.join("\n  "))));
+        }
+        Ok(())
+    };
+    if let Err(e) = check() {
+        cleanup_new(&root, db, &ops);
+        return Err(e);
+    }
+    drop(finals);
+
+    // the switch
+    let t2 = Instant::now();
+    sys::sync_fs(&fs::File::open(&root)?)?;
+    let jf = JournalFile::create(&root, Journal { ops: ops.clone(), world: new_world, done: Default::default() })?;
+    if o.crash_at.as_deref() == Some("journal") {
+        eprintln!("vpm: VPM_CRASH_AT=journal: killed (test hook)");
+        sys::kill_self();
+    }
+    let rep = commit::switch(&root, &db.installed, jf, &o.switch_opts())?;
+    db.reload()?;
+    let t_switch = t2.elapsed();
+    println!(
+        "{}: {} packages installed ({ni} new, {nu} upgraded, {nr} removed); {} files placed, {} removed; \
+         resolve {:.2}s, fetch+unpack {:.2}s, switch {:.2}s, total {:.2}s",
+        if rep.errors.is_empty() { "OK" } else { "ERRORS" },
+        db.installed.len(),
+        rep.placed,
+        rep.removed,
+        t_solve.as_secs_f64(),
+        t_unpack.as_secs_f64(),
+        t_switch.as_secs_f64(),
+        t0.elapsed().as_secs_f64()
+    );
+    if !rep.errors.is_empty() {
+        eprintln!("vpm: {} errors during the switch:", rep.errors.len());
+        for e in &rep.errors {
+            eprintln!("  {e}");
+        }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn parse_names(names: &[String]) -> Result<Vec<Dependency>> {
+    if names.is_empty() {
+        return Err(Error::Msg("no package names given".into()));
+    }
+    names.iter().map(|n| Dependency::parse_world(n)).collect()
+}
+
+/// `add`: the names go into the world. A name that is already installed
+/// keeps its installed version when that satisfies the request (as apk
+/// without `-u`); a new name gets the newest version.
+pub fn add(o: &Options, names: &[String]) -> Result<bool> {
+    let deps = parse_names(names)?;
+    let mut db = open(o)?;
+    let added: HashSet<String> = deps.iter().map(|d| d.name.clone()).collect();
+    let fresh: HashSet<String> = added.iter().filter(|n| !db.installed.contains_key(*n)).cloned().collect();
+    let mut world: Vec<Dependency> = db.world.iter().filter(|d| !added.contains(&d.name)).cloned().collect();
+    world.extend(deps);
+    transact(o, &mut db, world, Mode::Keep, fresh, true)
+}
+
+pub fn del(o: &Options, names: &[String]) -> Result<bool> {
+    let deps = parse_names(names)?;
+    let mut db = open(o)?;
+    let gone: HashSet<String> = deps.iter().map(|d| d.name.clone()).collect();
+    for n in &gone {
+        if !db.world.iter().any(|d| &d.name == n) {
+            eprintln!("vpm: warning: {n} is not in the world");
+        }
+    }
+    let world: Vec<Dependency> = db.world.iter().filter(|d| !gone.contains(&d.name)).cloned().collect();
+    let ok = transact(o, &mut db, world, Mode::Keep, HashSet::new(), false)?;
+    for n in &gone {
+        if db.installed.contains_key(n) {
+            println!("vpm: {n} stays installed: other packages need it");
+        }
+    }
+    Ok(ok)
+}
+
+pub fn upgrade(o: &Options) -> Result<bool> {
+    let mut db = open(o)?;
+    let world = db.world.clone();
+    transact(o, &mut db, world, Mode::Upgrade, HashSet::new(), true)
+}
+
+pub fn list(o: &Options) -> Result<bool> {
+    let db = open(o)?;
+    let world: HashSet<&str> = db.world.iter().map(|d| d.name.as_str()).collect();
+    for (name, ip) in &db.installed {
+        let i = &ip.meta.info;
+        println!(
+            "{}-{} {} {{{}}} ({}){}",
+            name,
+            i.version,
+            i.arch,
+            i.origin,
+            i.license,
+            if world.contains(name.as_str()) { " [world]" } else { "" }
+        );
+    }
+    Ok(true)
+}
