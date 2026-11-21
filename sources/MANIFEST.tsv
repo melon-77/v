@@ -811,3 +811,7 @@ seatd-0.9.3.tar.gz	-	git	https://github.com/kennylevinsen/seatd 0.9.3
 labwc-0.20.2.tar.gz	-	git	https://github.com/labwc/labwc 0.20.2
 libXScrnSaver-1.2.3.tar.gz	4f74e7e412144591d8e0616db27f433cfc9f45aae6669c6c4bb03e6bf9be809a	url	https://www.x.org/releases/individual/lib/libXScrnSaver-1.2.3.tar.gz
 procps-ng-4.0.7.tar.xz	9d2021f47a4501c667862c9942a92d1953694b21d11bcd1702e83eb594e3d67d	url	https://downloads.sourceforge.net/project/procps-ng/Production/procps-ng-4.0.7.tar.xz
+sdl2-compat-2.32.74.tar.gz	ec68abde77e2e459c8abc4f9587b8976b5d2a657b2bfda2fb3a079b0f8924588	url	https://github.com/libsdl-org/sdl2-compat/releases/download/release-2.32.74/sdl2-compat-2.32.74.tar.gz
+SDL2_image-2.8.12.tar.gz	393f5efb50536ec13ca4f4affb69cc9966d3c3f969e6c5e701faddf9f9785381	url	https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.12/SDL2_image-2.8.12.tar.gz
+SDL2_ttf-2.24.0.tar.gz	0b2bf1e7b6568adbdbc9bb924643f79d9dedafe061fa1ed687d1d9ac4e453bfd	url	https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.24.0/SDL2_ttf-2.24.0.tar.gz
+SDL2_mixer-2.8.2.tar.gz	938dff531d00ace2296557a6599abe6f34599e2f34f0a4a08a397e2ccac8b8f7	url	https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.2/SDL2_mixer-2.8.2.tar.gz

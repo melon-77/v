@@ -50,6 +50,10 @@ GIT = {  # tarball name prefix -> repo, tag pattern
     'labwc': ('https://github.com/labwc/labwc', '{v}')}
 URL = {  # upstream downloads (Ubuntu 26.04 has Cataclysm: DDA 0.H, Rust 1.93 and its make-dfsg drops make's doc/; host-rust.sh wants 1.98.1)
     'cataclysm-dda-0.9.1.tar.gz': 'https://github.com/CleverRaven/Cataclysm-DDA/archive/refs/tags/0.I-1.tar.gz',
+    'sdl2-compat-2.32.74.tar.gz': 'https://github.com/libsdl-org/sdl2-compat/releases/download/release-2.32.74/sdl2-compat-2.32.74.tar.gz',
+    'SDL2_image-2.8.12.tar.gz': 'https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.12/SDL2_image-2.8.12.tar.gz',
+    'SDL2_ttf-2.24.0.tar.gz': 'https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.24.0/SDL2_ttf-2.24.0.tar.gz',
+    'SDL2_mixer-2.8.2.tar.gz': 'https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.2/SDL2_mixer-2.8.2.tar.gz',
     'cargo-1.98.1-x86_64-unknown-linux-gnu.tar.xz': 'https://static.rust-lang.org/dist/cargo-1.98.1-x86_64-unknown-linux-gnu.tar.xz',
     'rust-std-1.98.1-x86_64-unknown-linux-gnu.tar.xz': 'https://static.rust-lang.org/dist/rust-std-1.98.1-x86_64-unknown-linux-gnu.tar.xz',
     'rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz': 'https://static.rust-lang.org/dist/rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz',
