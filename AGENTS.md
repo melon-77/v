@@ -105,6 +105,8 @@ scripts/valence-build   build packages in the order the recipes' own dependencie
                         recipe, the ones named (with what they need), or an edition (--edition console|desktop)
 scripts/valence-build-recipe   the step it runs for each: ONE recipe -> signed .apk(s) in repo/x86_64, built in a
                         sysroot that holds what the recipe declares and nothing else; reindex
+recipes/                the package recipes: a git submodule, github.com/melon-77/vpkg (branch main), since
+                        21 November 2026; a recipe change is a commit there, and the pointer is bumped here
 scripts/console-packages.txt   what the console system is made of (mkiso.sh and --edition console read it)
 scripts/valence-run     start a program built for Valence on the build machine, through the sysroot's loader (rule 18)
 scripts/elf-unbake.py   take the sysroot's loader and library path out of what an options=(runhere) recipe linked;
@@ -758,6 +760,52 @@ the whole system. Everything is `valence-wish` in valence-base, with a few lines
   changes nothing; a list naming a package that does not exist changes nothing; one rollback and a restart take
   the second list back and keep the first. Calamares' part is the same command; it is not tested automatically.
   Flathub is not in the test (it needs the internet).
+
+## The Raspberry Pi edition (phase 9)
+
+ROADMAP.md, phase 9. 64-bit ARM, `VALENCE_ARCH=aarch64` (`aarch64-valence-linux-gnu`, armv8-a; its own `tools-aarch64`,
+`sysroot-aarch64`, `work-aarch64` and `repo/aarch64`). The console system only, as an SD card image; `docs/raspberry-pi.md`
+is for the person writing the card.
+
+- **Building:** `VALENCE_ARCH=aarch64 scripts/toolchain.sh` (13 minutes), then `VALENCE_ARCH=aarch64 scripts/valence-build
+  valence-base rpi-firmware linux-rpi kmod zstd openssl ca-certificates ncurses-terminfo wpa_supplicant nano` (41
+  recipes; the kernel is about 20 minutes), then `scripts/mkimage-rpi.sh`. The build machine needs QEMU's user-mode
+  emulator twice: `valence-run` starts built programs in it (`VALENCE_EMU`), and package scripts run in the aarch64
+  root through binfmt (qemu-user-static); `host-setup.sh` installs both, with qemu-system-arm and btrfs-progs. What
+  else builds for aarch64 has not been tried; openssl (its configure target) and gzip (a macro clash with the
+  kernel's sigcontext headers) needed changes for it.
+- **The kernel, `recipes/linux-rpi`** (`arch=(aarch64)`): the Raspberry Pi Foundation's tree at a stable tag, their
+  `bcm2711_defconfig` (its `kernel8.img` starts the Pi 3, 4, 400, Zero 2 W and 5) plus `config-rpi`: Btrfs and the
+  SD controllers built in (no initramfs, rule 28), the serial consoles, and **modules uncompressed**: the
+  Foundation's configuration compresses them with xz, which Valence's kmod does not read, so depmod listed none and
+  no driver could load. Like `linux-valence` it runs depmod in its post-install and post-upgrade scripts (without
+  them there is no `modules.dep`). The package carries the device trees of the Pi 3, 4 and 5 boards and the overlays
+  into `/boot`.
+- **The firmware, `recipes/rpi-firmware`** (`arch=(aarch64)`): `start*.elf`, `fixup*.dat` and the Pi 3's `bootcode.bin`
+  from the Foundation's firmware repository at a tag, one file at a time (the repository's archive is gigabytes).
+- **The card, `scripts/mkimage-rpi.sh`:** MBR; a 256 MiB FAT32 partition mounted at `/boot` (the firmware, the kernel,
+  the device trees, `config.txt` with `arm_64bit=1`, `kernel=kernel8.img` and `enable_uart=1`, `cmdline.txt` with
+  `root=PARTUUID=... rootflags=subvol=@`); a Btrfs partition with `@`, `@home`, `@log` and `@snapshots`, so apk's
+  snapshots work (no boot menu, so no starting a snapshot; a rollback keeps the newest kernel, since the snapshot hook
+  copies only the PC's kernel file names). The first start grows partition 2 and the filesystem to the card
+  (`rpi-grow-root`, which removes itself). root's first password is `valence`, expired: shadow's login refuses an
+  empty root password (`PREVENT_NO_AUTH`), and root may only log in on terminals in `/etc/securetty`, to which the
+  card adds the PL011 ports (`ttyAMA0` is the Pi 5's GPIO UART, `ttyAMA10` its debug connector). A login is offered on
+  ttyS0 when the kernel's console is there (the Pi 3 and 4: the firmware turns `console=serial0` into it) and on the
+  `ttyAMA` port the console names (`getty-ttyAMA`). The card carries a small signed repository (`EXTRAS`, nano) in
+  `/var/lib/valence/repo` after the online one in `/etc/apk/repositories`.
+- **Test: `scripts/qemu-test-rpi.py IMAGE`** (QEMU 8.2 has a Raspberry Pi 3B, not a 4 or 5). QEMU starts the kernel
+  itself, without the Pi's GPU firmware, so the test takes the card's own `kernel8.img`, `cmdline.txt` and Pi 3B
+  device tree, with two changes the firmware would have made or QEMU needs: the console named directly
+  (`console=ttyAMA1`, the PL011 under its alias `serial1`, plus `earlycon`), and the device tree's Bluetooth node
+  removed, since on a Pi 3 the PL011 belongs to Bluetooth and the kernel would make no tty of it (`fdtput -r`). The
+  mainline device tree (`bcm2837-rpi-3-b.dtb`) has a console in QEMU but its SD driver does not read the card there.
+  The test checks: login with the expired password, the 64-bit system on Btrfs, the boot files, the grown root, an
+  address on a USB network card, `apk add` from the card and over the network, the snapshot. A busy emulated board
+  loses characters typed at its serial port: the test types slowly. It passes in about 85 seconds.
+- **Not done:** the real board (the roadmap's "done when": a Pi 4 to a login prompt, an address, `apk add`); Wi-Fi
+  (the Foundation's NVRAM files for the brcmfmac chips are not packaged); a desktop; mandoc and the other recipes for
+  aarch64.
 
 ## Valence's own package manager: vpm (phase 10, stage 1)
 

@@ -150,6 +150,11 @@ the three desktop tests 21. A loop kept Linux's file cache small throughout (ite
 nothing, earlier that day, had built 231 recipes in 72 minutes when it was stopped: one recipe had failed for its
 place in the order (AGENTS.md, rule 70), and a run that needs a second start proves nothing.
 
+The Raspberry Pi edition (64-bit ARM, 21 November 2026, AGENTS.md "The Raspberry Pi edition"):
+`VALENCE_ARCH=aarch64 scripts/toolchain.sh` took 13 minutes, the 41 recipes of the card about an hour with the kernel's
+20 minutes, `scripts/mkimage-rpi.sh` a minute, and `scripts/qemu-test-rpi.py` 85 seconds. It needs qemu-user,
+qemu-user-static (binfmt), qemu-system-arm and btrfs-progs on the build machine (`host-setup.sh`).
+
 Every time in the paragraphs before "On glibc" is from a musl build.
 
 Sources that fail, and what `fetch-sources.sh` does about it: `ftp.gnu.org` often does not answer (on one run it served nine

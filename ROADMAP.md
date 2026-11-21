@@ -209,6 +209,11 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   phase 6. Assumed: the 64-bit boards (Pi 3, 4, 5, Zero 2 W), not the 32-bit ones.
   *Done when:* the image boots on a Raspberry Pi 4 to a login prompt, gets a network address, and can `apk add` a
   package; and the same image boots in QEMU as an automatic test.
+  *So far (21 November 2026):* the QEMU half is done. The aarch64 cross toolchain and the console system build, with
+  the Raspberry Pi Foundation's kernel and firmware, into an SD card image for the Pi 3, 4, 400, 5 and Zero 2 W
+  (`scripts/mkimage-rpi.sh`); `scripts/qemu-test-rpi.py` boots it in QEMU's Raspberry Pi 3B (QEMU has no Pi 4 or 5)
+  to a login prompt and checks the system, an address over DHCP and `apk add`. Left: the real board. A friend's Pi 5
+  is the first one available; the "done when" names a Pi 4. AGENTS.md, "The Raspberry Pi edition".
 
 - [ ] **10. Valence's own package manager, with a folder for every program.**
   A new package manager for the installed system, in Rust, reading the same signed `.apk` packages and

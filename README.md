@@ -120,6 +120,12 @@ as they are there and lets the graphics, Wi-Fi and sound drivers finish while th
 (`valence.udev=sync` on the kernel command line brings back the slower, stricter order if a machine misbehaves).
 `valence-boottime` shows where a start's time went.
 
+## Raspberry Pi
+
+A 64-bit test image for the Raspberry Pi 3, 4, 400, 5 and Zero 2 W: the console system on an SD card
+([docs/raspberry-pi.md](docs/raspberry-pi.md)). It passes its test in QEMU's emulated Pi 3B and has not been tried on a
+real board yet (ROADMAP.md, phase 9).
+
 ## 32-bit edition
 
 Melon had a 32-bit edition with LXQt for old netbooks. It has not been built on Valence's glibc, and whether Valence
