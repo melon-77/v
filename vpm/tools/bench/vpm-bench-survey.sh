@@ -8,7 +8,7 @@ cat /proc/sys/kernel/perf_event_paranoid
 ls -la /root/vpm-target/release/vpm /root/valence/hosttools/bin/apk
 ls /root/vpm-test
 grep vpm-test /proc/mounts
-cd /mnt/c/Users/a/AppData/Local/Temp/claude/39afd7d0aa98685a/9f48dd28-e365-4eae-aba4-ec797468f31d/scratchpad/vpm && git -c safe.directory='*' log --oneline | head -5 && git -c safe.directory='*' status --short | head
+cd "$(dirname "$(readlink -f "$0")")/../.." && git -c safe.directory='*' log --oneline | head -5 && git -c safe.directory='*' status --short | head
 ls /root/valence/repo/x86_64 | wc -l
 du -sh /root/valence/repo/x86_64
 ls -lS /root/valence/repo/x86_64/*.apk | head -50 | awk '{print $5, $9}'

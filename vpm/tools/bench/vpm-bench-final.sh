@@ -2,7 +2,7 @@ B=/root/vpm-test/bench
 du -sh $B/* 2>/dev/null | sort -h | tail -12
 ls $B
 echo "mounts: $(grep -c vpm-test /proc/mounts)"
-cd /mnt/c/Users/a/AppData/Local/Temp/claude/39afd7d0aa98685a/9f48dd28-e365-4eae-aba4-ec797468f31d/scratchpad/vpm && git -c safe.directory='*' status --short && git -c safe.directory='*' log --oneline | head -3
+cd "$(dirname "$(readlink -f "$0")")/../.." && git -c safe.directory='*' status --short && git -c safe.directory='*' log --oneline | head -3
 grep -c . $B/results.tsv
 python3 -I - $B/exp.tsv <<'EOF'
 import csv, statistics, sys
