@@ -73,7 +73,8 @@ Not converted yet, or not checked:
 - **Self-hosting.** "Valence as the build machine" in BUILDING.md, rule 53 and `valence_deps` in `host-setup.sh` were
   written for a musl system and are untested on glibc. The tools it needs build on glibc now (above); building
   Valence on Valence has not been tried.
-- **The 32-bit edition** has not been built on glibc; whether it stays is undecided (ROADMAP.md).
+- **The 32-bit edition is dropped for now** (the owner, 21 November 2026; ROADMAP.md "Decided"): not built on glibc,
+  not tested; `VALENCE_ARCH=x86` and its lists stay in the tree, unmaintained.
 - **shadow has no PAM.** The base system has no linux-pam, so `recipes/shadow` is built without it and a console
   login does not go through PAM (BusyBox's login never did either). The desktop is converted now and linux-pam is in
   every desktop install; whether it moves into the base, with shadow rebuilt on it, is the owner's to decide
@@ -1180,8 +1181,10 @@ users how to check them and gives the key's fingerprint),
 has notes written for users (what's new, which file to download, `doas apk upgrade` for installed systems), and the
 release it replaces is retitled "(superseded)" with a link to the new one.
 
-The 32-bit edition has its own **pre-release**, not marked Latest, so the 64-bit release stays the Latest one: tag
-`i686-<date>` (`i686-20261007`), title "Valence 32-bit (i686) test build, <date>", both i686 ISOs and `SHA256SUMS`.
+The Raspberry Pi edition has its own **pre-releases**, never marked Latest, so the PC release stays the Latest one:
+tag `rpi-<date>` (`rpi-20261121`), title "Valence for Raspberry Pi (64-bit ARM) test build, <date>", the compressed
+card image (`valence-rpi-<date>-aarch64.img.xz`), `SHA256SUMS`, its signature and the key. (Melon's 32-bit edition had
+pre-releases the same way, `i686-<date>`; it is dropped for now.)
 
 **New ISOs for meaningful changes (the owner's rule, 7 October 2026).** When a change lands that alters what is on an ISO or how it
 installs or boots (kernel, drivers and firmware, installers, the desktop, base packages, boot, hardware support), new ISOs are built,

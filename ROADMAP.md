@@ -249,10 +249,8 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
 
 These are open on purpose. Each gets settled before the phase that needs it.
 
-- **The 32-bit edition.** Melon has an i686 build with LXQt for old netbooks. Carry it over, or leave it with
-  Melon? (After phase 6.)
 - **Steam.** Native Steam needs 32-bit libraries next to the 64-bit ones, which is a lot of extra packages.
-  Until that is worth doing, Steam stays on Flatpak. (After phase 6.)
+  Until that is worth doing, Steam stays on Flatpak. The owner: "native steam later" (21 November 2026).
 - **Snapshot details.** apk keeps its ten newest snapshots (NixOS keeps every generation until told to collect
   garbage); `/home` and `/var/log` are outside them, so going back leaves both alone; the filesystem is compressed
   with zstd at level 1; the command is called `valence-snapshot`. All were chosen while building phase 5 and are
@@ -272,9 +270,13 @@ These are open on purpose. Each gets settled before the phase that needs it.
   ID, a table of common names, or Flathub's search when exactly one app has that name. Not covered yet: what
   people set by hand after every install beyond those (time zone, keyboard layout, language, Wi-Fi networks, more
   users).
-- **Website**, and the font for the wordmark (the current one is a stand-in).
+- **Website**, and the font for the wordmark (the current one is a stand-in). The owner: "site later" (21 November
+  2026).
 
 ## Decided
+- **The 32-bit edition is dropped for now** (21 November 2026): "drop 32 bit for now". Melon's i686 edition (LXQt for
+  old netbooks) is not built or tested for Valence; what the tree has of it (`VALENCE_ARCH=x86`, the i686 lists and
+  kernel fragment) stays as it is, unmaintained, so it can come back.
 - **The first release is 0.1.0, signed with the everyday key only** (20 November 2026). Tags are `v<version>`; the
   owner chose 0.1.0 over a date (`v2026.11.21`) and 1.0.0. AGENTS.md wanted a backup signing key before the first
   release; the owner chose to release without one, so until one exists a lost everyday key cannot be rotated the

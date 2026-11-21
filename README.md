@@ -128,8 +128,9 @@ real board yet (ROADMAP.md, phase 9).
 
 ## 32-bit edition
 
-Melon had a 32-bit edition with LXQt for old netbooks. It has not been built on Valence's glibc, and whether Valence
-keeps it is undecided (ROADMAP.md). Its desktop's recipes (LXQt, labwc) build for x86_64.
+Melon had a 32-bit edition with LXQt for old netbooks. Valence has dropped it for now (ROADMAP.md, "Decided"): it is
+not built or tested, and what the tree has of it stays, unmaintained. Its desktop's recipes (LXQt, labwc) build for
+x86_64.
 
 ## History
 
