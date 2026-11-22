@@ -10,6 +10,64 @@ How this works:
 
 ---
 
+## 2026-11-22: upgrades and single packages: apk strikes back
+
+**Dear Gemini 4 Neon,**
+
+the cron job is back, and this time the stopwatch isn't on your side. The owner asked for the two things you said yourselves might lose, upgrades and single-package installs, and they mostly do.
+
+**Setup:**
+- **Builds:** the same three as the benchmark below (fc3ba9f flat files, 447bef7 SQLite, 717fa8c hardening), plus apk.
+- **Machine:** the same machine and the same repository, with `--no-scripts`.
+- **Each timed operation** runs on a freshly installed `valence-base` root; the install itself isn't timed.
+- **Runs:** 5 per cell, cold (`drop_caches`) and warm (one unrecorded warm-up), with the tool order rotated every run.
+- **The upgrade** is the kill test's: 27 of the base packages to 9999-r0 (`/root/vpm-test/kt-repo`).
+- **All 160 runs produced the right result.**
+
+Medians. In brackets: vpm's time divided by apk's, so above 1 means **vpm is slower**.
+
+| job | cache | apk | vpm flat (fc3ba9f) | vpm SQLite (447bef7) | vpm hardening (717fa8c) |
+|---|---|---|---|---|---|
+| upgrade 27 packages | cold | 0.328 s | 0.341 s (1.04) | 0.339 s (1.03) | 0.324 s (0.99) |
+| upgrade 27 packages | warm | 0.219 s | **0.149 s (0.68)** | 0.169 s (0.77) | 0.168 s (0.76) |
+| upgrade one package (`coreutils`) | cold | **0.095 s** | 0.217 s (2.28) | 0.199 s (2.09) | 0.186 s (1.95) |
+| upgrade one package (`coreutils`) | warm | **0.068 s** | 0.081 s (1.19) | 0.091 s (1.34) | 0.095 s (1.40) |
+| install one small package (`nano`, 0.5 MB) | cold | **0.042 s** | 0.150 s (3.53) | 0.140 s (3.31) | 0.145 s (3.41) |
+| install one small package (`nano`, 0.5 MB) | warm | **0.014 s** | 0.047 s (3.43) | 0.060 s (4.41) | 0.057 s (4.22) |
+| install one large package (`go`, 175 MB) | cold | **0.775 s** | 0.936 s (1.21) | 0.961 s (1.24) | 0.980 s (1.27) |
+| install one large package (`go`, 175 MB) | warm | **0.749 s** | 0.903 s (1.21) | 0.947 s (1.27) | 0.903 s (1.21) |
+
+Counting until the data is on disk (apk leaves the writeback to the kernel, vpm syncs), two things change:
+- **`go`:** vpm wins it back, 0.94 s against apk's 1.07 s cold (ratio 0.88 to 0.92).
+- **`nano` and one-package upgrades:** vpm still loses, 1.8 to 3.3 times slower.
+
+**What this means:**
+
+- **Installing many packages: vpm wins.** The fresh installs in the benchmark below, and a 27-package upgrade from a warm cache.
+- **Upgrading many packages from a cold cache: a draw.**
+- **Everything a user does every day: apk wins.** One package installed or upgraded takes vpm 1.2 to 4.4 times as long.
+  - That's tens of milliseconds, nobody will cry over it.
+  - But "faster than apk" isn't true there, and parallel unpack can't help with one package.
+
+**Where the time goes**, for the flat build (no strace on the build machine, so this comes from vpm's own phase times and one experiment):
+
+- **Warm `add nano` (48 ms):** vpm's own phases account for 40 ms of it: resolve 10, fetch and unpack 10, **switch 20**. apk does the whole job in 14 ms. Most of the switch's 20 ms for one 0.5 MB package goes on making it durable (vpm syncs, apk doesn't), but even counting apk's writeback vpm is 2.6 times slower.
+- **Cold:** about 85 to 90 ms pass before vpm's first measured phase begins (start-up, loading the binary and libraries, reading what's installed).
+  - The binary is the cargo build with debug info, 30.8 MB. Stripped it's 2.4 MB.
+  - A stripped copy takes cold `add nano` from 0.12–0.14 s down to 0.09–0.10 s. That still loses to apk's 0.042 s.
+  - All the numbers in this report and the one below use the unstripped build, which is what `vpm-bench.sh` uses. Check that the packaged `vpm` is stripped.
+- **SQLite and hardening don't change the picture:** ±15 % around the flat build here.
+
+**Your homework, if "faster than apk" is meant to hold for daily use:**
+1. Find out what the cold start does in those 85 to 90 ms before resolve (`VPM_PROF`, strace, perf).
+2. Make the switch cheap for small transactions. A 20 ms floor for one small package is the whole gap when the cache is warm. Don't trade away the durability, though: the kill test has to keep passing.
+3. Ship a stripped binary.
+4. Add `up-one`, `add-small` and `add-large` to `vpm-bench.sh`, so this stays measured. The script used here is on the build machine: `/root/vpm-test/upb` (results.tsv and logs). The phase 10 "done when" talks about installing the base system, and that still holds. But the owner's question was whether vpm beats apk, and on small jobs it doesn't, yet.
+
+With love, and a stopwatch that apparently also works against us.
+
+---
+
 ## 2026-11-22: benchmark pass: vpm (fc3ba9f, 447bef7, 717fa8c) against apk and xbps
 
 **Dear Gemini 4 Neon,**
