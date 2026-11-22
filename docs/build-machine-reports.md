@@ -10,6 +10,176 @@ How this works:
 
 ---
 
+## 2026-11-21, later: handoff passes C and D (GTK 3, Firefox, command-line tools)
+
+Tree: `testing` 318a15b, `recipes` 1f2af04. Line numbers below refer to these commits.
+
+On pass B, the owner said: "we dont need cataclysm at all". So pass B was not run. The full build also left out `cataclysm-dda` and the four SDL2 libraries that only it uses (`sdl2-compat`, `sdl2-image`, `sdl2-ttf`, `sdl2-mixer`). The owner hasn't decided yet whether to remove those recipes.
+
+### Summary
+
+- **Sources:**
+  - All 14 new source files downloaded, and their sha256 values match `MANIFEST.tsv`.
+  - The review checked their signatures independently, and all 14 are genuine. Only the commit messages are missing how they were checked (S3, which also has the fingerprints to cite).
+- **Pass D:** 8 of the 10 recipes build: openssh, libevent, tmux, htop, jq, tree, strace and fd. vim and wireguard-tools fail, each on one line of its recipe (C1, C2).
+- **Pass C:**
+  - at-spi2-core and libxt build.
+  - gtk3 fails at configure (G1).
+  - Firefox was not tried, because it needs gtk3. The review expects four more problems to stop it (F1 to F4).
+- **Smoke test:** the 8 packages that built were installed with apk into a fresh root, made the way the ISO makes its own, with install scripts on.
+  - Every program runs, and all its libraries are found.
+  - The sshd user is created, and sshd's configuration check passes.
+  - tmux doesn't start, because of a bug in Valence's base, not in tmux (see below).
+- **`check-dev-deps.py`:** 316 packages, 0 problems.
+- **Full build without Cataclysm:** built 0, up to date 461, failed 3 (vim, wireguard-tools, gtk3), not tried 1 (firefox).
+
+### What ran
+
+| Step | Result |
+|---|---|
+| `host-setup.sh` (adds clang-19, lld-19, nodejs, cbindgen, zip) | OK: clang/lld 19.1.1, nodejs 18.19.1, cbindgen 0.26.0 (too old, see F8), zip 3.0 |
+| `fetch-sources.sh` | OK: all 14 new files present, sha256 matches |
+| `valence-build openssh libevent tmux htop jq vim tree strace wireguard-tools fd` | built 8, failed 2: vim, wireguard-tools |
+| `valence-build at-spi2-core libxt gtk3` | built 2, failed 1: gtk3 |
+| `valence-build` with every recipe except Cataclysm and SDL2 | failed 3; firefox "waits for gtk3" |
+| `check-dev-deps.py` | 0 things named that the package does not bring |
+| apk smoke test of the 8 built packages | all run; tmux blocked by the base locale bug |
+
+Package sizes: openssh 3.4 MB, fd 1.7 MB, tmux 613 kB, strace 618 kB, jq 392 kB, libevent 330 kB, at-spi2-core 265 kB, libxt 188 kB, htop 168 kB, tree 41 kB, plus their -dev, -doc and -lang packages.
+
+The smoke test: busybox, then valence-base, then `apk add openssh tmux htop jq strace tree fd libevent-dev jq-dev`, then each program run in a chroot.
+
+```
+htop 3.5.3 / jq-1.8.2 / strace -- version 7.3 / tree v2.3.2 / fd 10.5.2 / OpenSSH_10.6p2
+echo '{"a":[1,2,{"b":"ok"}]}' | jq -r '.a[2].b'   ->  ok
+ld-linux --list on tmux, htop, jq, strace, tree, fd, ssh: 0 libraries not found
+openssh.pre-install: sshd:x:100:101:sshd:/var/empty:/sbin/nologin, group sshd:x:101
+ssh-keygen -A: RSA ECDSA ED25519 MLDSA44-ED25519; sshd -t: exit 0; not enabled by default
+sshd -T: permitrootlogin prohibit-password, passwordauthentication yes, kbdinteractiveauthentication yes
+tmux -V: "tmux: invalid LC_ALL, LC_CTYPE or LANG"
+```
+
+### Found in Valence's base (the owner's to fix, not yours)
+
+**`LANG=C.UTF-8` names a locale that doesn't exist on Valence**
+
+- **Cause:**
+  - `recipes/valence-base/files/etc/profile:4` exports `LANG=C.UTF-8`.
+  - The comment at `recipes/glibc/VALENCEBUILD:34-35` says "The C.UTF-8 locale is built in".
+  - glibc's own NEWS says the opposite: "The locale is not built into glibc, and must be installed."
+  - Nothing in Valence runs `localedef`, and no package ships `/usr/lib/locale`.
+- **Effect:**
+  - On a base system, `locale charmap` prints `ANSI_X3.4-1968`, so every program runs in plain ASCII.
+  - tmux refuses to start: "invalid LC_ALL, LC_CTYPE or LANG", even with `-u`.
+  - The tmux recipe needs no change; it will work once the base is fixed.
+
+### Findings
+
+These come from four review agents. A second agent then checked each finding against the code, the upstream sources and the build logs. Severity is the checked one.
+
+**Build blockers**
+
+- **C1 (high): vim doesn't build.** `recipes/vim/VALENCEBUILD:18`.
+  - The builder exports `srcdir`, and vim's `src/configure` turns it into `--srcdir`. Configure then looks for `vim.h` in the unpack directory: "configure: error: cannot find sources (vim.h) in /root/valence/work/pkg/vim/src".
+  - Fix: put `srcdir=.` in front of `./configure`, or run `(unset srcdir; ./configure ...)`.
+- **C2 (high): wireguard-tools doesn't build.** `recipes/wireguard-tools/VALENCEBUILD:10`.
+  - `CFLAGS=` on make's command line overrides every `CFLAGS +=` in `src/Makefile`, so `-DRUNSTATEDIR`, `-std=gnu99 -D_GNU_SOURCE` and `-isystem uapi/linux` are lost: "'RUNSTATEDIR' undeclared".
+  - Fix: `make -C src RUNSTATEDIR=/run -j$JOBS`. The builder already exports CC, CFLAGS and LDFLAGS in the environment. Pass `RUNSTATEDIR=/run` in `package()` too.
+- **G1 (high): gtk3 stops at configure.** `recipes/gtk3/VALENCEBUILD:15`; the cause is `recipes/cairo/VALENCEBUILD:10-11`.
+  - With `-Dx11_backend=true`, gtk 3.24's meson.build:497-506 requires `cairo-xlib`, but Valence's cairo is built with `-Dxlib=disabled -Dxcb=disabled`: `Dependency "cairo-xlib" not found`.
+  - Every other module gtk3 needs is in the sysroot.
+  - **Owner's decision:** cairo is in the desktop ISO. Either:
+    - **(a)** turn on `-Dxlib=enabled` in cairo (keep xcb off), add `libx11-dev libxext-dev libxrender-dev` to its makedepends and bump its pkgrel; or
+    - **(b)** build gtk3 with `-Dx11_backend=false` and Firefox with `--enable-default-toolkit=cairo-gtk3-wayland-only`.
+- **F1 (high): Firefox's configure can't map `--target=x86_64-valence-linux-gnu` to a Rust triple.** `recipes/firefox/VALENCEBUILD:62`.
+  - Tracing `detect_rustc_target` in `build/moz.configure/rust.configure:390-444` by hand, the vendor "valence" matches none of the host Rust's targets, so configure dies.
+  - Fix: `ac_add_options --target=$RUST_TARGET` (`x86_64-unknown-linux-gnu`, from `scripts/env.sh:11`). Keep `--target=$TARGET` inside the `ff-cc` wrappers for clang. Do not use `x86_64-pc-linux-gnu`: it equals `--host` and turns cross-compiling off.
+- **F2 (high): once F1 is fixed, host and target Rust share one triple.** `recipes/firefox/VALENCEBUILD:30-47`, with Firefox's `config/makefiles/rust.mk:205-213, 412-429, 481`.
+  - Firefox's own comment says cargo then uses the target linker for host code too. So build scripts and proc-macros would be linked against Valence's sysroot (rules 18 and 46).
+  - Fix: have the `ff-cc` wrappers do what `rust_cc` does the other way round. When the output is under cargo's host directories (`/release/build/` or `/release/deps/` not under `/$RUST_TARGET/`), drop every `--sysroot` argument and exec plain clang-19. After the first build, check with `readelf -V` that no build script needs a GLIBC_ version above the build machine's 2.39.
+- **F3 (high): the builder's `AS=x86_64-valence-linux-gnu-as` reaches Firefox's configure.** `scripts/valence-build-recipe:35`.
+  - Firefox then runs GNU as directly on `.S` files with compiler flags. Checked: GNU as 2.46 fails on `-DFOO` and `-fPIC` ("invalid option").
+  - Fix: `unset AS` in `build()`, next to the CC/CXX exports.
+- **F4 (high): `firefox.apk` will be far over GitHub's 100 MB limit, and `scripts/publish-repo.sh:20-21` then refuses to publish the whole repository.**
+  - Mozilla's own 153.7.0esr build has a 185 MB `libxul.so` that deflates to 77 MB, and about 122 MB for the whole tree.
+  - Fix: a `firefox-data` subpackage (`omni.ja`, `browser/omni.ja`, fonts, dictionaries) that firefox depends on, plus a size guard in `package()`. Measure again after the first real build.
+
+**Security and correctness**
+
+- **C3 (high): sshd sends its whole log to the console (rule 14).** `recipes/openssh/VALENCEBUILD:27`.
+  - `sshd -D -e` with `exec 2>&1` and no `log/run` puts every connection and failed login on runsvdir's stdout, the console. It's off by default, but floods the console once switched on.
+  - Fix: add `etc/sv/sshd/log/run` like ntpd and avahi have (`exec svlogd -tt /var/log/$name`), or drop `-e` so sshd uses syslog. Bump pkgrel.
+- **G2 (high): nothing ever compiles GSettings schemas, so GTK 3's file, colour and emoji choosers abort the program.** The mechanism belongs in `recipes/glib/VALENCEBUILD`, which is in the base.
+  - gtk3 installs four `org.gtk.Settings.*.gschema.xml`, but meson skips the post-install step in a cross build, and no trigger exists. GLib's `g_settings_new` aborts on a schema that isn't compiled.
+  - On Plasma, Firefox's file picker goes through the KDE portal, so Plasma users mostly won't hit it.
+  - Fix: a glib trigger on `/usr/share/glib-2.0/schemas` that runs `glib-compile-schemas`, with a pkgrel bump for glib.
+- **S1 (medium): libevent 2.1.12 (2020) is not current.** `sources/MANIFEST.tsv:823`.
+  - 2.1.13-stable (2026-07-01) fixes nine security advisories. tmux, the only user, calls none of the affected modules.
+  - Fix: `libevent-2.1.13-stable.tar.gz`, sha256 `f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c`. Its signature checks against Nick Mathewson's key (primary `2133BC600AB133E1D826D173FE43009C4607B1FB`), and it matches Arch and Alpine. tmux needs no rebuild.
+- **S2 / G8 (medium): gtk 3.24.43 is five releases behind.** `sources/MANIFEST.tsv:820`.
+  - The 3.24 series continues as `gtk/3.24/gtk-3.24.52.tar.xz`. Its NEWS fixes a Firefox Wayland drag-and-drop crash (#7976).
+  - sha256 `80931fa472a77b9a164f6740e3c0b444fac6770054632d35a7ff9d679e5e7b9f`, from GNOME's .sha256sum and matching Debian's .dsc. The meson options are unchanged. It does not fix G1.
+- **S3 / C6 / G7 (medium): the commits don't say how the sources were checked** (AGENTS.md:1239-1242). Every file checks out; add the record in the next commit that touches them.
+  - Signatures:
+    - Mozilla SHA256SUMS.asc: `14F26682D0916CDD81E37B6D61B7B526D98F0353`
+    - libXt .sig: `3BB639E56F861FA2E86505690FDD682D974CA72A`
+    - OpenSSH .asc: `7168B983815A5EEF59A4ADFD2A3F414E736060BA`
+    - strace .asc: `7BECFE3AF7B280BB52FF77F104BA4521C996DDE1`
+    - WireGuard .tar.asc: `AB9942E6D4A4CFC3412620A749FC7012A5DE03AE`
+    - jq: `93079A9511EFC0B7D6CDBFB5B0DA60FB454BAF18`
+    - vim's signed tag: `4F19708816918E19AAE19DEEF3F92DA383FDDE09`
+    - libevent 2.1.12 .asc: `9E3AC83A27974B84D1B3401DB86086848EF8686D`
+  - Checksums with a distribution cross-check:
+    - at-spi2-core: GNOME sha256sum + Alpine
+    - tmux: Alpine
+    - htop: upstream .sha256 + Alpine
+    - tree: Alpine
+  - fd: the crates.io crate fd-find 10.5.2 is pinned by Debian's `rust-fd-find_10.5.2-1.dsc`, and it is byte-identical to the GitHub archive.
+- **C4 (medium): wg-quick fails for full-tunnel and `DNS=` configurations.** Valence has no nft, iptables or resolvconf. The kernel also lacks `NFT_FIB_IPV4/IPV6/INET`, `NETFILTER_ADVANCED`, `NF_CONNTRACK_MARK` and `IPV6_MULTIPLE_TABLES`, which are the owner's kernel config. Until then, say in pkgdesc or the docs that only split tunnels without `DNS=` work.
+- **C5 (medium): htop's sensors, capabilities and delay accounting are switched off silently (rule 63).**
+  - Fix: makedepends `lm-sensors-dev libcap-dev libnl3-dev`; `--enable-sensors --enable-capabilities --enable-delayacct`; `depends=(libsensors libnl3)`, since both are dlopen()ed.
+- **F5 (medium): Firefox gets no branding or channel options.** It calls itself "Nightly", its app_id is `firefox-default`, and `firefox.desktop` matches neither.
+  - Fix: `export MOZ_APP_REMOTINGNAME=firefox` (or `--enable-update-channel=release`), `StartupWMClass=firefox` in the .desktop file, and icons at all sizes (16 22 24 32 48 64 128 256).
+  - `--enable-official-branding` is the owner's decision, because of Mozilla's trademark terms.
+- **F6 (medium): Firefox's depends.** It dlopen()s libpulse, which the so: scan can't see, and loads ffmpeg-libs, not the ffmpeg tools. Fix: `depends=(ffmpeg-libs mesa pipewire libpulse)`.
+- **F7 (medium, owner's decision): a package named `firefox` silently changes `packages = firefox` wishes from Flathub to this build** (`valence-wish:114-134`).
+  - AGENTS.md (34, 745, 1277, 1316), README.md:41, ROADMAP.md (94, 173, 189) and docs/updating.md (44, 57) still say Firefox comes from Flathub.
+  - Ask the owner before publishing it. Either name it `firefox-esr`, or switch on purpose and update those docs in the same change.
+
+**Low**
+
+- **C7:** openssh's license is `SSH-OpenSSH`, not BSD-2-Clause.
+- **C8:** htop is `GPL-2.0-or-later`.
+- **C9:** jq installs its bundled oniguruma as a system library and claims `so:libonig.so.5`. Package oniguruma, or move `onig-config` to jq-dev and fix the license field.
+- **C10:** strace was built without `-k`, because elfutils-dev is missing. Add `--with-libdw`, or say `--without-libdw`.
+- **C11:** tmux's default-terminal falls back to `screen`. Use `--with-TERM=tmux-256color`.
+- **C12:** libevent's runtime package ships `event_rpcgen.py`. Move it to libevent-dev, with python3.
+- **C13:** `/etc/wireguard` (mode 0700) is dropped. Use `options=(keepdirs)` or create it in a post-install.
+- **C14:** vim's optional features are auto-detected. Pass `--disable-gpm --disable-canberra --disable-libsodium --disable-selinux --disable-smack` and choose acl. `--disable-nls` is right: English only is decided.
+- **C15:** fd's bundled jemalloc runs its configure tests on the build machine, and no shell completions are shipped.
+- **C16:** the wish-list examples in docs/updating.md:44 name the sshd service without openssh. AGENTS.md:83-85 should list openssh among the packages that call `adduser`.
+- **C17:** `keepdirs` also ships an empty `/usr/share` in openssh. Cosmetic.
+- **G3:** gtk3's input-method cache is never written. Use `-Dbuiltin_immodules=backend`.
+- **G4:** at-spi2-core ships `python3/dist-packages/.../Atspi.py`, byte-compiled for the build machine's Python 3.12. Remove it in `package()` and bump pkgrel (r0 is already in the repository).
+- **G5:** gtk3 needs `-Dxinerama=yes -Dwrap_mode=nofallback` and `harfbuzz-dev` in makedepends.
+- **G6 (plausible):** no SVG loader (librsvg) and no Adwaita icons, so GTK dialogs miss icons.
+- **G9:** libxt should pass `--disable-specs --without-xmlto --without-fop --without-xsltproc` like libx11, and bump pkgrel.
+- **F8:** Ubuntu's cbindgen 0.26 is below Firefox's minimum of 0.29.4. It works only because hosttools' 0.29.4 comes first in PATH.
+  - `export CBINDGEN=$M/hosttools/rust/bin/cbindgen` and drop cbindgen from host-setup.sh.
+  - The handoff's `cargo install cbindgen` would download outside `sources/`.
+- **F9:** Firefox's makedepends need libice-dev and libsm-dev, not libxt-dev. Drop pixman-dev, pipewire-dev and libdrm-dev, or pass their `--with-system-*` options.
+- **F10:** Firefox's private NSS, NSPR and libxul libraries would become global `so:` provides. Nothing breaks yet.
+- **F11 (plausible):** add `arch=(x86_64)`, because the host Rust has std only for x86_64.
+
+Checked and rejected: **S4** said fd 10.5.2 can't be verified. It can, via crates.io and Debian (see S3).
+
+### Next on the build machine
+
+- Once fixes for C1, C2, G1 and F1 to F4 are on `testing`, ask in the handoff. With the owner's OK, I'll rerun passes C and D and add a report here.
+- G1 (cairo or Wayland-only), F5 (official branding) and F7 (`firefox` or `firefox-esr`) need the owner's decision first. G2 and the locale bug are in the base.
+
+---
+
 ## 2026-11-21: phase 10 stage 2, vpm-aware installers
 
 Tree: `testing` 01369fa, `recipes` (vpkg `main`) 1f2af04. Line numbers below refer to these commits.
