@@ -45,7 +45,7 @@ use std::ffi::OsStr;
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{fchown, lchown, symlink, DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{fchown, DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -267,79 +267,15 @@ fn copy_file_atomic_at(
         if sync_file {
             o.sync_all()?;
         }
-        sys::renameat_in(dirfd, &tmp, leaf)
-    })();
-    if res.is_err() {
-        let _ = sys::unlinkat_in(dirfd, &tmp, false);
-    }
-    res
-}
-
-/// True when regular file `dst` has the same content as `r` (comparing
-/// against `r.hash`, or against `src` if `r.hash` is empty).
-fn same_content(dst: &Path, src: &Path, r: &FileRec) -> bool {
-    if let Some(alg) = Alg::from_len(r.hash.len()) {
-        return hash_file(dst, alg).map_or(false, |h| h == r.hash);
-    }
-    match (hash_file(dst, Alg::Sha256), hash_file(src, Alg::Sha256)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
-/// Copies regular file `src` (opened with `O_NOFOLLOW`) to `dst` via a
-/// temporary file and `rename`.
-fn copy_file_atomic(
-    src: &Path,
-    dst: &Path,
-    r: &FileRec,
-    chown: bool,
-    owner: (u32, u32),
-    sync_file: bool,
-    tolerate_nonposix: bool,
-) -> io::Result<()> {
-    let tmp = rootfs::tmp_name(dst);
-    let _ = fs::remove_file(&tmp);
-    let res = (|| {
-        let mut i = sys::open_regular_nofollow(src)?;
-        let mut o = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
-        io::copy(&mut i, &mut o)?;
-        if chown {
-            let r_ch = fchown(&o, Some(owner.0), Some(owner.1));
-            if tolerate_nonposix {
-                ignore_nonposix(r_ch)?;
-            } else {
-                r_ch?;
-            }
-        }
-        let r_perm = o.set_permissions(fs::Permissions::from_mode(r.mode & 0o7777));
-        if tolerate_nonposix {
-            ignore_nonposix(r_perm)?;
-        } else {
-            r_perm?;
-        }
-        let t = UNIX_EPOCH + Duration::from_secs(r.mtime);
-        let r_time = o.set_times(FileTimes::new().set_accessed(t).set_modified(t));
-        if tolerate_nonposix {
-            ignore_nonposix(r_time)?;
-        } else {
-            r_time?;
-        }
+        sys::renameat_in(dirfd, &tmp, leaf)?;
         if sync_file {
-            o.sync_all()?;
-        }
-        fs::rename(&tmp, dst)?;
-        if sync_file {
-            if let Some(par) = dst.parent() {
-                if let Ok(d) = sys::open_dir_nofollow(par) {
-                    let _ = d.sync_all();
-                }
-            }
+            // Ensure parent directory entry (e.g. FAT32 /boot) is durable (N-2).
+            let _ = unsafe { libc::fsync(dirfd) };
         }
         Ok(())
     })();
     if res.is_err() {
-        let _ = fs::remove_file(&tmp);
+        let _ = sys::unlinkat_in(dirfd, &tmp, false);
     }
     res
 }
@@ -518,11 +454,11 @@ impl<'a> Switch<'a> {
                 // If v1 shipped a regular file that the admin never edited and
                 // v2 replaces it with a symlink, replace it cleanly; otherwise
                 // keep the admin's file and write .vpm-new (N-3).
-                let pristine = m.is_file()
+                let pristine = sys::stat_is_file(&m)
                     && old.map_or(false, |o| {
                         o.is_regular()
                             && Alg::from_len(o.hash.len())
-                                .map_or(false, |a| hash_file(&dst.host, a).map_or(false, |h| h == o.hash))
+                                .map_or(false, |a| hash_file_at(dirfd, leaf, a).map_or(false, |h| h == o.hash))
                     });
                 if !pristine {
                     write_new = true;
@@ -1585,31 +1521,33 @@ pub fn repair(
                 continue;
             }
             rep.checked += 1;
-            let dst = match rfs.resolve(&r.path, false) {
+            let dst_res = match rfs.resolve(&r.path, false) {
                 Ok(d) => d,
                 Err(e) => {
                     rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy()));
                     continue;
                 }
             };
-            if db::is_reserved(&dst.canon) {
+            if db::is_reserved(&dst_res.canon) {
                 rep.errors.push(format!("{}: /{}: path resolves into vpm's own directory", p.meta.nv(), r.path_lossy()));
                 continue;
             }
+            let existing = rfs.open_parent_if_dir_exists(&r.path).ok().flatten();
 
             match &r.kind {
                 RecKind::File(FileKind::Symlink(target)) => {
-                    let live_md = fs::symlink_metadata(&dst.host);
-                    let intact = live_md.as_ref().map_or(false, |m| {
-                        m.file_type().is_symlink()
-                            && fs::read_link(&dst.host)
-                                .map_or(false, |t| t.as_os_str().as_bytes() == target.as_slice())
-                    });
+                    let live_md = existing.as_ref().and_then(|e| sys::fstatat_nofollow(e.fd(), &e.leaf).ok());
+                    let intact = match (&existing, &live_md) {
+                        (Some(e), Some(m)) if sys::stat_is_symlink(m) => {
+                            sys::readlinkat_in(e.fd(), &e.leaf).map_or(false, |t| t == *target)
+                        }
+                        _ => false,
+                    };
                     if intact {
                         rep.ok += 1;
                         continue;
                     }
-                    if is_etc(&r.path) && live_md.is_ok() {
+                    if is_etc(&r.path) && live_md.is_some() {
                         // Preserve admin-modified symlinks or files under etc/ (V-1).
                         println!("  kept locally changed /{}", r.path_lossy());
                         rep.ok += 1;
@@ -1622,16 +1560,16 @@ pub fn repair(
                     }
                     let res = (|| -> io::Result<()> {
                         ensure_parents(&mut rfs, &r.path)?;
-                        let dst = rfs.resolve(&r.path, false)?;
-                        let tmp = rootfs::tmp_name(&dst.host);
-                        let _ = fs::remove_file(&tmp);
-                        symlink(OsStr::from_bytes(target), &tmp)?;
+                        let dst = rfs.open_parent(&r.path)?;
+                        let tmp = rootfs::tmp_leaf(&dst.leaf);
+                        let _ = sys::unlinkat_in(dst.fd(), &tmp, false);
+                        sys::symlinkat_into(target, dst.fd(), &tmp)?;
                         if chown {
                             let (u, g) = owner_ids(r);
-                            lchown(&tmp, Some(u), Some(g))?;
+                            sys::fchownat_nofollow(dst.fd(), &tmp, u, g)?;
                         }
-                        if let Err(e) = fs::rename(&tmp, &dst.host) {
-                            let _ = fs::remove_file(&tmp);
+                        if let Err(e) = sys::renameat_in(dst.fd(), &tmp, &dst.leaf) {
+                            let _ = sys::unlinkat_in(dst.fd(), &tmp, false);
                             return Err(e);
                         }
                         Ok(())
@@ -1645,7 +1583,7 @@ pub fn repair(
                     }
                 }
                 RecKind::File(FileKind::Regular | FileKind::Hardlink(_)) if is_etc(&r.path) => {
-                    if fs::symlink_metadata(&dst.host).is_ok() {
+                    if existing.as_ref().map_or(false, |e| sys::fstatat_nofollow(e.fd(), &e.leaf).is_ok()) {
                         rep.ok += 1;
                         continue;
                     }
@@ -1668,8 +1606,8 @@ pub fn repair(
                     let owner = owner_ids(r);
                     let res = (|| -> io::Result<()> {
                         ensure_parents(&mut rfs, &r.path)?;
-                        let dst = rfs.resolve(&r.path, false)?;
-                        copy_file_atomic(&src, &dst.host, r, chown, owner, false, false)
+                        let dst = rfs.open_parent(&r.path)?;
+                        copy_file_atomic_at(&src, dst.fd(), &dst.leaf, r, chown, owner, false, false)
                     })();
                     match res {
                         Ok(()) => {
@@ -1691,8 +1629,10 @@ pub fn repair(
                             continue;
                         }
                     }
-                    let intact = fs::symlink_metadata(&dst.host)
-                        .map_or(false, |dm| dm.is_file() && same_content(&dst.host, &src, r));
+                    let intact = existing.as_ref().map_or(false, |e| {
+                        sys::fstatat_nofollow(e.fd(), &e.leaf)
+                            .map_or(false, |dm| sys::stat_is_file(&dm) && same_content_at(e.fd(), &e.leaf, &src, r))
+                    });
                     if intact {
                         rep.ok += 1;
                         continue;
@@ -1705,8 +1645,8 @@ pub fn repair(
                     let owner = owner_ids(r);
                     let res = (|| -> io::Result<()> {
                         ensure_parents(&mut rfs, &r.path)?;
-                        let dst = rfs.resolve(&r.path, false)?;
-                        copy_file_atomic(&src, &dst.host, r, chown, owner, true, true)
+                        let dst = rfs.open_parent(&r.path)?;
+                        copy_file_atomic_at(&src, dst.fd(), &dst.leaf, r, chown, owner, true, true)
                     })();
                     match res {
                         Ok(()) => {
@@ -1733,9 +1673,14 @@ pub fn repair(
                             }
                         }
                     }
-                    let intact = fs::symlink_metadata(&dst.host).map_or(false, |dm| {
-                        (dm.dev() == sm.dev() && dm.ino() == sm.ino())
-                            || (dm.dev() != sm.dev() && dm.is_file() && r.is_regular() && same_content(&dst.host, &src, r))
+                    let intact = existing.as_ref().map_or(false, |e| {
+                        sys::fstatat_nofollow(e.fd(), &e.leaf).map_or(false, |dm| {
+                            (dm.st_dev == sm.dev() && dm.st_ino == sm.ino())
+                                || (dm.st_dev != sm.dev()
+                                    && sys::stat_is_file(&dm)
+                                    && r.is_regular()
+                                    && same_content_at(e.fd(), &e.leaf, &src, r))
+                        })
                     });
                     if intact {
                         rep.ok += 1;
@@ -1749,19 +1694,19 @@ pub fn repair(
                     let owner = owner_ids(r);
                     let res = (|| -> io::Result<()> {
                         ensure_parents(&mut rfs, &r.path)?;
-                        let dst = rfs.resolve(&r.path, false)?;
-                        let tmp = rootfs::tmp_name(&dst.host);
-                        let _ = fs::remove_file(&tmp);
-                        match fs::hard_link(&src, &tmp) {
+                        let dst = rfs.open_parent(&r.path)?;
+                        let tmp = rootfs::tmp_leaf(&dst.leaf);
+                        let _ = sys::unlinkat_in(dst.fd(), &tmp, false);
+                        match sys::linkat_into(&src, dst.fd(), &tmp) {
                             Ok(()) => {
-                                if let Err(e) = fs::rename(&tmp, &dst.host) {
-                                    let _ = fs::remove_file(&tmp);
+                                if let Err(e) = sys::renameat_in(dst.fd(), &tmp, &dst.leaf) {
+                                    let _ = sys::unlinkat_in(dst.fd(), &tmp, false);
                                     return Err(e);
                                 }
                                 Ok(())
                             }
                             Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => {
-                                copy_file_atomic(&src, &dst.host, r, chown, owner, true, true)
+                                copy_file_atomic_at(&src, dst.fd(), &dst.leaf, r, chown, owner, true, true)
                             }
                             Err(e) => Err(e),
                         }
@@ -1788,6 +1733,7 @@ pub fn repair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn commit_hooks_discover_dedup_and_order() {
