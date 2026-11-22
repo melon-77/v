@@ -24,7 +24,7 @@ usage:
 
 The last line is "RESULT ok" or "RESULT FAIL <n>".
 """
-import hashlib, json, os, sqlite3, stat, subprocess, sys
+import hashlib, json, os, stat, subprocess, sys
 
 SKIP = {'Programs', 'var/lib/vpm', 'var/cache/vpm'}
 # appended to by the test packages' scripts: a re-run script adds a line
@@ -151,58 +151,23 @@ def unescape(s):
     return out.decode('utf-8', 'surrogateescape')
 
 
-def open_state_db(root):
-    p = os.path.join(root, 'var/lib/vpm/state.db')
-    if not os.path.isfile(p):
-        return None
-    return sqlite3.connect(f'file:{p}?mode=ro', uri=True)
-
-
 def programs(root):
     """Programs/<name>: its entries, Current, and the metadata of Current."""
     progs = os.path.join(root, 'Programs')
-    conn = open_state_db(root)
     res = {}
-    try:
-        for name in sorted(os.listdir(progs)):
-            d = os.path.join(progs, name)
-            r = {'entries': sorted(os.listdir(d)) if os.path.isdir(d) else ['<not a directory>']}
-            cur = os.path.join(d, 'Current')
-            if os.path.islink(cur):
-                ver = os.readlink(cur)
-                r['current'] = ver
-                if conn is not None:
-                    row = conn.execute(
-                        "SELECT id, arch, description, url, license, origin, maintainer, "
-                        "build_time, installed_size, file_size, identity, repo_commit, "
-                        "provider_priority, replaces_priority, layer, source "
-                        "FROM packages WHERE name=? AND version=?",
-                        (name, ver),
-                    ).fetchone()
-                    if row is not None:
-                        pid = row[0]
-                        r['info'] = hashlib.sha256(repr(row[1:]).encode()).hexdigest()
-                        frows = conn.execute(
-                            "SELECT kind, mode, user, grp, size, mtime, hash, extra, dev, xattrs, path "
-                            "FROM pkg_files WHERE pkg_id=? ORDER BY ord",
-                            (pid,),
-                        ).fetchall()
-                        r['files'] = hashlib.sha256(repr(frows).encode()).hexdigest()
-                        srows = conn.execute(
-                            "SELECT kind, body FROM pkg_scripts WHERE pkg_id=? ORDER BY kind",
-                            (pid,),
-                        ).fetchall()
-                        r['scripts'] = {k: hashlib.sha256(b).hexdigest() for k, b in srows}
-                else:
-                    md = os.path.join(d, ver, '.vpm')
-                    r['info'] = sha(os.path.join(md, 'info'))
-                    r['files'] = sha(os.path.join(md, 'files'))
-                    sd = os.path.join(md, 'scripts')
-                    r['scripts'] = {s: sha(os.path.join(sd, s)) for s in sorted(os.listdir(sd))} if os.path.isdir(sd) else {}
-            res[name] = r
-    finally:
-        if conn is not None:
-            conn.close()
+    for name in sorted(os.listdir(progs)):
+        d = os.path.join(progs, name)
+        r = {'entries': sorted(os.listdir(d)) if os.path.isdir(d) else ['<not a directory>']}
+        cur = os.path.join(d, 'Current')
+        if os.path.islink(cur):
+            ver = os.readlink(cur)
+            r['current'] = ver
+            md = os.path.join(d, ver, '.vpm')
+            r['info'] = sha(os.path.join(md, 'info'))
+            r['files'] = sha(os.path.join(md, 'files'))
+            sd = os.path.join(md, 'scripts')
+            r['scripts'] = {s: sha(os.path.join(sd, s)) for s in sorted(os.listdir(sd))} if os.path.isdir(sd) else {}
+        res[name] = r
     return res
 
 
@@ -210,19 +175,6 @@ def owned(root):
     """canonical path -> [name, version, path as recorded, kind] for every
     entry of every installed package."""
     res = {}
-    conn = open_state_db(root)
-    if conn is not None:
-        try:
-            for name, ver, path_b, kind in conn.execute(
-                "SELECT p.name, p.version, f.path, f.kind "
-                "FROM pkg_files f JOIN packages p ON p.id = f.pkg_id "
-                "WHERE p.state = 'installed' ORDER BY p.name, f.ord"
-            ):
-                path = path_b.decode('utf-8', 'surrogateescape') if isinstance(path_b, bytes) else path_b
-                res[canon(root, path)] = [name, ver, path, kind]
-        finally:
-            conn.close()
-        return res
     progs = os.path.join(root, 'Programs')
     for name in sorted(os.listdir(progs)):
         cur = os.path.join(progs, name, 'Current')
@@ -388,28 +340,17 @@ def crash(root, pre, ref):
         elif is_old != is_new and p in ref['owned']:
             n = ref['owned'][p][0]
             progress.setdefault(n, [0, 0])[0 if is_old else 1] += 1
-    # every Current names a complete version (in state.db, or legacy .vpm)
+    # every Current names a complete version folder (else vpm cannot open
+    # the root)
     progs = os.path.join(root, 'Programs')
-    conn = open_state_db(root)
-    try:
-        for name in sorted(os.listdir(progs)):
-            c = os.path.join(progs, name, 'Current')
-            if os.path.islink(c):
-                ver = os.readlink(c)
-                if conn is not None:
-                    ok = conn.execute(
-                        "SELECT 1 FROM packages WHERE name=? AND version=? LIMIT 1", (name, ver)
-                    ).fetchone() is not None
-                else:
-                    d = os.path.join(progs, name, ver, '.vpm')
-                    ok = os.path.isfile(os.path.join(d, 'info')) and os.path.isfile(os.path.join(d, 'files'))
-                if not ok:
-                    viol.append('Programs/%s/Current -> %s is not a complete version' % (name, ver))
-            elif name in pre['programs'] and 'current' in pre['programs'][name]:
-                viol.append('Programs/%s/Current is missing' % name)
-    finally:
-        if conn is not None:
-            conn.close()
+    for name in sorted(os.listdir(progs)):
+        c = os.path.join(progs, name, 'Current')
+        if os.path.islink(c):
+            d = os.path.join(progs, name, os.readlink(c), '.vpm')
+            if not (os.path.isfile(os.path.join(d, 'info')) and os.path.isfile(os.path.join(d, 'files'))):
+                viol.append('Programs/%s/Current -> %s is not a complete version' % (name, os.readlink(c)))
+        elif name in pre['programs'] and 'current' in pre['programs'][name]:
+            viol.append('Programs/%s/Current is missing' % name)
     for p, e in sorted(L.items()):
         if p in PE or p in RE or p in VOLATILE:
             continue
@@ -460,7 +401,7 @@ def final(root, ref):
             nlinks += 1
     st = os.path.join(root, 'var/lib/vpm')
     for x in sorted(os.listdir(st)):
-        if x in ('world', 'lock', 'state.db'):
+        if x in ('world', 'lock'):
             continue
         if x == 'exec' and not os.listdir(os.path.join(st, x)):
             continue

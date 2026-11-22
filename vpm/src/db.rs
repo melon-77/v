@@ -1,27 +1,30 @@
-//! vpm's database inside a managed root (SQLite metadata + GoboLinux-style
-//! `/Programs` file layout).
+//! vpm's database inside a managed root (GoboLinux-style layout).
 //!
 //! ```text
-//! ROOT/Programs/<name>/<version>/...          the package's unpacked files
+//! ROOT/Programs/<name>/<version>/...          the package's files
+//! ROOT/Programs/<name>/<version>/.vpm/info    metadata, "key: value" lines
+//! ROOT/Programs/<name>/<version>/.vpm/files   one line per entry
+//! ROOT/Programs/<name>/<version>/.vpm/scripts/<type>
 //! ROOT/Programs/<name>/Current -> <version>   the version in use
-//! ROOT/var/lib/vpm/state.db                   SQLite primary metadata DB
-//! ROOT/var/lib/vpm/world                      plain-text mirror of world
+//! ROOT/var/lib/vpm/world                      what was asked for
 //! ROOT/var/lib/vpm/journal                    the switch in progress
 //! ROOT/var/lib/vpm/lock                       flock'ed while vpm runs
 //! ROOT/var/cache/vpm/                         downloaded packages
 //! ```
 //!
-//! `state.db` holds package metadata, dependencies/provides/replaces/install-if/
-//! recommends, tags, triggers, scripts, indexed file manifests, and the world.
-//! `/Programs/<name>/<version>` holds only the unpacked package files;
-//! `Programs/<name>/Current` points at the active version.
+//! A package is installed iff `Programs/<name>/Current` exists; its target
+//! names the version directory.
 //!
-//! Legacy roots created before the SQLite transition (with per-package
-//! `Programs/<name>/<version>/.vpm/{info,files,scripts}`) are migrated
-//! automatically into `state.db` on the first writable open, and can still be
-//! read transparently by read-only commands before migration.
+//! `files` format: tab-separated fields
+//! `kind mode user group size mtime hash extra xattrs path`, where kind is
+//! `d f h l c b p` (directory, regular, hard link, symlink, char/block
+//! device, fifo), mode is octal permission bits, user/group are names or
+//! `-`, hash is hex or `-`, extra is the link target (`h`, `l`) or the
+//! device number (`c b p`) or `-`, xattrs is `-` or `hexname=hexvalue`
+//! items joined by `,`, and path is root-relative. Text fields escape
+//! `\`, tab, newline and other control bytes as `\\`, `\t`, `\n`, `\xHH`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -31,7 +34,6 @@ use std::path::{Path, PathBuf};
 use crate::adb::{self, Dependency, FileKind, Package, PkgInfo};
 use crate::digest;
 use crate::error::{Error, Result};
-use crate::sqlite::{Connection, Statement};
 use crate::sys;
 
 pub const PROGRAMS: &str = "Programs";
@@ -39,99 +41,16 @@ pub const CURRENT: &str = "Current";
 pub const META_DIR: &str = ".vpm";
 pub const PARTIAL_SUFFIX: &str = ".partial";
 pub const STATE_DIR: &str = "var/lib/vpm";
-pub const STATE_DB: &str = "state.db";
 pub const CACHE_DIR: &str = "var/cache/vpm";
 
-const SCHEMA_VERSION: i64 = 1;
-
-const SCHEMA_SQL: &str = "
-CREATE TABLE IF NOT EXISTS packages (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    name              TEXT NOT NULL,
-    version           TEXT NOT NULL,
-    state             TEXT NOT NULL CHECK (state IN ('staged', 'installed', 'removing')),
-    arch              TEXT NOT NULL DEFAULT '',
-    description       TEXT NOT NULL DEFAULT '',
-    url               TEXT NOT NULL DEFAULT '',
-    license           TEXT NOT NULL DEFAULT '',
-    origin            TEXT NOT NULL DEFAULT '',
-    maintainer        TEXT NOT NULL DEFAULT '',
-    build_time        INTEGER NOT NULL DEFAULT 0,
-    installed_size    INTEGER NOT NULL DEFAULT 0,
-    file_size         INTEGER NOT NULL DEFAULT 0,
-    identity          BLOB NOT NULL DEFAULT X'',
-    repo_commit       BLOB NOT NULL DEFAULT X'',
-    provider_priority INTEGER NOT NULL DEFAULT 0,
-    replaces_priority INTEGER NOT NULL DEFAULT 0,
-    layer             INTEGER NOT NULL DEFAULT 0,
-    source            TEXT NOT NULL DEFAULT '',
-    UNIQUE(name, version)
-);
-CREATE INDEX IF NOT EXISTS idx_packages_state ON packages(state, name);
-
-CREATE TABLE IF NOT EXISTS pkg_deps (
-    pkg_id   INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-    kind     TEXT NOT NULL,
-    ord      INTEGER NOT NULL,
-    name     TEXT NOT NULL,
-    version  TEXT NOT NULL,
-    op       INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_pkg_deps_pkg ON pkg_deps(pkg_id, kind, ord);
-CREATE INDEX IF NOT EXISTS idx_pkg_deps_provide ON pkg_deps(kind, name);
-
-CREATE TABLE IF NOT EXISTS pkg_tags (
-    pkg_id   INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-    ord      INTEGER NOT NULL,
-    tag      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_pkg_tags_pkg ON pkg_tags(pkg_id, ord);
-
-CREATE TABLE IF NOT EXISTS pkg_triggers (
-    pkg_id   INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-    ord      INTEGER NOT NULL,
-    pattern  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_pkg_triggers_pkg ON pkg_triggers(pkg_id, ord);
-
-CREATE TABLE IF NOT EXISTS pkg_scripts (
-    pkg_id   INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-    kind     TEXT NOT NULL,
-    body     BLOB NOT NULL,
-    PRIMARY KEY (pkg_id, kind)
-);
-
-CREATE TABLE IF NOT EXISTS pkg_files (
-    pkg_id   INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
-    ord      INTEGER NOT NULL,
-    kind     TEXT NOT NULL,
-    mode     INTEGER NOT NULL,
-    user     TEXT,
-    grp      TEXT,
-    size     INTEGER NOT NULL,
-    mtime    INTEGER NOT NULL,
-    hash     BLOB NOT NULL DEFAULT X'',
-    extra    BLOB,
-    dev      INTEGER,
-    xattrs   BLOB,
-    path     BLOB NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_pkg_files_pkg ON pkg_files(pkg_id, ord);
-CREATE INDEX IF NOT EXISTS idx_pkg_files_path ON pkg_files(path);
-
-CREATE TABLE IF NOT EXISTS world (
-    spec     TEXT PRIMARY KEY
-);
-";
-
-/// What a file record describes.
+/// What a `files` line describes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecKind {
     Dir,
     File(FileKind),
 }
 
-/// One entry of a package.
+/// One entry of a package (`files` line).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRec {
     pub kind: RecKind,
@@ -156,14 +75,6 @@ impl FileRec {
     pub fn path_lossy(&self) -> String {
         String::from_utf8_lossy(&self.path).into_owned()
     }
-}
-
-/// All extracted metadata for an unpacked package, ready to stage into SQLite.
-#[derive(Debug, Clone)]
-pub struct StagedPkg {
-    pub meta: PkgMeta,
-    pub recs: Vec<FileRec>,
-    pub scripts: Vec<(String, Vec<u8>)>,
 }
 
 /// The records of a package, in stored order (directories before their
@@ -199,49 +110,6 @@ pub fn records(pkg: &Package) -> Vec<FileRec> {
         }
     }
     v
-}
-
-// ---------------------------------------------------------------- xattrs blob
-
-fn encode_xattrs(xattrs: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
-    if xattrs.is_empty() {
-        return None;
-    }
-    let mut out = Vec::new();
-    for (k, v) in xattrs {
-        out.extend_from_slice(&(k.len() as u32).to_le_bytes());
-        out.extend_from_slice(k);
-        out.extend_from_slice(&(v.len() as u32).to_le_bytes());
-        out.extend_from_slice(v);
-    }
-    Some(out)
-}
-
-fn decode_xattrs(blob: Option<Vec<u8>>) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let Some(b) = blob else { return Ok(Vec::new()) };
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        if i + 4 > b.len() {
-            return Err(Error::Format("sqlite xattrs: truncated key length".into()));
-        }
-        let klen = u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as usize;
-        i += 4;
-        if i + klen + 4 > b.len() {
-            return Err(Error::Format("sqlite xattrs: truncated key/val".into()));
-        }
-        let k = b[i..i + klen].to_vec();
-        i += klen;
-        let vlen = u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as usize;
-        i += 4;
-        if i + vlen > b.len() {
-            return Err(Error::Format("sqlite xattrs: truncated value".into()));
-        }
-        let v = b[i..i + vlen].to_vec();
-        i += vlen;
-        out.push((k, v));
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------- escaping
@@ -324,7 +192,7 @@ fn parse_opt_name(s: &str) -> Result<Option<String>> {
     String::from_utf8(unescape(s)?).map(Some).map_err(|_| Error::Format("owner name is not UTF-8".into()))
 }
 
-// ---------------------------------------------------------------- legacy flat-file formats
+// ---------------------------------------------------------------- files
 
 pub fn format_files(recs: &[FileRec]) -> Vec<u8> {
     let mut out = Vec::with_capacity(recs.len() * 120);
@@ -405,7 +273,7 @@ pub fn parse_files(text: &str) -> Result<Vec<FileRec>> {
 
 // ---------------------------------------------------------------- info
 
-/// Package metadata stored in `state.db` (and legacy `.vpm/info`).
+/// Package metadata kept in `.vpm/info`.
 #[derive(Debug, Clone, Default)]
 pub struct PkgMeta {
     /// `hashes` holds the identity from the index (32 bytes) when the
@@ -465,6 +333,9 @@ pub fn format_info(m: &PkgMeta) -> String {
         ("recommends", &i.recommends),
     ] {
         for d in deps {
+            // the text form when it reads back as the same dependency;
+            // otherwise (an op without a text form, an empty but present
+            // version, ...) the raw fields: "KEY-raw: OP<tab>NAME<tab>VERSION"
             let t = d.to_string();
             if Dependency::parse(&t).ok().as_ref() == Some(d) {
                 kv(k, &t);
@@ -544,7 +415,7 @@ pub fn parse_info(text: &str) -> Result<PkgMeta> {
     Ok(m)
 }
 
-/// Legacy helper: writes `.vpm/` (info, files, scripts/) into a package dir.
+/// Writes `.vpm/` (info, files, scripts/) into a package directory.
 pub fn write_meta(pkg_dir: &Path, meta: &PkgMeta, recs: &[FileRec], pkg: &Package) -> Result<()> {
     let md = pkg_dir.join(META_DIR);
     fs::create_dir(&md)?;
@@ -562,7 +433,7 @@ pub fn write_meta(pkg_dir: &Path, meta: &PkgMeta, recs: &[FileRec], pkg: &Packag
     Ok(())
 }
 
-/// Legacy helper: a package's script body from its `.vpm/scripts`.
+/// A package's script body from its `.vpm/scripts`.
 pub fn read_script(pkg_dir: &Path, typ: &str) -> Option<Vec<u8>> {
     fs::read(pkg_dir.join(META_DIR).join("scripts").join(typ)).ok()
 }
@@ -609,6 +480,8 @@ pub fn is_reserved(p: &[u8]) -> bool {
 
 /// Checks that `p` is a real directory (not a symlink to one): `Ok(true)`
 /// if it is, `Ok(false)` if it does not exist, an error for anything else.
+/// vpm's own directories are checked this way before anything is created
+/// or deleted below them.
 pub fn real_dir(p: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(p) {
         Ok(m) if m.is_dir() => Ok(true),
@@ -631,307 +504,6 @@ pub fn checked_pkg_parent(root: &Path, name: &str) -> io::Result<PathBuf> {
     Ok(d)
 }
 
-// ---------------------------------------------------------------- SQLite helpers
-
-fn init_schema(conn: &Connection) -> Result<()> {
-    let ver = conn.pragma_i64("user_version")?;
-    if ver > SCHEMA_VERSION {
-        return Err(Error::Format(format!(
-            "state.db schema version {ver} is newer than this vpm supports ({SCHEMA_VERSION})"
-        )));
-    }
-    if ver == 0 {
-        conn.transaction(|c| {
-            c.exec_batch(SCHEMA_SQL)?;
-            c.exec_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
-            Ok(())
-        })?;
-    }
-    Ok(())
-}
-
-fn read_pkg_row(st: &Statement<'_>) -> (i64, PkgMeta) {
-    let id = st.col_i64(0);
-    let mut m = PkgMeta::default();
-    let i = &mut m.info;
-    i.name = st.col_text(1);
-    i.version = st.col_text(2);
-    i.arch = st.col_text(3);
-    i.description = st.col_text(4);
-    i.url = st.col_text(5);
-    i.license = st.col_text(6);
-    i.origin = st.col_text(7);
-    i.maintainer = st.col_text(8);
-    i.build_time = st.col_i64(9) as u64;
-    i.installed_size = st.col_i64(10) as u64;
-    i.file_size = st.col_i64(11) as u64;
-    i.hashes = st.col_blob(12);
-    i.repo_commit = st.col_blob(13);
-    i.provider_priority = st.col_i64(14) as u64;
-    m.replaces_priority = st.col_i64(15) as u64;
-    i.layer = st.col_i64(16) as u64;
-    m.source = st.col_text(17);
-    (id, m)
-}
-
-fn insert_pkg_in_tx(
-    conn: &Connection,
-    sp: &StagedPkg,
-    state: &str,
-    st_del: &mut Statement<'_>,
-    st_pkg: &mut Statement<'_>,
-    st_dep: &mut Statement<'_>,
-    st_tag: &mut Statement<'_>,
-    st_trig: &mut Statement<'_>,
-    st_script: &mut Statement<'_>,
-    st_file: &mut Statement<'_>,
-) -> Result<i64> {
-    let i = &sp.meta.info;
-    // Remove any existing row for (name, version) before inserting fresh data.
-    st_del.bind_text(1, &i.name)?;
-    st_del.bind_text(2, &i.version)?;
-    st_del.execute()?;
-
-    st_pkg.bind_text(1, &i.name)?;
-    st_pkg.bind_text(2, &i.version)?;
-    st_pkg.bind_text(3, state)?;
-    st_pkg.bind_text(4, &i.arch)?;
-    st_pkg.bind_text(5, &i.description)?;
-    st_pkg.bind_text(6, &i.url)?;
-    st_pkg.bind_text(7, &i.license)?;
-    st_pkg.bind_text(8, &i.origin)?;
-    st_pkg.bind_text(9, &i.maintainer)?;
-    st_pkg.bind_i64(10, i.build_time as i64)?;
-    st_pkg.bind_i64(11, i.installed_size as i64)?;
-    st_pkg.bind_i64(12, i.file_size as i64)?;
-    st_pkg.bind_blob(13, &i.hashes)?;
-    st_pkg.bind_blob(14, &i.repo_commit)?;
-    st_pkg.bind_i64(15, i.provider_priority as i64)?;
-    st_pkg.bind_i64(16, sp.meta.replaces_priority as i64)?;
-    st_pkg.bind_i64(17, i.layer as i64)?;
-    st_pkg.bind_text(18, &sp.meta.source)?;
-    st_pkg.execute()?;
-
-    let pkg_id = conn.last_insert_rowid();
-
-    for (kind, deps) in [
-        ("depends", &i.depends),
-        ("provides", &i.provides),
-        ("replaces", &i.replaces),
-        ("install_if", &i.install_if),
-        ("recommends", &i.recommends),
-    ] {
-        for (ord, d) in deps.iter().enumerate() {
-            st_dep.bind_i64(1, pkg_id)?;
-            st_dep.bind_text(2, kind)?;
-            st_dep.bind_i64(3, ord as i64)?;
-            st_dep.bind_text(4, &d.name)?;
-            st_dep.bind_text(5, &d.version)?;
-            st_dep.bind_i64(6, d.op as i64)?;
-            st_dep.execute()?;
-        }
-    }
-
-    for (ord, tag) in i.tags.iter().enumerate() {
-        st_tag.bind_i64(1, pkg_id)?;
-        st_tag.bind_i64(2, ord as i64)?;
-        st_tag.bind_text(3, tag)?;
-        st_tag.execute()?;
-    }
-
-    for (ord, pat) in sp.meta.triggers.iter().enumerate() {
-        st_trig.bind_i64(1, pkg_id)?;
-        st_trig.bind_i64(2, ord as i64)?;
-        st_trig.bind_text(3, pat)?;
-        st_trig.execute()?;
-    }
-
-    for (kind, body) in &sp.scripts {
-        st_script.bind_i64(1, pkg_id)?;
-        st_script.bind_text(2, kind)?;
-        st_script.bind_blob(3, body)?;
-        st_script.execute()?;
-    }
-
-    for (ord, r) in sp.recs.iter().enumerate() {
-        let (kind, extra, dev): (&str, Option<&[u8]>, Option<i64>) = match &r.kind {
-            RecKind::Dir => ("d", None, None),
-            RecKind::File(FileKind::Regular) => ("f", None, None),
-            RecKind::File(FileKind::Hardlink(t)) => ("h", Some(t.as_slice()), None),
-            RecKind::File(FileKind::Symlink(t)) => ("l", Some(t.as_slice()), None),
-            RecKind::File(FileKind::CharDev(d)) => ("c", None, Some(*d as i64)),
-            RecKind::File(FileKind::BlockDev(d)) => ("b", None, Some(*d as i64)),
-            RecKind::File(FileKind::Fifo(d)) => ("p", None, Some(*d as i64)),
-        };
-        let xa = encode_xattrs(&r.xattrs);
-        st_file.bind_i64(1, pkg_id)?;
-        st_file.bind_i64(2, ord as i64)?;
-        st_file.bind_text(3, kind)?;
-        st_file.bind_i64(4, r.mode as i64)?;
-        st_file.bind_opt_text(5, r.user.as_deref())?;
-        st_file.bind_opt_text(6, r.group.as_deref())?;
-        st_file.bind_i64(7, r.size as i64)?;
-        st_file.bind_i64(8, r.mtime as i64)?;
-        st_file.bind_blob(9, &r.hash)?;
-        st_file.bind_opt_blob(10, extra)?;
-        st_file.bind_opt_i64(11, dev)?;
-        st_file.bind_opt_blob(12, xa.as_deref())?;
-        st_file.bind_blob(13, &r.path)?;
-        st_file.execute()?;
-    }
-
-    Ok(pkg_id)
-}
-
-fn read_file_rec_row(st: &Statement<'_>) -> Result<FileRec> {
-    let k = st.col_text(0);
-    let extra = st.col_opt_blob(7);
-    let dev = st.col_opt_i64(8).unwrap_or(0) as u64;
-    let kind = match k.as_str() {
-        "d" => RecKind::Dir,
-        "f" => RecKind::File(FileKind::Regular),
-        "h" => RecKind::File(FileKind::Hardlink(extra.unwrap_or_default())),
-        "l" => RecKind::File(FileKind::Symlink(extra.unwrap_or_default())),
-        "c" => RecKind::File(FileKind::CharDev(dev)),
-        "b" => RecKind::File(FileKind::BlockDev(dev)),
-        "p" => RecKind::File(FileKind::Fifo(dev)),
-        other => return Err(Error::Format(format!("sqlite pkg_files: unknown kind '{other}'"))),
-    };
-    Ok(FileRec {
-        kind,
-        mode: st.col_i64(1) as u32,
-        user: st.col_opt_text(2),
-        group: st.col_opt_text(3),
-        size: st.col_i64(4) as u64,
-        mtime: st.col_i64(5) as u64,
-        hash: st.col_blob(6),
-        xattrs: decode_xattrs(st.col_opt_blob(9))?,
-        path: st.col_blob(10),
-    })
-}
-
-fn read_legacy_scripts(pkg_dir: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut out = Vec::new();
-    let sd = pkg_dir.join(META_DIR).join("scripts");
-    let Ok(rd) = fs::read_dir(&sd) else { return out };
-    let mut entries: Vec<_> = rd.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
-        if let Some(name) = e.file_name().to_str() {
-            if let Ok(body) = fs::read(e.path()) {
-                out.push((name.to_string(), body));
-            }
-        }
-    }
-    out
-}
-
-/// Imports a pre-SQLite root (`Programs/*/*/.vpm/` + `var/lib/vpm/world`)
-/// into `state.db` in a single atomic transaction, then removes the old `.vpm`
-/// metadata directories once durable.
-fn migrate_legacy_root(root: &Path, conn: &Connection) -> Result<()> {
-    let programs = root.join(PROGRAMS);
-    let mut to_insert: Vec<(StagedPkg, &'static str, PathBuf)> = Vec::new();
-
-    if programs.exists() {
-        let mut names: Vec<_> = fs::read_dir(&programs)?.collect::<io::Result<Vec<_>>>()?;
-        names.sort_by_key(|e| e.file_name());
-        for e in names {
-            let pdir = e.path();
-            match Db::load_installed_legacy(&pdir) {
-                Ok(Some(ip)) => {
-                    let recs = match read_files(&ip.dir) {
-                        Ok(r) => r,
-                        Err(err) => {
-                            eprintln!("vpm: warning: migration: {}: {err}; skipped", ip.dir.display());
-                            continue;
-                        }
-                    };
-                    let scripts = read_legacy_scripts(&ip.dir);
-                    let meta_dir = ip.dir.join(META_DIR);
-                    to_insert.push((StagedPkg { meta: ip.meta, recs, scripts }, "installed", meta_dir));
-                }
-                Ok(None) => {}
-                Err(why) => eprintln!("vpm: warning: migration: {}: {why}; ignored", pdir.display()),
-            }
-        }
-    }
-
-    // If a legacy root crashed mid-switch and left a journal, also import any
-    // staged/old versions referenced in the journal so recovery can finish.
-    if let Ok(Some(jf)) = JournalFile::open(root) {
-        let mut seen: std::collections::HashSet<(String, String)> =
-            to_insert.iter().map(|(s, _, _)| (s.meta.name().to_string(), s.meta.version().to_string())).collect();
-        for op in &jf.plan.ops {
-            for (ver_opt, st) in [(op.new_version(), "staged"), (op.old_version(), "removing")] {
-                let Some(v) = ver_opt else { continue };
-                if !seen.insert((op.name().to_string(), v.to_string())) {
-                    continue;
-                }
-                let dir = Db::pkg_dir(root, op.name(), v);
-                if !dir.join(META_DIR).exists() {
-                    continue;
-                }
-                if let (Ok(meta), Ok(recs)) = (read_meta(&dir), read_files(&dir)) {
-                    let scripts = read_legacy_scripts(&dir);
-                    to_insert.push((StagedPkg { meta, recs, scripts }, st, dir.join(META_DIR)));
-                }
-            }
-        }
-    }
-
-    let world = read_world(root)?;
-    let world_specs: Vec<String> = format_world(&world).lines().filter(|l| !l.is_empty()).map(String::from).collect();
-
-    conn.transaction(|c| {
-        let mut st_del = c.prepare("DELETE FROM packages WHERE name = ?1 AND version = ?2")?;
-        let mut st_pkg = c.prepare(
-            "INSERT INTO packages (name, version, state, arch, description, url, license, origin, maintainer, \
-             build_time, installed_size, file_size, identity, repo_commit, provider_priority, replaces_priority, \
-             layer, source) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
-        )?;
-        let mut st_dep = c.prepare(
-            "INSERT INTO pkg_deps (pkg_id, kind, ord, name, version, op) VALUES (?1,?2,?3,?4,?5,?6)",
-        )?;
-        let mut st_tag = c.prepare("INSERT INTO pkg_tags (pkg_id, ord, tag) VALUES (?1,?2,?3)")?;
-        let mut st_trig = c.prepare("INSERT INTO pkg_triggers (pkg_id, ord, pattern) VALUES (?1,?2,?3)")?;
-        let mut st_script = c.prepare("INSERT INTO pkg_scripts (pkg_id, kind, body) VALUES (?1,?2,?3)")?;
-        let mut st_file = c.prepare(
-            "INSERT INTO pkg_files (pkg_id, ord, kind, mode, user, grp, size, mtime, hash, extra, dev, xattrs, path) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-        )?;
-
-        for (sp, st, _) in &to_insert {
-            insert_pkg_in_tx(
-                c,
-                sp,
-                st,
-                &mut st_del,
-                &mut st_pkg,
-                &mut st_dep,
-                &mut st_tag,
-                &mut st_trig,
-                &mut st_script,
-                &mut st_file,
-            )?;
-        }
-
-        c.exec_batch("DELETE FROM world;")?;
-        let mut st_w = c.prepare("INSERT OR IGNORE INTO world (spec) VALUES (?1)")?;
-        for w in &world_specs {
-            st_w.bind_text(1, w)?;
-            st_w.execute()?;
-        }
-        Ok(())
-    })?;
-
-    // Now that state.db is durably committed, drop legacy .vpm directories.
-    for (_, _, meta_dir) in &to_insert {
-        let _ = fs::remove_dir_all(meta_dir);
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------- database
 
 /// An installed package (metadata only; files are read on demand).
@@ -945,7 +517,10 @@ pub struct Db {
     pub root: PathBuf,
     pub installed: BTreeMap<String, Installed>,
     pub world: Vec<Dependency>,
-    conn: Option<Connection>,
+    /// Packages whose `Current` names a real version directory but whose
+    /// record there can't be read: (name, version, why). Nothing is changed
+    /// while there are any; `vpm fix` rebuilds them from the signed packages.
+    pub broken: Vec<(String, String, String)>,
     _lock: Option<File>,
 }
 
@@ -959,33 +534,9 @@ impl Db {
     pub fn state(root: &Path) -> PathBuf {
         root.join(STATE_DIR)
     }
-    pub fn db_path(root: &Path) -> PathBuf {
-        root.join(STATE_DIR).join(STATE_DB)
-    }
     pub fn journal_path(root: &Path) -> PathBuf {
         root.join(STATE_DIR).join("journal")
     }
-    pub fn dirty_path(root: &Path) -> PathBuf {
-        root.join(STATE_DIR).join("dirty")
-    }
-
-    /// Flushes `state.db`, `state.db-wal` (if present), and the `var/lib/vpm`
-    /// directory so WAL commits made under `PRAGMA synchronous = NORMAL` are
-    /// durable without calling whole-filesystem `syncfs`.
-    pub fn sync_state_dir(root: &Path) -> Result<()> {
-        let state = Self::state(root);
-        for name in [STATE_DB, "state.db-wal"] {
-            let p = state.join(name);
-            if let Ok(f) = sys::open_regular_nofollow(&p) {
-                f.sync_data()?;
-            }
-        }
-        if let Ok(d) = sys::open_dir_nofollow(&state) {
-            d.sync_all()?;
-        }
-        Ok(())
-    }
-
 
     fn own_dirs(root: &Path) -> [PathBuf; 6] {
         [
@@ -998,22 +549,15 @@ impl Db {
         ]
     }
 
-    /// Opens (or with `initdb` creates) the SQLite database and takes the lock.
-    /// Automatically migrates a legacy `.vpm/` root into `state.db`.
+    /// Opens (or with `initdb` creates) the database and takes the lock.
     pub fn open(root: &Path, initdb: bool) -> Result<Db> {
         let state = Self::state(root);
-        let db_path = Self::db_path(root);
-        let world_path = state.join("world");
-
         // vpm's own directories must be real directories, not symlinks
+        // that would lead its writes and deletions elsewhere
         let own = Self::own_dirs(root);
         for d in &own {
             real_dir(d).map_err(Error::Io)?;
         }
-
-        let has_sqlite = db_path.exists();
-        let has_legacy = world_path.exists();
-
         if initdb {
             fs::create_dir_all(root)?;
             for d in &own {
@@ -1021,22 +565,21 @@ impl Db {
                     fs::create_dir_all(d)?;
                 }
             }
-            if !world_path.exists() {
-                fs::write(&world_path, "")?;
+            let w = state.join("world");
+            if !w.exists() {
+                fs::write(&w, "")?;
             }
-        } else if !has_sqlite && !has_legacy {
+        } else if !state.join("world").exists() {
             return Err(Error::Msg(format!(
                 "{} has no vpm database (create one with --initdb)",
                 root.display()
             )));
         }
-
         for d in [root.join(PROGRAMS), root.join(CACHE_DIR)] {
             if !d.exists() {
                 fs::create_dir_all(&d)?;
             }
         }
-
         let lock = OpenOptions::new().create(true).truncate(false).write(true).open(state.join("lock"))?;
         if !sys::try_lock(&lock)? {
             return Err(Error::Msg(format!("{}: another vpm is running on this root", root.display())));
@@ -1045,197 +588,66 @@ impl Db {
             use std::os::unix::io::AsRawFd;
             sys::set_lock_fd(lock.as_raw_fd());
         }
-
-        let conn = Connection::open_rw(&db_path)?;
-        init_schema(&conn)?;
-        if !has_sqlite && has_legacy {
-            migrate_legacy_root(root, &conn)?;
-        }
-
-        let mut db = Db {
-            root: root.to_path_buf(),
-            installed: BTreeMap::new(),
-            world: Vec::new(),
-            conn: Some(conn),
-            _lock: Some(lock),
-        };
+        let mut db = Db { root: root.to_path_buf(), installed: BTreeMap::new(), broken: Vec::new(), world: Vec::new(), _lock: Some(lock) };
         db.reload()?;
         Ok(db)
     }
 
     /// Opens the database read-only without taking a lock or creating
-    /// directories. Falls back to reading legacy `.vpm/` metadata if `state.db`
-    /// has not been created yet. With `allow_missing`, a root without a
-    /// database yet opens as empty (for `--initdb --simulate`).
+    /// directories. With `allow_missing`, a root without a database yet
+    /// opens as empty (for `--initdb --simulate`).
     pub fn open_readonly(root: &Path, allow_missing: bool) -> Result<Db> {
         let state = Self::state(root);
-        let db_path = Self::db_path(root);
-        let world_path = state.join("world");
-
         for d in &Self::own_dirs(root) {
             real_dir(d).map_err(Error::Io)?;
         }
-
-        if db_path.exists() {
-            let conn = Connection::open_ro(&db_path)?;
-            let ver = conn.pragma_i64("user_version")?;
-            if ver > SCHEMA_VERSION {
-                return Err(Error::Format(format!(
-                    "state.db schema version {ver} is newer than this vpm supports ({SCHEMA_VERSION})"
-                )));
+        if !state.join("world").exists() {
+            if allow_missing {
+                return Ok(Db { root: root.to_path_buf(), installed: BTreeMap::new(), broken: Vec::new(), world: Vec::new(), _lock: None });
             }
-            let mut db = Db {
-                root: root.to_path_buf(),
-                installed: BTreeMap::new(),
-                world: Vec::new(),
-                conn: Some(conn),
-                _lock: None,
-            };
-            db.reload()?;
-            return Ok(db);
+            return Err(Error::Msg(format!(
+                "{} has no vpm database (create one with --initdb)",
+                root.display()
+            )));
         }
-
-        if world_path.exists() {
-            let mut db = Db {
-                root: root.to_path_buf(),
-                installed: BTreeMap::new(),
-                world: Vec::new(),
-                conn: None,
-                _lock: None,
-            };
-            db.reload()?;
-            return Ok(db);
-        }
-
-        if allow_missing {
-            return Ok(Db {
-                root: root.to_path_buf(),
-                installed: BTreeMap::new(),
-                world: Vec::new(),
-                conn: None,
-                _lock: None,
-            });
-        }
-        Err(Error::Msg(format!(
-            "{} has no vpm database (create one with --initdb)",
-            root.display()
-        )))
+        let mut db = Db { root: root.to_path_buf(), installed: BTreeMap::new(), broken: Vec::new(), world: Vec::new(), _lock: None };
+        db.reload()?;
+        Ok(db)
     }
 
-    pub fn is_sqlite(&self) -> bool {
-        self.conn.is_some()
-    }
-
-    /// (Re)reads the installed packages and the world.
+    /// (Re)reads the installed packages and the world. An entry of
+    /// `Programs` that is not a valid installed package (a `Current` that
+    /// is not a plain version name, a version directory that is a symlink,
+    /// metadata that cannot be read or does not match its place) is skipped
+    /// with a warning instead of making every command fail.
     pub fn reload(&mut self) -> Result<()> {
-        if self.conn.is_some() {
-            self.reload_sqlite()
-        } else {
-            self.reload_legacy()
-        }
-    }
-
-    fn reload_sqlite(&mut self) -> Result<()> {
         self.installed.clear();
-        self.world.clear();
-        let conn = self.conn.as_ref().unwrap();
-
-        let mut by_id: HashMap<i64, PkgMeta> = HashMap::new();
-        {
-            let mut st = conn.prepare(
-                "SELECT id, name, version, arch, description, url, license, origin, maintainer, \
-                 build_time, installed_size, file_size, identity, repo_commit, provider_priority, \
-                 replaces_priority, layer, source \
-                 FROM packages WHERE state = 'installed' ORDER BY name",
-            )?;
-            while st.step_row()? {
-                let (id, meta) = read_pkg_row(&st);
-                if !safe_component(&meta.info.name) || !safe_version(&meta.info.version) {
-                    eprintln!(
-                        "vpm: warning: state.db has unsafe package '{}-{}'; ignored",
-                        meta.info.name, meta.info.version
-                    );
-                    continue;
-                }
-                by_id.insert(id, meta);
-            }
-        }
-
-        if !by_id.is_empty() {
-            let mut st = conn.prepare(
-                "SELECT d.pkg_id, d.kind, d.name, d.version, d.op \
-                 FROM pkg_deps d JOIN packages p ON p.id = d.pkg_id \
-                 WHERE p.state = 'installed' ORDER BY d.pkg_id, d.ord",
-            )?;
-            while st.step_row()? {
-                let pid = st.col_i64(0);
-                let Some(m) = by_id.get_mut(&pid) else { continue };
-                let kind = st.col_text(1);
-                let dep = Dependency {
-                    name: st.col_text(2),
-                    version: st.col_text(3),
-                    op: st.col_i64(4) as u8,
-                };
-                match kind.as_str() {
-                    "depends" => m.info.depends.push(dep),
-                    "provides" => m.info.provides.push(dep),
-                    "replaces" => m.info.replaces.push(dep),
-                    "install_if" => m.info.install_if.push(dep),
-                    "recommends" => m.info.recommends.push(dep),
-                    _ => {}
-                }
-            }
-
-            let mut st = conn.prepare(
-                "SELECT t.pkg_id, t.tag FROM pkg_tags t JOIN packages p ON p.id = t.pkg_id \
-                 WHERE p.state = 'installed' ORDER BY t.pkg_id, t.ord",
-            )?;
-            while st.step_row()? {
-                if let Some(m) = by_id.get_mut(&st.col_i64(0)) {
-                    m.info.tags.push(st.col_text(1));
-                }
-            }
-
-            let mut st = conn.prepare(
-                "SELECT t.pkg_id, t.pattern FROM pkg_triggers t JOIN packages p ON p.id = t.pkg_id \
-                 WHERE p.state = 'installed' ORDER BY t.pkg_id, t.ord",
-            )?;
-            while st.step_row()? {
-                if let Some(m) = by_id.get_mut(&st.col_i64(0)) {
-                    m.triggers.push(st.col_text(1));
-                }
-            }
-        }
-
-        for (_, meta) in by_id {
-            let dir = Self::pkg_dir(&self.root, meta.name(), meta.version());
-            self.installed.insert(meta.info.name.clone(), Installed { meta, dir });
-        }
-
-        let mut st = conn.prepare("SELECT spec FROM world ORDER BY spec")?;
-        while st.step_row()? {
-            let w = st.col_text(0);
-            match Dependency::parse_world(&w) {
-                Ok(d) => self.world.push(d),
-                Err(e) => eprintln!("vpm: warning: world: {e}; ignored"),
-            }
-        }
-        Ok(())
-    }
-
-    fn reload_legacy(&mut self) -> Result<()> {
-        self.installed.clear();
+        self.broken.clear();
         let programs = self.root.join(PROGRAMS);
         if programs.exists() {
             let mut names: Vec<_> = fs::read_dir(&programs)?.collect::<io::Result<Vec<_>>>()?;
             names.sort_by_key(|e| e.file_name());
             for e in names {
-                match Self::load_installed_legacy(&e.path()) {
+                match Self::load_installed(&e.path()) {
                     Ok(Some(ip)) => {
                         self.installed.insert(ip.meta.info.name.clone(), ip);
                     }
                     Ok(None) => {}
-                    Err(why) => eprintln!("vpm: warning: {}: {why}; ignored", e.path().display()),
+                    Err(why) => {
+                        eprintln!("vpm: warning: {}: {why}; ignored", e.path().display());
+                        // a Current naming a real version directory: the record of
+                        // that version is what can't be read (`vpm fix` rebuilds it)
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if let Ok(t) = fs::read_link(e.path().join(CURRENT)) {
+                            let v = t.to_string_lossy().into_owned();
+                            if safe_component(&name)
+                                && safe_version(&v)
+                                && fs::symlink_metadata(e.path().join(&v)).map_or(false, |m| m.is_dir())
+                            {
+                                self.broken.push((name, v, why));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1243,7 +655,7 @@ impl Db {
         Ok(())
     }
 
-    fn load_installed_legacy(pdir: &Path) -> std::result::Result<Option<Installed>, String> {
+    fn load_installed(pdir: &Path) -> std::result::Result<Option<Installed>, String> {
         match fs::symlink_metadata(pdir) {
             Ok(m) if m.is_dir() => {}
             Ok(_) => return Err("not a directory".into()),
@@ -1270,537 +682,6 @@ impl Db {
             return Err("metadata does not match its place".into());
         }
         Ok(Some(Installed { meta, dir }))
-    }
-
-    // ---- SQLite package queries & mutations ----
-
-    /// Inserts all newly unpacked packages into `state.db` with `state = 'staged'`
-    /// in a single ACID transaction.
-    pub fn stage_packages(&self, staged: &[StagedPkg]) -> Result<()> {
-        if staged.is_empty() {
-            return Ok(());
-        }
-        let conn = self.conn.as_ref().ok_or_else(|| Error::Msg("database is read-only".into()))?;
-        conn.transaction(|c| {
-            let mut st_del = c.prepare("DELETE FROM packages WHERE name = ?1 AND version = ?2")?;
-            let mut st_pkg = c.prepare(
-                "INSERT INTO packages (name, version, state, arch, description, url, license, origin, maintainer, \
-                 build_time, installed_size, file_size, identity, repo_commit, provider_priority, replaces_priority, \
-                 layer, source) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
-            )?;
-            let mut st_dep = c.prepare(
-                "INSERT INTO pkg_deps (pkg_id, kind, ord, name, version, op) VALUES (?1,?2,?3,?4,?5,?6)",
-            )?;
-            let mut st_tag = c.prepare("INSERT INTO pkg_tags (pkg_id, ord, tag) VALUES (?1,?2,?3)")?;
-            let mut st_trig = c.prepare("INSERT INTO pkg_triggers (pkg_id, ord, pattern) VALUES (?1,?2,?3)")?;
-            let mut st_script = c.prepare("INSERT INTO pkg_scripts (pkg_id, kind, body) VALUES (?1,?2,?3)")?;
-            let mut st_file = c.prepare(
-                "INSERT INTO pkg_files (pkg_id, ord, kind, mode, user, grp, size, mtime, hash, extra, dev, xattrs, path) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-            )?;
-
-            for sp in staged {
-                insert_pkg_in_tx(
-                    c,
-                    sp,
-                    "staged",
-                    &mut st_del,
-                    &mut st_pkg,
-                    &mut st_dep,
-                    &mut st_tag,
-                    &mut st_trig,
-                    &mut st_script,
-                    &mut st_file,
-                )?;
-            }
-            Ok(())
-        })
-    }
-
-    /// Returns whether `(name, version)` exists in the database (in any state).
-    pub fn has_pkg(&self, name: &str, version: &str) -> Result<bool> {
-        if let Some(conn) = &self.conn {
-            let mut st = conn.prepare("SELECT 1 FROM packages WHERE name = ?1 AND version = ?2 LIMIT 1")?;
-            st.bind_text(1, name)?;
-            st.bind_text(2, version)?;
-            st.step_row()
-        } else {
-            Ok(Self::pkg_dir(&self.root, name, version).join(META_DIR).exists())
-        }
-    }
-
-    /// Reads full metadata for `(name, version)` (any state: staged/installed/removing).
-    pub fn read_pkg_meta(&self, name: &str, version: &str) -> Result<PkgMeta> {
-        let Some(conn) = &self.conn else {
-            return read_meta(&Self::pkg_dir(&self.root, name, version));
-        };
-        let mut st = conn.prepare(
-            "SELECT id, name, version, arch, description, url, license, origin, maintainer, \
-             build_time, installed_size, file_size, identity, repo_commit, provider_priority, \
-             replaces_priority, layer, source \
-             FROM packages WHERE name = ?1 AND version = ?2 LIMIT 1",
-        )?;
-        st.bind_text(1, name)?;
-        st.bind_text(2, version)?;
-        if !st.step_row()? {
-            return Err(Error::Msg(format!("state.db: {name}-{version}: metadata not found")));
-        }
-        let (pkg_id, mut meta) = read_pkg_row(&st);
-        drop(st);
-
-        let mut st = conn.prepare(
-            "SELECT kind, name, version, op FROM pkg_deps WHERE pkg_id = ?1 ORDER BY ord",
-        )?;
-        st.bind_i64(1, pkg_id)?;
-        while st.step_row()? {
-            let kind = st.col_text(0);
-            let dep = Dependency {
-                name: st.col_text(1),
-                version: st.col_text(2),
-                op: st.col_i64(3) as u8,
-            };
-            match kind.as_str() {
-                "depends" => meta.info.depends.push(dep),
-                "provides" => meta.info.provides.push(dep),
-                "replaces" => meta.info.replaces.push(dep),
-                "install_if" => meta.info.install_if.push(dep),
-                "recommends" => meta.info.recommends.push(dep),
-                _ => {}
-            }
-        }
-
-        let mut st = conn.prepare("SELECT tag FROM pkg_tags WHERE pkg_id = ?1 ORDER BY ord")?;
-        st.bind_i64(1, pkg_id)?;
-        while st.step_row()? {
-            meta.info.tags.push(st.col_text(0));
-        }
-
-        let mut st = conn.prepare("SELECT pattern FROM pkg_triggers WHERE pkg_id = ?1 ORDER BY ord")?;
-        st.bind_i64(1, pkg_id)?;
-        while st.step_row()? {
-            meta.triggers.push(st.col_text(0));
-        }
-        Ok(meta)
-    }
-
-    /// Reads all file records for `(name, version)` in stored order.
-    pub fn read_pkg_files(&self, name: &str, version: &str) -> Result<Vec<FileRec>> {
-        let Some(conn) = &self.conn else {
-            return read_files(&Self::pkg_dir(&self.root, name, version));
-        };
-        let mut st = conn.prepare(
-            "SELECT f.kind, f.mode, f.user, f.grp, f.size, f.mtime, f.hash, f.extra, f.dev, f.xattrs, f.path \
-             FROM pkg_files f JOIN packages p ON p.id = f.pkg_id \
-             WHERE p.name = ?1 AND p.version = ?2 ORDER BY f.ord",
-        )?;
-        st.bind_text(1, name)?;
-        st.bind_text(2, version)?;
-        let mut out = Vec::new();
-        while st.step_row()? {
-            out.push(read_file_rec_row(&st)?);
-        }
-        Ok(out)
-    }
-
-    /// Reads a script body (`pre-install`, `post-install`, `trigger`, ...) for `(name, version)`.
-    pub fn read_pkg_script(&self, name: &str, version: &str, kind: &str) -> Option<Vec<u8>> {
-        let Some(conn) = &self.conn else {
-            return read_script(&Self::pkg_dir(&self.root, name, version), kind);
-        };
-        let mut st = conn
-            .prepare(
-                "SELECT s.body FROM pkg_scripts s JOIN packages p ON p.id = s.pkg_id \
-                 WHERE p.name = ?1 AND p.version = ?2 AND s.kind = ?3 LIMIT 1",
-            )
-            .ok()?;
-        st.bind_text(1, name).ok()?;
-        st.bind_text(2, version).ok()?;
-        st.bind_text(3, kind).ok()?;
-        if st.step_row().ok()? {
-            Some(st.col_blob(0))
-        } else {
-            None
-        }
-    }
-
-    /// Fast existence check for a package script without reading its body.
-    pub fn has_pkg_script(&self, name: &str, version: &str, kind: &str) -> bool {
-        let Some(conn) = &self.conn else {
-            return Self::pkg_dir(&self.root, name, version).join(META_DIR).join("scripts").join(kind).exists();
-        };
-        let Ok(mut st) = conn.prepare(
-            "SELECT 1 FROM pkg_scripts s JOIN packages p ON p.id = s.pkg_id \
-             WHERE p.name = ?1 AND p.version = ?2 AND s.kind = ?3 LIMIT 1",
-        ) else {
-            return false;
-        };
-        if st.bind_text(1, name).is_err() || st.bind_text(2, version).is_err() || st.bind_text(3, kind).is_err() {
-            return false;
-        }
-        st.step_row().unwrap_or(false)
-    }
-
-    /// Indexed O(log N) lookup of installed packages that own non-directory `path`
-    /// (root-relative, no leading `/`). Returns package names.
-    pub fn find_path_owners(&self, path: &[u8]) -> Result<Option<Vec<String>>> {
-        let Some(conn) = &self.conn else {
-            return Ok(None); // caller falls back to full scan for legacy roots
-        };
-        let mut st = conn.prepare(
-            "SELECT DISTINCT p.name FROM pkg_files f \
-             JOIN packages p ON p.id = f.pkg_id \
-             WHERE p.state = 'installed' AND f.path = ?1 AND f.kind != 'd' \
-             ORDER BY p.name",
-        )?;
-        st.bind_blob(1, path)?;
-        let mut names = Vec::new();
-        while st.step_row()? {
-            names.push(st.col_text(0));
-        }
-        Ok(Some(names))
-    }
-
-    /// Indexed O(M log N) lookup returning the names of installed packages
-    /// (excluding `exclude`) that own any non-directory path present in
-    /// `staged`. Returns `Ok(None)` for legacy non-SQLite roots.
-    pub fn find_colliding_installed_pkgs(
-        &self,
-        staged: &[StagedPkg],
-        exclude: &std::collections::HashSet<&str>,
-    ) -> Result<Option<std::collections::BTreeSet<String>>> {
-        let Some(conn) = &self.conn else {
-            return Ok(None);
-        };
-        if self.installed.is_empty() || self.installed.keys().all(|k| exclude.contains(k.as_str())) {
-            return Ok(Some(std::collections::BTreeSet::new()));
-        }
-        let mut st = conn.prepare(
-            "SELECT DISTINCT p.name FROM pkg_files f \
-             JOIN packages p ON p.id = f.pkg_id \
-             WHERE f.path = ?1 AND p.state = 'installed' AND f.kind != 'd'",
-        )?;
-        let mut out = std::collections::BTreeSet::new();
-        for sp in staged {
-            for r in &sp.recs {
-                if r.is_dir() {
-                    continue;
-                }
-                st.bind_blob(1, &r.path)?;
-                while st.step_row()? {
-                    let name = st.col_text(0);
-                    if !exclude.contains(name.as_str()) {
-                        out.insert(name);
-                    }
-                }
-                st.reset();
-            }
-        }
-        Ok(Some(out))
-    }
-
-    /// True if `state.db` contains any `'staged'` or `'removing'` rows (a
-    /// pure read-only check so clean `open()` avoids starting a write tx).
-    pub fn has_non_installed(&self) -> Result<bool> {
-        let Some(conn) = &self.conn else { return Ok(false) };
-        let mut st = conn.prepare("SELECT 1 FROM packages WHERE state != 'installed' LIMIT 1")?;
-        st.step_row()
-    }
-
-    /// Indexed O(M log N) lookup returning the names of installed packages
-    /// (excluding `exclude`) that own any non-directory path in `paths`.
-    /// Returns `Ok(None)` for legacy non-SQLite roots.
-    pub fn find_colliding_paths(
-        &self,
-        paths: &[&[u8]],
-        exclude: &std::collections::HashSet<&str>,
-    ) -> Result<Option<std::collections::BTreeSet<String>>> {
-        let Some(conn) = &self.conn else {
-            return Ok(None);
-        };
-        if self.installed.is_empty() || self.installed.keys().all(|k| exclude.contains(k.as_str())) {
-            return Ok(Some(std::collections::BTreeSet::new()));
-        }
-        let mut st = conn.prepare(
-            "SELECT DISTINCT p.name FROM pkg_files f \
-             JOIN packages p ON p.id = f.pkg_id \
-             WHERE f.path = ?1 AND p.state = 'installed' AND f.kind != 'd'",
-        )?;
-        let mut out = std::collections::BTreeSet::new();
-        for p in paths {
-            st.bind_blob(1, p)?;
-            while st.step_row()? {
-                let name = st.col_text(0);
-                if !exclude.contains(name.as_str()) {
-                    out.insert(name);
-                }
-            }
-            st.reset();
-        }
-        Ok(Some(out))
-    }
-
-    /// Returns the subset of `dirs` still owned by at least one installed
-    /// package not in `exclude`. Returns `Ok(None)` for legacy roots.
-    pub fn find_owned_dirs(
-        &self,
-        dirs: &[&[u8]],
-        exclude: &std::collections::HashSet<&str>,
-    ) -> Result<Option<std::collections::HashSet<Vec<u8>>>> {
-        let Some(conn) = &self.conn else {
-            return Ok(None);
-        };
-        let mut out = std::collections::HashSet::new();
-        if dirs.is_empty() || self.installed.is_empty() || self.installed.keys().all(|k| exclude.contains(k.as_str())) {
-            return Ok(Some(out));
-        }
-        let mut st = conn.prepare(
-            "SELECT p.name FROM pkg_files f \
-             JOIN packages p ON p.id = f.pkg_id \
-             WHERE f.path = ?1 AND p.state = 'installed' AND f.kind = 'd'",
-        )?;
-        for d in dirs {
-            st.bind_blob(1, d)?;
-            while st.step_row()? {
-                let name = st.col_text(0);
-                if !exclude.contains(name.as_str()) {
-                    out.insert(d.to_vec());
-                    break;
-                }
-            }
-            st.reset();
-        }
-        Ok(Some(out))
-    }
-
-    /// Returns the subset of `dirs` that exist in the current `'installed'` set
-    /// (either as an explicit directory record or as an ancestor of any file
-    /// record, using O(log N) B-tree index probes on `pkg_files.path`).
-    /// Intended for use after `commit_switch` when matching triggers.
-    pub fn dir_present_in_installed(
-        &self,
-        dirs: &[&[u8]],
-    ) -> Result<Option<std::collections::HashSet<Vec<u8>>>> {
-        let Some(conn) = &self.conn else {
-            return Ok(None);
-        };
-        let mut out = std::collections::HashSet::new();
-        if dirs.is_empty() {
-            return Ok(Some(out));
-        }
-        let mut st_exact = conn.prepare(
-            "SELECT 1 FROM pkg_files f \
-             JOIN packages p ON p.id = f.pkg_id \
-             WHERE f.path = ?1 AND f.kind = 'd' AND p.state = 'installed' LIMIT 1",
-        )?;
-        let mut st_prefix = conn.prepare(
-            "SELECT 1 FROM pkg_files f \
-             JOIN packages p ON p.id = f.pkg_id \
-             WHERE f.path >= ?1 AND f.path < ?2 AND p.state = 'installed' LIMIT 1",
-        )?;
-        let mut lo = Vec::new();
-        let mut hi = Vec::new();
-        for &d in dirs {
-            if d.is_empty() {
-                out.insert(Vec::new());
-                continue;
-            }
-            st_exact.bind_blob(1, d)?;
-            let found = st_exact.step_row()?;
-            st_exact.reset();
-            if found {
-                out.insert(d.to_vec());
-                continue;
-            }
-            // In BLOB byte order, '/' is 0x2F and '0' is 0x30, so
-            // [d || '/', d || '0') matches every path with prefix `d/`.
-            lo.clear();
-            lo.extend_from_slice(d);
-            lo.push(b'/');
-            hi.clear();
-            hi.extend_from_slice(d);
-            hi.push(b'0');
-            st_prefix.bind_blob(1, &lo)?;
-            st_prefix.bind_blob(2, &hi)?;
-            let has_child = st_prefix.step_row()?;
-            st_prefix.reset();
-            if has_child {
-                out.insert(d.to_vec());
-            }
-        }
-        Ok(Some(out))
-    }
-
-    /// Returns all directory paths (explicit dirs, file parent dirs, and their
-    /// ancestors) in the current `'installed'` set. Called only when a changed
-    /// package declares triggers.
-    pub fn list_all_installed_dirs(&self) -> Result<Option<std::collections::BTreeSet<Vec<u8>>>> {
-        let Some(conn) = &self.conn else {
-            return Ok(None);
-        };
-        let mut out = std::collections::BTreeSet::new();
-        out.insert(Vec::new());
-        let mut st = conn.prepare(
-            "SELECT f.path, f.kind FROM pkg_files f \
-             JOIN packages p ON p.id = f.pkg_id \
-             WHERE p.state = 'installed'",
-        )?;
-        while st.step_row()? {
-            let path = st.col_blob(0);
-            let kind = st.col_text(1);
-            let mut d = if kind == "d" {
-                path
-            } else {
-                crate::rootfs::split_rel(&path).0.to_vec()
-            };
-            while !d.is_empty() && out.insert(d.clone()) {
-                d = crate::rootfs::split_rel(&d).0.to_vec();
-            }
-        }
-        Ok(Some(out))
-    }
-
-
-    /// Checks whether `name` is installed or provided by an installed package.
-    pub fn is_installed_or_provided(&self, name: &str) -> bool {
-        if self.installed.contains_key(name) {
-            return true;
-        }
-        if let Some(conn) = &self.conn {
-            if let Ok(mut st) = conn.prepare(
-                "SELECT 1 FROM pkg_deps d JOIN packages p ON p.id = d.pkg_id \
-                 WHERE p.state = 'installed' AND d.kind = 'provides' AND d.name = ?1 LIMIT 1",
-            ) {
-                if st.bind_text(1, name).is_ok() {
-                    if let Ok(found) = st.step_row() {
-                        return found;
-                    }
-                }
-            }
-        }
-        self.installed.values().any(|ip| ip.meta.info.provides.iter().any(|p| p.name == name))
-    }
-
-    /// Commits all state transitions of a switch (`Install`, `Upgrade`, `Remove`),
-    /// updates `world`, and purges non-installed rows in a single atomic SQLite
-    /// transaction, then updates the plain-text `world` mirror.
-    ///
-    /// Idempotent so crash recovery can re-run it safely. Replaces per-package
-    /// SQLite commits during the switch (cutting ~40-250 commits down to 1).
-    pub fn commit_switch(&self, ops: &[Op], world: &[Dependency]) -> Result<()> {
-        let formatted = format_world(world);
-        let specs: Vec<&str> = formatted.lines().filter(|l| !l.is_empty()).collect();
-        if let Some(conn) = &self.conn {
-            conn.transaction(|c| {
-                let mut st_rem = c.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND version = ?2")?;
-                let mut st_ins = c.prepare("UPDATE packages SET state = 'installed' WHERE name = ?1 AND version = ?2")?;
-                for op in ops {
-                    match op {
-                        Op::Install { name, new } => {
-                            st_ins.bind_text(1, name)?;
-                            st_ins.bind_text(2, new)?;
-                            st_ins.execute()?;
-                        }
-                        Op::Upgrade { name, old, new } => {
-                            st_rem.bind_text(1, name)?;
-                            st_rem.bind_text(2, old)?;
-                            st_rem.execute()?;
-                            st_ins.bind_text(1, name)?;
-                            st_ins.bind_text(2, new)?;
-                            st_ins.execute()?;
-                        }
-                        Op::Remove { name, old } => {
-                            st_rem.bind_text(1, name)?;
-                            st_rem.bind_text(2, old)?;
-                            st_rem.execute()?;
-                        }
-                    }
-                }
-                c.exec_batch("DELETE FROM packages WHERE state != 'installed';")?;
-                c.exec_batch("DELETE FROM world;")?;
-                let mut st_w = c.prepare("INSERT OR IGNORE INTO world (spec) VALUES (?1)")?;
-                for s in &specs {
-                    st_w.bind_text(1, s)?;
-                    st_w.execute()?;
-                }
-                Ok(())
-            })?;
-        }
-        write_atomic(&Self::state(&self.root).join("world"), formatted.as_bytes())?;
-        Ok(())
-    }
-
-    /// Marks `(name, new_ver)` as `'installed'` and (if upgrading) `(name, old_ver)`
-    /// as `'removing'` atomically in `state.db`.
-    pub fn mark_installed(&self, name: &str, new_ver: &str, old_ver: Option<&str>) -> Result<()> {
-        let conn = self.conn.as_ref().ok_or_else(|| Error::Msg("database is read-only".into()))?;
-        conn.transaction(|c| {
-            if let Some(old) = old_ver {
-                let mut st = c.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND version = ?2")?;
-                st.bind_text(1, name)?;
-                st.bind_text(2, old)?;
-                st.execute()?;
-            }
-            let mut st = c.prepare("UPDATE packages SET state = 'installed' WHERE name = ?1 AND version = ?2")?;
-            st.bind_text(1, name)?;
-            st.bind_text(2, new_ver)?;
-            st.execute()?;
-            Ok(())
-        })
-    }
-
-    /// Marks `(name, old_ver)` as `'removing'` in `state.db`.
-    pub fn mark_removed(&self, name: &str, old_ver: &str) -> Result<()> {
-        let conn = self.conn.as_ref().ok_or_else(|| Error::Msg("database is read-only".into()))?;
-        let mut st = conn.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND version = ?2")?;
-        st.bind_text(1, name)?;
-        st.bind_text(2, old_ver)?;
-        st.execute()
-    }
-
-    /// Writes `world` atomically to `state.db` AND mirrors it to
-    /// `ROOT/var/lib/vpm/world` for shell scripts (installers, `valence-wish`,
-    /// `valence-first-boot`, `qemu-test.py`).
-    pub fn save_world(&self, world: &[Dependency]) -> Result<()> {
-        let formatted = format_world(world);
-        let specs: Vec<&str> = formatted.lines().filter(|l| !l.is_empty()).collect();
-        if let Some(conn) = &self.conn {
-            conn.transaction(|c| {
-                c.exec_batch("DELETE FROM world;")?;
-                let mut st = c.prepare("INSERT OR IGNORE INTO world (spec) VALUES (?1)")?;
-                for s in &specs {
-                    st.bind_text(1, s)?;
-                    st.execute()?;
-                }
-                Ok(())
-            })?;
-        }
-        write_atomic(&Self::state(&self.root).join("world"), formatted.as_bytes())?;
-        Ok(())
-    }
-
-    /// Deletes all `'staged'` and `'removing'` package rows (CASCADE removes
-    /// their deps, tags, triggers, scripts and file records).
-    pub fn purge_non_installed(&self) -> Result<()> {
-        let Some(conn) = &self.conn else { return Ok(()) };
-        conn.transaction(|c| {
-            c.exec_batch("DELETE FROM packages WHERE state != 'installed';")
-        })
-    }
-
-    /// Deletes staged rows for a failed transaction before the switch.
-    pub fn delete_staged(&self, ops: &[Op]) -> Result<()> {
-        let Some(conn) = &self.conn else { return Ok(()) };
-        conn.transaction(|c| {
-            let mut st = c.prepare("DELETE FROM packages WHERE name = ?1 AND version = ?2 AND state = 'staged'")?;
-            for op in ops {
-                if let Some(v) = op.new_version() {
-                    st.bind_text(1, op.name())?;
-                    st.bind_text(2, v)?;
-                    st.execute()?;
-                }
-            }
-            Ok(())
-        })
     }
 }
 
@@ -2074,6 +955,8 @@ mod tests {
         m.info.depends = vec![Dependency::parse("so:libc.so.6").unwrap(), Dependency::parse("bar>=2").unwrap()];
         m.info.provides = vec![Dependency::parse("cmd:foo=1.2-r0").unwrap()];
         m.info.install_if = vec![Dependency::parse("x").unwrap(), Dependency::parse("!y").unwrap()];
+        // forms without a text form that reads back the same (§G2 quirk,
+        // an op mask with no text, an empty but present version)
         let d = |n: &str, v: &str, op: u8| Dependency { name: n.into(), version: v.into(), op };
         m.info.recommends = vec![d("foo", "1", 7), d("bar", "2", 12), d("baz", "", 1), d("q\tx", "1\t2", 21)];
         m.triggers = vec!["/usr/share/*".into()];
@@ -2103,150 +986,5 @@ mod tests {
         assert!(p.done.contains("pre:a"));
         assert!(Journal::parse("vpm-journal 1\ninstall a 1\n").is_err());
         assert!(Journal::parse("vpm-journal 1\ninstall ../a 1\nend\n").is_err());
-    }
-
-    #[test]
-    fn sqlite_stage_install_query_and_migrate() {
-        let root = std::env::temp_dir().join(format!("vpm-db-sqlite-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-
-        let mut db = Db::open(&root, true).unwrap();
-        assert!(db.is_sqlite());
-        assert!(Db::db_path(&root).exists());
-
-        let mut meta = PkgMeta::default();
-        meta.info.name = "demo".into();
-        meta.info.version = "1.0-r0".into();
-        meta.info.arch = "x86_64".into();
-        meta.info.description = "demo package".into();
-        meta.info.hashes = vec![0x42; 32];
-        meta.info.depends = vec![Dependency::parse("so:libc.so.6").unwrap()];
-        meta.info.provides = vec![Dependency::parse("cmd:demo=1.0-r0").unwrap()];
-        meta.info.tags = vec!["base".into()];
-        meta.triggers = vec!["/usr/share/demo".into()];
-        meta.replaces_priority = 5;
-        meta.source = "https://example.org/demo-1.0-r0.apk".into();
-
-        let recs = vec![
-            FileRec {
-                kind: RecKind::Dir,
-                mode: 0o755,
-                user: Some("root".into()),
-                group: Some("root".into()),
-                size: 0,
-                mtime: 0,
-                hash: vec![],
-                xattrs: vec![],
-                path: b"usr/bin".to_vec(),
-            },
-            FileRec {
-                kind: RecKind::File(FileKind::Regular),
-                mode: 0o755,
-                user: Some("root".into()),
-                group: None,
-                size: 12,
-                mtime: 100,
-                hash: vec![1, 2, 3, 4],
-                xattrs: vec![(b"security.capability".to_vec(), b"\x01\x00".to_vec())],
-                path: b"usr/bin/demo".to_vec(),
-            },
-            FileRec {
-                kind: RecKind::File(FileKind::Symlink(b"demo".to_vec())),
-                mode: 0o777,
-                user: None,
-                group: None,
-                size: 4,
-                mtime: 100,
-                hash: vec![],
-                xattrs: vec![],
-                path: b"usr/bin/demo2".to_vec(),
-            },
-        ];
-
-        let sp = StagedPkg {
-            meta: meta.clone(),
-            recs: recs.clone(),
-            scripts: vec![("post-install".into(), b"#!/bin/sh\nexit 0\n".to_vec())],
-        };
-        db.stage_packages(&[sp]).unwrap();
-        assert!(db.has_pkg("demo", "1.0-r0").unwrap());
-        db.mark_installed("demo", "1.0-r0", None).unwrap();
-        db.save_world(&[Dependency::parse_world("demo").unwrap()]).unwrap();
-        db.reload().unwrap();
-
-        assert_eq!(db.installed.len(), 1);
-        let ip = &db.installed["demo"];
-        assert_eq!(ip.meta.info, meta.info);
-        assert_eq!(ip.meta.triggers, meta.triggers);
-        assert_eq!(ip.meta.replaces_priority, 5);
-        assert_eq!(ip.meta.source, meta.source);
-        assert_eq!(db.read_pkg_files("demo", "1.0-r0").unwrap(), recs);
-        assert_eq!(db.read_pkg_script("demo", "1.0-r0", "post-install").unwrap(), b"#!/bin/sh\nexit 0\n");
-        assert!(db.has_pkg_script("demo", "1.0-r0", "post-install"));
-        assert!(!db.has_pkg_script("demo", "1.0-r0", "pre-install"));
-        assert!(db.is_installed_or_provided("cmd:demo"));
-        assert_eq!(db.find_path_owners(b"usr/bin/demo").unwrap(), Some(vec!["demo".into()]));
-        assert_eq!(db.find_path_owners(b"usr/bin").unwrap(), Some(vec![]));
-        assert_eq!(fs::read_to_string(Db::state(&root).join("world")).unwrap(), "demo\n");
-
-        // Indexed conflict lookup finds colliding unchanged package and ignores excluded/non-colliding ones
-        let mut other_meta = PkgMeta::default();
-        other_meta.info.name = "other".into();
-        other_meta.info.version = "1.0-r0".into();
-        let colliding_sp = StagedPkg {
-            meta: other_meta.clone(),
-            recs: vec![FileRec {
-                kind: RecKind::File(FileKind::Regular),
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: 1,
-                mtime: 0,
-                hash: vec![9],
-                xattrs: vec![],
-                path: b"usr/bin/demo".to_vec(),
-            }],
-            scripts: vec![],
-        };
-        let clean_sp = StagedPkg {
-            meta: other_meta,
-            recs: vec![FileRec {
-                kind: RecKind::File(FileKind::Regular),
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: 1,
-                mtime: 0,
-                hash: vec![9],
-                xattrs: vec![],
-                path: b"usr/bin/unique".to_vec(),
-            }],
-            scripts: vec![],
-        };
-        let empty_excl = std::collections::HashSet::new();
-        let demo_excl: std::collections::HashSet<&str> = ["demo"].into_iter().collect();
-        assert_eq!(
-            db.find_colliding_installed_pkgs(&[colliding_sp.clone()], &empty_excl).unwrap(),
-            Some(["demo".to_string()].into_iter().collect())
-        );
-        assert_eq!(
-            db.find_colliding_installed_pkgs(&[colliding_sp], &demo_excl).unwrap(),
-            Some(std::collections::BTreeSet::new())
-        );
-        assert_eq!(
-            db.find_colliding_installed_pkgs(&[clean_sp], &empty_excl).unwrap(),
-            Some(std::collections::BTreeSet::new())
-        );
-
-        drop(db);
-
-        // Read-only open sees identical state
-        let ro = Db::open_readonly(&root, false).unwrap();
-        assert!(ro.is_sqlite());
-        assert_eq!(ro.installed.len(), 1);
-        assert_eq!(ro.world.len(), 1);
-        assert_eq!(ro.find_path_owners(b"usr/bin/demo").unwrap(), Some(vec!["demo".into()]));
-
-        let _ = fs::remove_dir_all(&root);
     }
 }

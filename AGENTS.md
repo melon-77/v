@@ -829,15 +829,22 @@ name is a working name. Stage 1, "the engine first ... next to apk and measured 
   older index once a newer was seen, bounded downloads, vpm's own directories out of reach); a review against the
   specification (package choices match apk's on 23 real requests); 1.6 to 2.2 times faster than apk (valence-base
   0.15 to 0.25 s against 0.28 to 0.40 s; 244 packages 5 to 6.5 s against 11 to 12.5 s).
-- Not yet: xbps measured; installed systems using it (the installers, snapshots before changes, a running system's
-  upgrades, apk leaving); a signed timestamp in the index, without which a root that never saw the repository
-  accepts a replayed old index.
+- Measured on 22 November 2026 against apk and xbps (`docs/benchmarks/2026-11-22/`): installing many packages,
+  about twice as fast as apk and 1.2 to 2.2 times xbps's throughput; one-package jobs 1.2 to 4.4 times slower than
+  apk, a fixed cost per run (start-up, reading every record, the syncs), which the rest of phase 10 works on.
+- A record that can't be read stops every change before anything is unpacked; `vpm fix` rebuilds it from the
+  signed package (`vpm/README.md`, "Recovery").
+- Not yet: installed systems using it (the installers, snapshots before changes, a running system's upgrades, apk
+  leaving); a signed timestamp in the index, without which a root that never saw the repository accepts a replayed
+  old index.
 
 Its tests: `cargo test --release` in `vpm/` (the real-data tests read `repo/x86_64`), `vpm/tools/killtest/` and
 `vpm/tools/bench/` (`vpm/tools/README.md`).
 
-**Phase 10 is another developer's since 21 November 2026** (the owner handed it over after stage 1;
-`vpm/HANDOVER.md`): leave `vpm/` and `recipes/vpm` alone unless the owner asks for something there.
+**Phase 10 is back with the owner and the build machine since 22 November 2026.** Another developer had it from
+21 November; their SQLite database as the only record was taken out again, on the owner's decision that the folders
+stay the record. Changes to `vpm/` and `recipes/vpm` come from the build machine; ideas and bug reports go in
+`docs/build-machine-handoff.md`.
 
 ## Testing (required before you commit a change that affects boot or install)
 

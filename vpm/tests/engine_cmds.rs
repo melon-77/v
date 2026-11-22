@@ -299,280 +299,104 @@ f\t0644\troot\troot\t12\t0\t{boot_hash}\t-\t-\tboot/vmlinuz-test
     let _ = fs::remove_dir_all(&root);
 }
 
-#[test]
-fn sqlite_migration_and_indexed_queries() {
-    let root = temp_root("sqlite-migrate");
-    seed_root(&root);
-    let r = root.to_str().unwrap();
 
-    // Before migration: state.db does not exist; read-only command succeeds via legacy fallback
-    // without creating state.db.
-    assert!(!root.join("var/lib/vpm/state.db").exists());
-    let out = Command::new(vpm_bin()).args(["--root", r, "info", "-W", "/usr/bin/hello"]).output().unwrap();
-    assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("owned by hello-1.0-r0"));
-    assert!(!root.join("var/lib/vpm/state.db").exists());
+// ------------------------------------------------------------ phase 10, stage A (build machine, 2026-11-22)
 
-    // First writable command (`cache clean`) triggers automatic migration into state.db and removes .vpm/.
-    let out = Command::new(vpm_bin()).args(["--root", r, "cache", "clean"]).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(root.join("var/lib/vpm/state.db").exists(), "state.db should be created on migration");
-    assert!(!root.join("Programs/hello/1.0-r0/.vpm").exists(), "legacy .vpm/ dir should be removed after migration");
-    assert!(!root.join("var/lib/vpm/state.db-wal").exists(), "DELETE journal mode must leave no -wal sidecar");
-    assert!(!root.join("var/lib/vpm/state.db-shm").exists(), "DELETE journal mode must leave no -shm sidecar");
-
-    // Now every query hits SQLite directly: list, info -e, info -a, info -W (direct + symlink), fix.
-    let out = Command::new(vpm_bin()).args(["--root", r, "list"]).output().unwrap();
-    assert!(out.status.success());
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("hello-1.0-r0 x86_64 {hello} (MIT) [world]"), "stdout: {s}");
-
-    let out = Command::new(vpm_bin()).args(["--root", r, "info", "-e", "cmd:hello"]).output().unwrap();
-    assert!(out.status.success());
-
-    let out = Command::new(vpm_bin()).args(["--root", r, "info", "-a", "hello"]).output().unwrap();
-    assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("usr/bin/hello"));
-
-    // Create a symlink in the live tree and verify indexed `info -W` resolves through it.
-    fs::create_dir_all(root.join("usr/bin")).unwrap();
-    symlink("hello", root.join("usr/bin/hello-link")).unwrap();
-    let out = Command::new(vpm_bin()).args(["--root", r, "info", "-W", "/usr/bin/hello-link"]).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("owned by hello-1.0-r0"));
-
-    // `vpm fix` repairs from SQLite records + Programs/hello/1.0-r0/usr/bin/hello
-    let out = Command::new(vpm_bin()).args(["--root", r, "fix"]).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(root.join("usr/bin/hello").exists());
-
-    // Verify `del` removes hello from SQLite AND updates var/lib/vpm/world mirror
-    let out = Command::new(vpm_bin()).args(["--root", r, "--no-scripts", "del", "hello"]).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(!root.join("Programs/hello").exists());
-    assert_eq!(fs::read_to_string(root.join("var/lib/vpm/world")).unwrap().trim(), "");
-    let out = Command::new(vpm_bin()).args(["--root", r, "list"]).output().unwrap();
-    assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "");
-
-    let _ = fs::remove_dir_all(&root);
+fn sha256_hex(b: &[u8]) -> String {
+    vpm::digest::hex(&vpm::digest::sha256(b))
 }
 
-#[test]
-fn readonly_sqlite_mount_queries_succeed() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let root = temp_root("sqlite-ro");
-    seed_root(&root);
-    let r = root.to_str().unwrap();
-
-    // Migrate to SQLite and populate live tree first
-    let out = Command::new(vpm_bin()).args(["--root", r, "fix"]).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(root.join("var/lib/vpm/state.db").exists());
-
-    // Lock var/lib/vpm and state.db strictly read-only (simulating a live squashfs ISO)
-    let state_dir = root.join("var/lib/vpm");
-    let db_file = state_dir.join("state.db");
-    let progs_dir = root.join("Programs");
-    fs::set_permissions(&db_file, fs::Permissions::from_mode(0o444)).unwrap();
-    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o555)).unwrap();
-    fs::set_permissions(&progs_dir, fs::Permissions::from_mode(0o555)).unwrap();
-
-    let run = |args: &[&str]| {
-        let mut cmd = Command::new(vpm_bin());
-        cmd.args(["--root", r]).args(args);
-        cmd.output().unwrap()
-    };
-
-    let out = run(&["list"]);
-    assert!(out.status.success(), "list failed on RO root: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("hello-1.0-r0"));
-
-    let out = run(&["info", "-a", "hello"]);
-    assert!(out.status.success(), "info -a failed on RO root: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("usr/bin/hello"));
-
-    let out = run(&["info", "-e", "cmd:hello"]);
-    assert!(out.status.success(), "info -e failed on RO root: {}", String::from_utf8_lossy(&out.stderr));
-
-    let out = run(&["info", "-W", "/usr/bin/hello"]);
-    assert!(out.status.success(), "info -W failed on RO root: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("owned by hello-1.0-r0"));
-
-    let out = run(&["--simulate", "del", "hello"]);
-    assert!(out.status.success(), "--simulate del failed on RO root: {}", String::from_utf8_lossy(&out.stderr));
-
-    let out = run(&["--simulate", "fix"]);
-    assert!(out.status.success(), "--simulate fix failed on RO root: {}", String::from_utf8_lossy(&out.stderr));
-
-    // Zero sidecars or temp files created in var/lib/vpm
-    assert!(!state_dir.join("state.db-wal").exists());
-    assert!(!state_dir.join("state.db-shm").exists());
-
-    // Restore permissions before cleanup
-    fs::set_permissions(&progs_dir, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::set_permissions(&db_file, fs::Permissions::from_mode(0o644)).unwrap();
-    let _ = fs::remove_dir_all(&root);
-}
-
-#[test]
-fn sqlite_crash_recovery_rolls_forward() {
-    use std::os::unix::fs::MetadataExt;
-    use vpm::adb::{Dependency, FileKind};
-    use vpm::db::{Db, FileRec, Journal, JournalFile, Op, PkgMeta, RecKind, StagedPkg};
-
-    let make_pkg = |ver: &str, hello_body: &[u8], extra_file: Option<(&[u8], &[u8])>| -> StagedPkg {
-        let mut meta = PkgMeta::default();
-        meta.info.name = "hello".into();
-        meta.info.version = ver.into();
-        meta.info.arch = "x86_64".into();
-        meta.info.origin = "hello".into();
-        meta.info.license = "MIT".into();
-        meta.info.description = format!("hello {ver}");
-        meta.info.provides = vec![Dependency::parse(&format!("cmd:hello={ver}")).unwrap()];
-        let mut recs = vec![
-            FileRec {
-                kind: RecKind::Dir,
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: 0,
-                mtime: 0,
-                hash: vec![],
-                xattrs: vec![],
-                path: b"usr".to_vec(),
-            },
-            FileRec {
-                kind: RecKind::Dir,
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: 0,
-                mtime: 0,
-                hash: vec![],
-                xattrs: vec![],
-                path: b"usr/bin".to_vec(),
-            },
-            FileRec {
-                kind: RecKind::File(FileKind::Regular),
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: hello_body.len() as u64,
-                mtime: 100,
-                hash: vpm::digest::sha256(hello_body).to_vec(),
-                xattrs: vec![],
-                path: b"usr/bin/hello".to_vec(),
-            },
-        ];
-        if let Some((path, body)) = extra_file {
-            recs.push(FileRec {
-                kind: RecKind::File(FileKind::Regular),
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: body.len() as u64,
-                mtime: 100,
-                hash: vpm::digest::sha256(body).to_vec(),
-                xattrs: vec![],
-                path: path.to_vec(),
-            });
-        }
-        StagedPkg { meta, recs, scripts: vec![] }
-    };
-
-    // Case 1: killed right after journal creation (before placed:hello)
-    // Case 2: killed right after placed:hello (Current + state.db already switched, old dir & journal remain)
-    for (tag, already_placed) in [("before-place", false), ("after-place", true)] {
-        let root = temp_root(&format!("sqlite-recover-{tag}"));
-        let r = root.to_str().unwrap();
-
-        let v1_body = b"#!/bin/sh\necho v1\n";
-        let v1_old = b"old-only-tool\n";
-        let v2_body = b"#!/bin/sh\necho v2\n";
-        let v2_new = b"new-only-tool\n";
-
-        let sp1 = make_pkg("1.0-r0", v1_body, Some((b"usr/bin/old-only", v1_old)));
-        let sp2 = make_pkg("2.0-r0", v2_body, Some((b"usr/bin/new-only", v2_new)));
-
-        let db = Db::open(&root, true).unwrap();
-        let p1 = Db::pkg_dir(&root, "hello", "1.0-r0");
-        let p2 = Db::pkg_dir(&root, "hello", "2.0-r0");
-        fs::create_dir_all(p1.join("usr/bin")).unwrap();
-        fs::write(p1.join("usr/bin/hello"), v1_body).unwrap();
-        fs::write(p1.join("usr/bin/old-only"), v1_old).unwrap();
-        fs::create_dir_all(p2.join("usr/bin")).unwrap();
-        fs::write(p2.join("usr/bin/hello"), v2_body).unwrap();
-        fs::write(p2.join("usr/bin/new-only"), v2_new).unwrap();
-
-        fs::create_dir_all(root.join("usr/bin")).unwrap();
-        if already_placed {
-            fs::hard_link(p2.join("usr/bin/hello"), root.join("usr/bin/hello")).unwrap();
-            fs::hard_link(p2.join("usr/bin/new-only"), root.join("usr/bin/new-only")).unwrap();
-            vpm::db::set_current(&root, "hello", "2.0-r0").unwrap();
-        } else {
-            fs::hard_link(p1.join("usr/bin/hello"), root.join("usr/bin/hello")).unwrap();
-            fs::hard_link(p1.join("usr/bin/old-only"), root.join("usr/bin/old-only")).unwrap();
-            vpm::db::set_current(&root, "hello", "1.0-r0").unwrap();
-        }
-
-        db.stage_packages(&[sp1, sp2]).unwrap();
-        db.mark_installed("hello", "1.0-r0", None).unwrap();
-        if already_placed {
-            db.mark_installed("hello", "2.0-r0", Some("1.0-r0")).unwrap();
-        }
-        db.save_world(&[Dependency::parse_world("hello").unwrap()]).unwrap();
-
-        let mut jf = JournalFile::create(
-            &root,
-            Journal {
-                ops: vec![Op::Upgrade { name: "hello".into(), old: "1.0-r0".into(), new: "2.0-r0".into() }],
-                world: vec!["hello".into()],
-                done: Default::default(),
-            },
+/// A root with `cfg-1` installed (`etc/x` a regular file), `cfg-2` unpacked
+/// (`etc/x` a symlink to `x.real`), a live `etc/x` holding `live`, and a
+/// journal that upgrades 1 to 2: any locked command finishes it.
+fn seed_etc_upgrade(root: &Path, live: &[u8]) {
+    for d in ["var/lib/vpm", "var/cache/vpm", "etc/apk", "Programs/cfg/1/.vpm", "Programs/cfg/1/etc", "Programs/cfg/2/.vpm", "Programs/cfg/2/etc"] {
+        fs::create_dir_all(root.join(d)).unwrap();
+    }
+    fs::write(root.join("etc/apk/arch"), "x86_64\n").unwrap();
+    fs::write(root.join("var/lib/vpm/world"), "cfg\n").unwrap();
+    for v in ["1", "2"] {
+        fs::write(
+            root.join(format!("Programs/cfg/{v}/.vpm/info")),
+            format!("name: cfg\nversion: {v}\narch: x86_64\norigin: cfg\nlicense: MIT\ndescription: test\nurl: https://example.org\ninstalled-size: 4096\n"),
         )
         .unwrap();
-        if already_placed {
-            jf.mark("placed:hello").unwrap();
-        }
-        drop(jf);
-        drop(db);
-
-        // Next writable vpm invocation rolls the interrupted switch forward cleanly
-        let out = Command::new(vpm_bin())
-            .args(["--root", r, "--no-scripts", "cache", "clean"])
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{tag} recovery failed: {}", String::from_utf8_lossy(&out.stderr));
-        assert!(
-            String::from_utf8_lossy(&out.stdout).contains("finishing an interrupted switch"),
-            "{tag} stdout: {}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-
-        // Journal & old version cleaned up; Current -> 2.0-r0
-        assert!(!root.join("var/lib/vpm/journal").exists(), "{tag}: journal still present");
-        assert!(!p1.exists(), "{tag}: old version dir 1.0-r0 still present");
-        assert_eq!(fs::read_link(root.join("Programs/hello/Current")).unwrap(), PathBuf::from("2.0-r0"));
-
-        // Live tree matches 2.0-r0 (hard-linked) and old-only file is gone
-        assert_eq!(fs::read(root.join("usr/bin/hello")).unwrap(), v2_body);
-        assert_eq!(fs::read(root.join("usr/bin/new-only")).unwrap(), v2_new);
-        assert!(!root.join("usr/bin/old-only").exists(), "{tag}: old-only file was not removed");
-        let src_md = fs::symlink_metadata(p2.join("usr/bin/hello")).unwrap();
-        let dst_md = fs::symlink_metadata(root.join("usr/bin/hello")).unwrap();
-        assert_eq!((src_md.dev(), src_md.ino()), (dst_md.dev(), dst_md.ino()));
-
-        // SQLite state matches 2.0-r0 only (1.0-r0 rows purged)
-        let ro = Db::open_readonly(&root, false).unwrap();
-        assert!(!ro.has_pkg("hello", "1.0-r0").unwrap(), "{tag}: 1.0-r0 row was not purged from state.db");
-        assert!(ro.has_pkg("hello", "2.0-r0").unwrap());
-        assert_eq!(ro.find_path_owners(b"usr/bin/hello").unwrap(), Some(vec!["hello".into()]));
-        assert_eq!(ro.find_path_owners(b"usr/bin/old-only").unwrap(), Some(vec![]));
-        assert_eq!(ro.find_path_owners(b"usr/bin/new-only").unwrap(), Some(vec!["hello".into()]));
-
-        let _ = fs::remove_dir_all(&root);
     }
+    fs::write(root.join("Programs/cfg/1/etc/x"), b"v1\n").unwrap();
+    fs::write(
+        root.join("Programs/cfg/1/.vpm/files"),
+        format!("d\t0755\troot\troot\t0\t0\t-\t-\t-\tetc\nf\t0644\troot\troot\t3\t0\t{}\t-\t-\tetc/x\n", sha256_hex(b"v1\n")),
+    )
+    .unwrap();
+    fs::write(root.join("Programs/cfg/2/etc/x.real"), b"v2\n").unwrap();
+    symlink("x.real", root.join("Programs/cfg/2/etc/x")).unwrap();
+    fs::write(
+        root.join("Programs/cfg/2/.vpm/files"),
+        format!(
+            "d\t0755\troot\troot\t0\t0\t-\t-\t-\tetc\nf\t0644\troot\troot\t3\t0\t{}\t-\t-\tetc/x.real\nl\t0777\troot\troot\t6\t0\t-\tx.real\t-\tetc/x\n",
+            sha256_hex(b"v2\n")
+        ),
+    )
+    .unwrap();
+    symlink("1", root.join("Programs/cfg/Current")).unwrap();
+    fs::write(root.join("etc/x"), live).unwrap();
+    fs::write(root.join("var/lib/vpm/journal"), "vpm-journal 1\nupgrade cfg 1 2\nworld cfg\nend\n").unwrap();
+}
+
+#[test]
+fn etc_file_that_becomes_a_symlink_is_replaced_only_when_untouched() {
+    // N-3: the admin never changed etc/x, so the new version's symlink replaces it
+    let root = temp_root("etc-symlink-pristine");
+    seed_etc_upgrade(&root, b"v1\n");
+    let out = Command::new(vpm_bin()).args(["--root", root.to_str().unwrap(), "--no-scripts", "--plain", "fix"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(fs::read_link(root.join("etc/x")).unwrap(), Path::new("x.real"));
+    assert!(fs::symlink_metadata(root.join("etc/x.vpm-new")).is_err());
+    assert_eq!(fs::read_link(root.join("Programs/cfg/Current")).unwrap(), Path::new("2"));
+
+    // the admin changed it: kept, and the new version's symlink next to it
+    let root = temp_root("etc-symlink-edited");
+    seed_etc_upgrade(&root, b"admin\n");
+    let out = Command::new(vpm_bin()).args(["--root", root.to_str().unwrap(), "--no-scripts", "--plain", "fix"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(fs::read(root.join("etc/x")).unwrap(), b"admin\n");
+    assert!(fs::symlink_metadata(root.join("etc/x")).unwrap().is_file());
+    assert_eq!(fs::read_link(root.join("etc/x.vpm-new")).unwrap(), Path::new("x.real"));
+}
+
+#[test]
+fn clean_up_walk_runs_only_after_an_interrupted_run() {
+    let root = temp_root("dirty-mark");
+    seed_root(&root);
+    let partial = root.join("Programs/hello/9.0-r0.partial");
+    fs::create_dir_all(&partial).unwrap();
+    let fix = || Command::new(vpm_bin()).args(["--root", root.to_str().unwrap(), "--plain", "fix"]).output().unwrap();
+    // a clean root: the walk over Programs is skipped
+    assert!(fix().status.success());
+    assert!(partial.exists());
+    // the dirty mark (left by a change that didn't finish): cleaned up, mark gone
+    fs::write(root.join("var/lib/vpm/dirty"), b"").unwrap();
+    assert!(fix().status.success());
+    assert!(!partial.exists());
+    assert!(!root.join("var/lib/vpm/dirty").exists());
+    assert!(root.join("Programs/hello/1.0-r0/usr/bin/hello").exists());
+}
+
+#[test]
+fn unreadable_record_blocks_changes_before_any_journal() {
+    // N-1: nothing is changed, and no journal written, while a record can't be read
+    let root = temp_root("broken-record");
+    seed_root(&root);
+    fs::write(root.join("Programs/hello/1.0-r0/.vpm/files"), b"\x00garbled\n").unwrap();
+    let out = Command::new(vpm_bin()).args(["--root", root.to_str().unwrap(), "--plain", "del", "hello"]).output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("can't be read") && err.contains("vpm fix hello"), "{err}");
+    assert!(!root.join("var/lib/vpm/journal").exists());
+    assert!(root.join("Programs/hello/1.0-r0/usr/bin/hello").exists());
+    // with no repository to rebuild it from, fix reports it and repairs nothing
+    let out = Command::new(vpm_bin()).args(["--root", root.to_str().unwrap(), "--plain", "fix"]).output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("hello-1.0-r0") && err.contains("nothing is repaired"), "{err}");
 }

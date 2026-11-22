@@ -219,10 +219,8 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   A new package manager for the installed system, in Rust, reading the same signed `.apk` packages and
   repositories that the builder makes today.
   *A folder per program*, as in GoboLinux: each package is unpacked into a directory of its own,
-  `/Programs/<name>/<version>`, with `Current` pointing at the active version; package metadata, file manifests,
-  scripts and the world live in a SQLite database at `/var/lib/vpm/state.db` (indexed by file path for fast
-  ownership and conflict lookups, using Valence's system `libsqlite3`). Removing a program is removing its folder
-  and its rows in `state.db`. The usual tree (`/usr/bin`, `/usr/lib`, ...) is made from the folders with hard links:
+  `/Programs/<name>/<version>`, and those directories are the record of what is installed. Removing a program
+  is removing its folder. The usual tree (`/usr/bin`, `/usr/lib`, ...) is made from the folders with hard links:
   each file is the same file under a second name, so every program sees ordinary files where it expects them,
   software that was not built for Valence included, and nothing needs patching. (GoboLinux uses symbolic links;
   programs that look for their files next to themselves, such as Qt and Python, then need fixes.) Hard links do
@@ -245,8 +243,14 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   usual tree as hard links, survived 310 upgrades killed at random moments, and installs the base system 1.6 to 2.2
   times faster than apk. Not yet measured against xbps, and no installed system uses it yet; the `-dev`, `-doc` and
   `-lang` parts are folders of their own for now, since they are packages of their own.
-  *Handed over (21 November 2026):* the owner gave phase 10 to another of the project's developers after stage 1;
-  `vpm/HANDOVER.md` is where to start.
+  *Handed over (21 November 2026), taken back (22 November 2026):* the owner gave phase 10 to another of the
+  project's developers after stage 1, and took it back a day later. Their SQLite database as the only record was
+  taken out again: the owner's decision is that the folders stay the record, with a lookup index on the side that
+  vpm can always rebuild from them. Measured on 22 November against apk and xbps (`docs/benchmarks/2026-11-22/`):
+  faster than both when installing many packages, slower than apk on one-package jobs, because of a fixed cost per
+  run. The rest of phase 10, from the build machine: the record back in the folders (with a damaged record rebuilt
+  from the signed package), then the index, then one-package jobs faster than apk, then the "done when" proved
+  and apk taken off installed systems.
 
 ## Not decided yet
 

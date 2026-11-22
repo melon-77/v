@@ -32,7 +32,7 @@ The dependencies are pinned in `Cargo.lock`:
 - zstd;
 - openssl, for SHA-1/256/512 and RSA. It links the system's libcrypto and libssl.
 - ureq with native-tls, for http and https;
-- libc (also used to link the system's `libsqlite3` directly via `build.rs` with no extra crate).
+- libc.
 
 There is no async runtime. Parallel work uses std threads.
 
@@ -96,28 +96,19 @@ errors. In the second case the last line starts with `ERRORS:` instead of
 ## Layout of a root
 
 ```
-ROOT/Programs/<name>/<version>/...         the package's unpacked files only
+ROOT/Programs/<name>/<version>/...         the package's files at their paths
+ROOT/Programs/<name>/<version>/.vpm/info   name, version, arch, origin, depends,
+                                           provides, install-if, identity, ...
+ROOT/Programs/<name>/<version>/.vpm/files  one line per entry: kind, mode,
+                                           owner, size, mtime, hash, target, path
+ROOT/Programs/<name>/<version>/.vpm/scripts/<type>
 ROOT/Programs/<name>/Current -> <version>  the version in use
-ROOT/var/lib/vpm/state.db                  SQLite primary metadata database
-                                           (packages, deps/provides, tags,
-                                           triggers, scripts, indexed files,
-                                           and world)
-ROOT/var/lib/vpm/world                     plain-text mirror of world (kept
-                                           in sync for installers & scripts)
+ROOT/var/lib/vpm/world                     what was asked for
 ROOT/var/lib/vpm/journal                   the switch in progress
 ROOT/var/lib/vpm/lock                      held while vpm (or a script it runs) runs
 ROOT/var/lib/vpm/indexes/                  what each repository offered last
 ROOT/var/cache/vpm/                        downloaded packages and indexes
 ```
-
-`state.db` uses `PRAGMA journal_mode = DELETE; PRAGMA synchronous = NORMAL;` so
-read-only mounts (such as live squashfs ISOs) can open `state.db` cleanly with
-no `-wal`/`-shm` sidecars, while keeping full rollback-journal atomicity paired
-with vpm's `syncfs` barriers (two SQLite commits per transaction: one to stage
-unpacked metadata and one batched commit at the end of the switch). Legacy roots
-with per-package `.vpm/{info,files,scripts}` directories are migrated
-automatically into `state.db` on the first writable open and remain readable by
-read-only commands beforehand.
 
 The usual tree is made from those folders:
 - A regular file outside `etc/` and `boot/` is a **hard link** to its copy
@@ -135,16 +126,13 @@ The usual tree is made from those folders:
   that the admin did not change is replaced; a changed one is kept, and the
   new one is written as `<file>.vpm-new`.
 
-Installed package metadata lives in `state.db` (`packages.state = 'installed'`),
-paired with `Programs/<name>/Current -> <version>` on disk. File ownership
-queries (`vpm info -W`) resolve in O(log N) via `idx_pkg_files_path`.
+A package is installed if and only if `Programs/<name>/Current` exists.
 
 ## The transaction
 
-1. **Open.** Take the lock. Migrate a legacy `.vpm/` root into `state.db` if
-   needed. Finish a leftover journal (see Recovery). Delete `.partial`
-   directories, stale non-installed DB rows, version directories that are not
-   current, and interrupted downloads.
+1. **Open.** Take the lock. Finish a leftover journal (see Recovery).
+   Delete `.partial` directories, version directories that are not current,
+   and interrupted downloads.
 2. **Resolve.** Work out, from the indexes and what is installed, the
    packages the world needs (see Resolution). If nothing changes, stop
    without running commit hooks.
@@ -160,19 +148,18 @@ queries (`vpm info -W`) resolve in O(log N) via `idx_pkg_files_path`.
    - **Unpack:** each package is streamed into
      `Programs/<name>/<version>.partial/`, and every file is checked
      against its hash as it is written. When complete, the directory is
-     renamed to `<version>`, and the worker returns its extracted metadata
-     and file records in memory.
+     renamed to `<version>`.
    - Unsafe content is refused: absolute paths, `..`, anything below one
      of the package's own symlinks, hard links to anything but an earlier
      file of the package, and any entry in vpm's own directories.
-   - Meanwhile, a helper thread keeps flushing the file system.
-5. **Check and stage.** Probe `state.db` via `idx_pkg_files_path` for only
-   the paths introduced by new packages (loading unchanged packages only when
-   a path actually collides, and reusing the in-memory records from unpack
-   with no double read). Refuse if two packages claim the same file under
-   apk's ownership rules (`replaces`, same origin, or identical content).
-   Then stage all unpacked metadata, file manifests, and scripts into
-   `state.db` (`state = 'staged'`) in a single SQLite transaction.
+   - Meanwhile, when the packages hold 32 MiB or more, a helper thread
+     keeps flushing the file system, so that the `syncfs` before the
+     journal finds little left to write. A smaller job does without it:
+     its `syncfs` is cheap anyway.
+5. **Check.** Refuse if two packages claim the same file. The ownership
+   rules follow apk: `replaces`, the same origin, or identical content.
+   Every record the switch will read (the other installed packages', the
+   old versions') must be readable, or nothing is changed (see Recovery).
 6. **Switch.** This is the only step that touches the live tree, and it
    comes last.
    1. `syncfs`, so everything unpacked is on disk. Then write the journal
@@ -236,7 +223,19 @@ disk. A run that finds a journal finishes it first (roll forward):
 - placed packages and scripts that ran are marked in the journal, so they
   are not placed or run again.
 
-Leftover `.partial` and stale version directories are deleted.
+Leftover `.partial` and stale version directories are deleted by the
+next run after an interrupted one: a run that finished a journal, or that
+finds the `var/lib/vpm/dirty` mark, which a change sets before it unpacks
+and removes once it has succeeded. A clean run skips that walk over
+`Programs`.
+
+A record that can't be read (a `.vpm/info` or `.vpm/files` of an installed
+version that is missing or damaged) stops every change before anything is
+unpacked or a journal is written, with a message that names it. `vpm fix`
+rebuilds it from the signed package of that version in the repositories,
+verifying the whole package file first, and then checks the files against
+it. While a record stays unreadable, `vpm fix` repairs nothing: who owns
+which file can't be known.
 
 So an upgrade killed at any point leaves every path either the old or the
 new entry, with a working `/bin/sh`, libc and dynamic loader, and the next
@@ -333,9 +332,9 @@ synthetic edge cases from the spec review match apk too.
 Database and commands:
 - vpm manages its own roots only: no import of an apk-managed system, no
   `apk` database, no `/` without `--initdb` history.
-- `vpm fix` checks hashes of regular files in `Programs/` and repairs the
-  live tree; corrupt `Programs/` files or `state.db` metadata are reported as
-  errors and need a reinstall.
+- `vpm fix` checks hashes of regular files in `Programs/`, repairs the
+  live tree and rebuilds a damaged record from the signed package; corrupt
+  files in `Programs/` itself are reported as errors and need a reinstall.
 - No dot-files (`.list`, `.trigger`...).
 - No `--latest` or pinning to a tagged repository (`name@tag` is refused).
 
@@ -366,12 +365,14 @@ Live tree:
   one package can still route another package's file onto a third's
   without a conflict being reported. The switch refuses only paths that
   resolve into vpm's own directories.
-- Durability is `syncfs` before the journal and at the end. Only process
-  kills were tested, not power loss.
+- Durability is `syncfs` before the journal and at the end; files copied
+  to another file system (`/boot`) are synced together with their
+  directory before the old version is removed. Only process kills were
+  tested, not power loss.
 
 Benchmarks:
-- xbps was not measured. The script exists, but it downloads Void's static
-  binaries and needs approval for that.
+- xbps was measured on 22 November 2026 (`docs/benchmarks/2026-11-22/` in
+  the repository), as was vpm against apk on one-package jobs.
 
 ## Measured
 
@@ -432,6 +433,7 @@ The next speedups are measured but not done:
 - zstd-compressed packages: the repository is deflate today. This helps
   apk even more, which is single-threaded and decompression-bound.
 - Placing packages without scripts on several threads.
+- Keeping the file records in memory instead of reading `.vpm/files` twice.
 
 ## Tests
 

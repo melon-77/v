@@ -40,7 +40,7 @@
 //! 4. owners re-resolved once more; triggers;
 //! 5. `syncfs`, the journal deleted, old version directories deleted.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Read};
@@ -52,7 +52,7 @@ use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::adb::FileKind;
-use crate::db::{self, Db, FileRec, JournalFile, Op, PkgMeta, RecKind, StagedPkg};
+use crate::db::{self, Db, FileRec, Installed, JournalFile, Op, PkgMeta, RecKind};
 use crate::digest::{Alg, Hasher};
 use crate::error::{Error, Result};
 use crate::rootfs::{self, Resolved, RootFs};
@@ -91,22 +91,6 @@ impl PkgState {
     pub fn load(dir: &Path, changed: bool) -> Result<PkgState> {
         Ok(PkgState { meta: db::read_meta(dir)?, recs: db::read_files(dir)?, dir: dir.to_path_buf(), changed })
     }
-
-    /// Loads a package's metadata and file manifest from `Db` (SQLite, or
-    /// legacy `.vpm/` fallback for read-only unmigrated roots).
-    pub fn load_from_db(db: &Db, name: &str, version: &str, changed: bool) -> Result<PkgState> {
-        let meta = db.read_pkg_meta(name, version)?;
-        let recs = db.read_pkg_files(name, version)?;
-        let dir = Db::pkg_dir(&db.root, name, version);
-        Ok(PkgState { meta, dir, recs, changed })
-    }
-
-    /// Constructs a `PkgState` from an in-memory `StagedPkg` (avoiding any
-    /// round-trip read back from disk/SQLite).
-    pub fn from_staged(root: &Path, sp: &StagedPkg, changed: bool) -> PkgState {
-        let dir = Db::pkg_dir(root, sp.meta.name(), sp.meta.version());
-        PkgState { meta: sp.meta.clone(), dir, recs: sp.recs.clone(), changed }
-    }
 }
 
 /// Who owns each non-directory path of the final set, and its directories.
@@ -125,25 +109,6 @@ fn same_entry(a: &FileRec, b: &FileRec) -> bool {
 
 fn replaces(a: &PkgMeta, b: &PkgMeta) -> bool {
     a.info.replaces.iter().any(|d| d.name == b.info.name && d.matches_version(&b.info.version))
-}
-
-/// Chooses the owning package among multiple installed candidates for the same
-/// path, using the same `replaces` / `replaces-priority` / `origin` precedence
-/// as [`ownership`] (used by SQLite-indexed `vpm info -W`).
-pub fn pick_owner<'a>(candidates: &[&'a PkgMeta]) -> Option<&'a PkgMeta> {
-    let mut best: Option<&'a PkgMeta> = None;
-    for &b in candidates {
-        let Some(a) = best else {
-            best = Some(b);
-            continue;
-        };
-        let a_prio = if replaces(a, b) { a.replaces_priority as i64 } else { -1 };
-        let b_prio = if replaces(b, a) { b.replaces_priority as i64 } else { -1 };
-        if b_prio > a_prio || (b_prio == a_prio && !a.info.origin.is_empty() && a.info.origin == b.info.origin) {
-            best = Some(b);
-        }
-    }
-    best
 }
 
 /// Assigns every path to one package, as apk's `apk_pkg_replaces_file`
@@ -268,11 +233,10 @@ fn copy_file_atomic(
         }
         fs::rename(&tmp, dst)?;
         if sync_file {
-            if let Some(par) = dst.parent() {
-                if let Ok(d) = sys::open_dir_nofollow(par) {
-                    let _ = d.sync_all();
-                }
-            }
+            // the rename must reach the disk as well: on another file system
+            // (FAT32 /boot) neither syncfs(root) nor the journal covers it, and
+            // the old version's files are deleted later in the switch (N-2)
+            sync_parent_dir(dst)?;
         }
         Ok(())
     })();
@@ -280,6 +244,20 @@ fn copy_file_atomic(
         let _ = fs::remove_file(&tmp);
     }
     res
+}
+
+/// Makes a rename or creation in `p`'s directory durable (an fsync of the
+/// directory). A file system that cannot fsync a directory (`EINVAL`) has
+/// nothing to sync.
+fn sync_parent_dir(p: &Path) -> io::Result<()> {
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    match File::open(dir).and_then(|d| d.sync_all()) {
+        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        r => r,
+    }
 }
 
 /// Hashes a live file. A final symlink is not followed and only a regular
@@ -323,14 +301,8 @@ fn interpreter(body: &[u8]) -> Option<&[u8]> {
     line.split(|&c| c == b' ' || c == b'\t').find(|w| !w.is_empty())
 }
 
-/// Transactions touching at most this many package records (and running no
-/// scripts) use targeted file/directory `fsync`s instead of whole-filesystem
-/// `syncfs`, preserving crash durability without flushing unrelated dirty pages.
-pub const SMALL_SYNC_LIMIT: usize = 64;
-
 struct Switch<'a> {
     root: PathBuf,
-    db: &'a Db,
     fs: RootFs,
     ids: IdMap,
     j: JournalFile,
@@ -340,9 +312,6 @@ struct Switch<'a> {
     chown: bool,
     dev_checked: bool,
     deferred: Vec<Deferred>,
-    small_tx: bool,
-    touched_dirs: HashSet<PathBuf>,
-    copied_files: Vec<PathBuf>,
 }
 
 impl<'a> Switch<'a> {
@@ -445,10 +414,11 @@ impl<'a> Switch<'a> {
                 return Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))))
             }
             Ok(m) if is_etc(&r.path) => {
-                // If v1 shipped a regular file that the admin never edited and
-                // v2 replaces it with a symlink, replace it cleanly; otherwise
-                // keep the admin's file and write .vpm-new (N-3).
-                let pristine = m.is_file()
+                // A regular file or other node where the new version has a
+                // symlink: replaced when it is exactly the old version's file
+                // (the package turned it into a symlink), kept when the admin
+                // changed or replaced it (N-3).
+                let pristine = m.file_type().is_file()
                     && old.map_or(false, |o| {
                         o.is_regular()
                             && Alg::from_len(o.hash.len())
@@ -524,9 +494,6 @@ impl<'a> Switch<'a> {
     fn copy_to(&mut self, src: &Path, dst: &Path, r: &FileRec) -> io::Result<()> {
         let owner = self.owner_ids(r);
         copy_file_atomic(src, dst, r, self.chown, owner, false, false)?;
-        if self.small_tx {
-            self.copied_files.push(dst.to_path_buf());
-        }
         self.file_placed();
         Ok(())
     }
@@ -603,7 +570,7 @@ impl<'a> Switch<'a> {
         self.fs.ensure_dir(dir, 0o755, 0, 0)?;
         let dst = self.fs.entry(&r.path)?;
         let src = p.dir.join(OsStr::from_bytes(&r.path));
-        let res = match &r.kind {
+        match &r.kind {
             RecKind::File(FileKind::Symlink(t)) => self.place_symlink(t, r, old, &dst),
             RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if is_etc(&r.path) => {
                 self.place_etc(&src, r, old, &dst)
@@ -613,13 +580,7 @@ impl<'a> Switch<'a> {
             }
             // regular files, hard links and device nodes: one inode (EXDEV falls back to copy)
             _ => self.place_link(&src, r, &dst),
-        };
-        if res.is_ok() && self.small_tx {
-            if let Some(par) = dst.host.parent() {
-                self.touched_dirs.insert(par.to_path_buf());
-            }
         }
-        res
     }
 
     fn script(&mut self, key: &str, p: &PkgState, typ: &str, args: &[String]) {
@@ -639,7 +600,7 @@ impl<'a> Switch<'a> {
         if self.j.is_done(key) {
             return;
         }
-        let Some(body) = self.db.read_pkg_script(name, version, typ) else { return };
+        let Some(body) = db::read_script(dir, typ) else { return };
         if !self.opts.no_scripts {
             if defer_ok {
                 if let Some(interp) = interpreter(&body) {
@@ -823,14 +784,7 @@ impl<'a> Switch<'a> {
     /// what the old version put there (same inode, content or link target);
     /// anything else was changed locally and is kept. Then its directories
     /// that no package has, if empty.
-    fn remove_old(
-        &mut self,
-        o: &PkgState,
-        own: &Ownership,
-        keep: &HashSet<Vec<u8>>,
-        changed_names: &HashSet<&str>,
-        modified: &mut HashSet<Vec<u8>>,
-    ) {
+    fn remove_old(&mut self, o: &PkgState, own: &Ownership, keep: &HashSet<Vec<u8>>, modified: &mut HashSet<Vec<u8>>) {
         let mut dirs: BTreeSet<(usize, Vec<u8>)> = BTreeSet::new();
         for r in &o.recs {
             if r.is_dir() {
@@ -845,15 +799,6 @@ impl<'a> Switch<'a> {
             let Ok(Some(e)) = self.fs.entry_if_dir_exists(&r.path) else { continue };
             if keep.contains(&e.canon) {
                 continue;
-            }
-            // In SQLite mode unchanged packages aren't all loaded into `keep`;
-            // verify no unchanged package owns the canonical path via the index.
-            if self.db.is_sqlite() && e.canon != r.path {
-                if let Ok(Some(owners)) = self.db.find_path_owners(&e.canon) {
-                    if owners.iter().any(|n| !changed_names.contains(n.as_str())) {
-                        continue;
-                    }
-                }
             }
             let Ok(m) = fs::symlink_metadata(&e.host) else { continue };
             let ours = match &r.kind {
@@ -883,14 +828,7 @@ impl<'a> Switch<'a> {
                 continue;
             }
             match fs::remove_file(&e.host) {
-                Ok(()) => {
-                    self.rep.removed += 1;
-                    if self.small_tx {
-                        if let Some(par) = e.host.parent() {
-                            self.touched_dirs.insert(par.to_path_buf());
-                        }
-                    }
-                }
+                Ok(()) => self.rep.removed += 1,
                 Err(err) => self.err(format!("{}: removing /{}: {err}", o.meta.nv(), r.path_lossy())),
             }
         }
@@ -899,21 +837,9 @@ impl<'a> Switch<'a> {
             if keep.contains(&e.canon) {
                 continue;
             }
-            if self.db.is_sqlite() && e.canon != d {
-                if let Ok(Some(owned)) = self.db.find_owned_dirs(&[e.canon.as_slice()], changed_names) {
-                    if !owned.is_empty() {
-                        continue;
-                    }
-                }
-            }
             if let Ok(m) = fs::symlink_metadata(&e.host) {
                 if m.is_dir() && fs::remove_dir(&e.host).is_ok() {
                     modified.insert(parent_dir(&d));
-                    if self.small_tx {
-                        if let Some(par) = e.host.parent() {
-                            self.touched_dirs.insert(par.to_path_buf());
-                        }
-                    }
                 }
             }
         }
@@ -922,33 +848,6 @@ impl<'a> Switch<'a> {
 
     fn sync(&self) -> Result<()> {
         sys::sync_fs(&File::open(&self.root)?)?;
-        Ok(())
-    }
-
-    /// Targeted durability barrier for small, script-free transactions:
-    /// flushes copied files, touched/created directories, `Programs/<name>`,
-    /// and `var/lib/vpm/` (including `state.db` and its WAL) without calling
-    /// whole-filesystem `syncfs`.
-    fn sync_small(&self) -> Result<()> {
-        for p in &self.copied_files {
-            if let Ok(f) = sys::open_regular_nofollow(p) {
-                f.sync_data()?;
-            }
-        }
-        let mut dirs = self.touched_dirs.clone();
-        for c in &self.fs.created_dirs {
-            let host = self.root.join(OsStr::from_bytes(c));
-            if let Some(par) = host.parent() {
-                dirs.insert(par.to_path_buf());
-            }
-            dirs.insert(host);
-        }
-        for d in &dirs {
-            if let Ok(df) = sys::open_dir_nofollow(d) {
-                df.sync_all()?;
-            }
-        }
-        Db::sync_state_dir(&self.root)?;
         Ok(())
     }
 }
@@ -968,93 +867,41 @@ impl<'a> Switch<'a> {
 /// placed this is marked in the journal (`placed:NAME`, made durable with
 /// a syncfs before a post script runs), so that a recovery does not place
 /// them again over what its scripts did; every script run is marked too.
-pub fn switch(
-    db: &Db,
-    j: JournalFile,
-    opts: &SwitchOptions,
-    preloaded: Option<&HashMap<(String, String), StagedPkg>>,
-) -> Result<Report> {
-    let root = &db.root;
+pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFile, opts: &SwitchOptions) -> Result<Report> {
     let plan = j.plan.clone();
     let programs = Db::programs(root);
     let changed: HashMap<&str, &Op> = plan.ops.iter().map(|o| (o.name(), o)).collect();
-    let changed_names: HashSet<&str> = changed.keys().copied().collect();
 
-    // Load new/upgraded packages (from in-memory staged data when available)
-    // and old versions (absent if already deleted).
-    let mut new_pkgs: Vec<PkgState> = Vec::new();
-    for op in &plan.ops {
-        if let Some(v) = op.new_version() {
-            let st = if let Some(sp) = preloaded.and_then(|m| m.get(&(op.name().to_string(), v.to_string()))) {
-                PkgState::from_staged(root, sp, true)
-            } else {
-                PkgState::load_from_db(db, op.name(), v, true)?
-            };
-            new_pkgs.push(st);
-        }
-    }
-    let mut olds: HashMap<String, PkgState> = HashMap::new();
-    for op in &plan.ops {
-        if let Some(v) = op.old_version() {
-            if db.has_pkg(op.name(), v)? {
-                olds.insert(op.name().to_string(), PkgState::load_from_db(db, op.name(), v, true)?);
-            }
-        }
-    }
-
-    // Build the final set: unchanged packages first, then new ones in order.
-    // On SQLite roots, only load unchanged packages whose files collide with a
-    // changed or removed package (O(M log N) via idx_pkg_files_path).
+    // the final set: unchanged packages first, then new ones in order
     let mut pkgs: Vec<PkgState> = Vec::new();
-    if db.is_sqlite() {
-        let non_dir_paths: Vec<&[u8]> = new_pkgs
-            .iter()
-            .chain(olds.values())
-            .flat_map(|p| p.recs.iter())
-            .filter(|r| !r.is_dir())
-            .map(|r| r.path.as_slice())
-            .collect();
-        if let Some(colliding) = db.find_colliding_paths(&non_dir_paths, &changed_names)? {
-            for name in colliding {
-                if let Some(ip) = db.installed.get(&name) {
-                    pkgs.push(PkgState::load_from_db(db, &name, ip.meta.version(), false)?);
-                }
-            }
-        }
-    } else {
-        for (name, ip) in &db.installed {
-            if !changed.contains_key(name.as_str()) {
-                pkgs.push(PkgState::load_from_db(db, name, ip.meta.version(), false)?);
-            }
+    for (name, ip) in installed {
+        if !changed.contains_key(name.as_str()) {
+            pkgs.push(PkgState::load(&ip.dir, false)?);
         }
     }
     let first_new = pkgs.len();
-    pkgs.extend(new_pkgs);
-
-    let (mut own, conflicts) = ownership(&pkgs);
-    if db.is_sqlite() && !olds.is_empty() {
-        let old_dir_paths: Vec<&[u8]> = olds
-            .values()
-            .flat_map(|o| o.recs.iter())
-            .filter(|r| r.is_dir())
-            .map(|r| r.path.as_slice())
-            .collect();
-        if !old_dir_paths.is_empty() {
-            if let Some(owned) = db.find_owned_dirs(&old_dir_paths, &changed_names)? {
-                own.dirs.extend(owned);
+    for op in &plan.ops {
+        if let Some(v) = op.new_version() {
+            pkgs.push(PkgState::load(&programs.join(op.name()).join(v), true)?);
+        }
+    }
+    // old versions (absent if already deleted)
+    let mut olds: HashMap<String, PkgState> = HashMap::new();
+    for op in &plan.ops {
+        if let Some(v) = op.old_version() {
+            let d = programs.join(op.name()).join(v);
+            if d.join(db::META_DIR).exists() {
+                olds.insert(op.name().to_string(), PkgState::load(&d, true)?);
             }
         }
     }
+    let (own, conflicts) = ownership(&pkgs);
     for c in conflicts {
         eprintln!("vpm: warning: {c}");
     }
 
-    let touched_recs: usize = pkgs.iter().skip(first_new).chain(olds.values()).map(|p| p.recs.len()).sum();
-    let small_tx = touched_recs <= SMALL_SYNC_LIMIT;
-
     let mut s = Switch {
         root: root.to_path_buf(),
-        db,
         fs: RootFs::new(root),
         ids: IdMap::load(root),
         j,
@@ -1064,9 +911,6 @@ pub fn switch(
         chown: sys::is_root(),
         dev_checked: false,
         deferred: Vec::new(),
-        small_tx,
-        touched_dirs: HashSet::new(),
-        copied_files: Vec::new(),
     };
     s.crash("start");
 
@@ -1111,13 +955,10 @@ pub fn switch(
                 if keep.is_none() {
                     keep = Some(final_canon(&mut s.fs, &pkgs));
                 }
-                s.remove_old(o, &own, keep.as_ref().unwrap(), &changed_names, &mut modified);
+                s.remove_old(o, &own, keep.as_ref().unwrap(), &mut modified);
             }
             db::set_current(root, &name, p.meta.version())?;
-            if s.small_tx {
-                s.touched_dirs.insert(programs.join(&name));
-            }
-            let runs_post = !opts.no_scripts && !s.j.is_done(&post_key) && db.has_pkg_script(&name, p.meta.version(), post);
+            let runs_post = !opts.no_scripts && !s.j.is_done(&post_key) && db::read_script(&p.dir, post).is_some();
             if runs_post {
                 s.sync()?;
             }
@@ -1145,18 +986,14 @@ pub fn switch(
                 if keep.is_none() {
                     keep = Some(final_canon(&mut s.fs, &pkgs));
                 }
-                s.remove_old(o, &own, keep.as_ref().unwrap(), &changed_names, &mut modified);
+                s.remove_old(o, &own, keep.as_ref().unwrap(), &mut modified);
             }
             match fs::remove_file(programs.join(name).join(db::CURRENT)) {
-                Ok(()) => {
-                    if s.small_tx {
-                        s.touched_dirs.insert(programs.join(name));
-                    }
-                }
+                Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            if o.map_or(false, |_| db.has_pkg_script(name, old, "post-deinstall")) && !opts.no_scripts {
+            if o.map_or(false, |o| db::read_script(&o.dir, "post-deinstall").is_some()) && !opts.no_scripts {
                 s.sync()?;
             }
             s.j.mark_with(&key, false)?;
@@ -1170,11 +1007,10 @@ pub fn switch(
     }
     s.crash("removed");
 
-    // 3. commit all package state flips, world, and old-row purge in one
-    //    atomic SQLite transaction (+ plain-text world mirror)
+    // 3. the world
     let world: Vec<crate::adb::Dependency> =
         plan.world.iter().filter_map(|w| crate::adb::Dependency::parse(w).ok()).collect();
-    db.commit_switch(&plan.ops, &world)?;
+    db::write_atomic(&Db::state(root).join("world"), db::format_world(&world).as_bytes())?;
     s.crash("world");
 
     // 4. owners once more, now that all files (etc/passwd too) are in place
@@ -1201,52 +1037,38 @@ pub fn switch(
         }
     }
 
-    // 5. triggers (§D9, apk's fire_triggers)
+    // 5. triggers (§D9, apk's fire_triggers): a package's trigger script
+    // runs when it was just installed/upgraded or a directory matching one
+    // of its globs was modified; it gets the matching directories
+    // apk's installed directories: every directory of a package and all
+    // their parents
+    let mut installed_dirs: BTreeSet<Vec<u8>> = BTreeSet::new();
+    // the root directory itself ("/") is one of them, as in apk
+    installed_dirs.insert(Vec::new());
+    for p in &pkgs {
+        for r in &p.recs {
+            let mut d = if r.is_dir() { r.path.clone() } else { parent_dir(&r.path) };
+            while !d.is_empty() && installed_dirs.insert(d.clone()) {
+                d = parent_dir(&d);
+            }
+        }
+    }
     for c in &s.fs.created_dirs {
         modified.insert(parent_dir(c));
     }
-    let changed_has_triggers = pkgs
-        .iter()
-        .skip(first_new)
-        .any(|p| !p.meta.triggers.is_empty() && db.has_pkg_script(p.meta.name(), p.meta.version(), "trigger"));
-    let mut installed_dirs: BTreeSet<Vec<u8>> = if db.is_sqlite() && changed_has_triggers {
-        db.list_all_installed_dirs()?.unwrap_or_default()
-    } else {
-        let mut set = BTreeSet::new();
-        set.insert(Vec::new());
-        for p in &pkgs {
-            for r in &p.recs {
-                let mut d = if r.is_dir() { r.path.clone() } else { parent_dir(&r.path) };
-                while !d.is_empty() && set.insert(d.clone()) {
-                    d = parent_dir(&d);
-                }
-            }
-        }
-        if db.is_sqlite() {
-            let missing: Vec<&[u8]> = modified.iter().filter(|d| !set.contains(*d)).map(|d| d.as_slice()).collect();
-            if !missing.is_empty() {
-                if let Some(present) = db.dir_present_in_installed(&missing)? {
-                    set.extend(present);
-                }
-            }
-        }
-        set
-    };
-    installed_dirs.insert(Vec::new());
-
-    let match_triggers = |meta: &PkgMeta, pkg_changed: bool| -> Option<Vec<String>> {
-        if meta.triggers.is_empty() || !db.has_pkg_script(meta.name(), meta.version(), "trigger") {
-            return None;
+    for p in &pkgs {
+        if p.meta.triggers.is_empty() || db::read_script(&p.dir, "trigger").is_none() {
+            continue;
         }
         let mut pending = false;
         let mut args: Vec<String> = Vec::new();
         for d in &installed_dirs {
             let is_mod = modified.contains(d);
-            if !pkg_changed && !is_mod {
+            if !p.changed && !is_mod {
                 continue;
             }
             let rooted = [b"/".as_slice(), d].concat();
-            for t in &meta.triggers {
+            for t in &p.meta.triggers {
                 let (only_changed, g) = match t.strip_prefix('+') {
                     Some(g) => (true, g),
                     None => (false, t.as_str()),
@@ -1261,33 +1083,15 @@ pub fn switch(
                 break;
             }
         }
-        pending.then_some(args)
-    };
-
-    for (name, ip) in &db.installed {
-        if changed.contains_key(name.as_str()) {
-            continue;
-        }
-        if let Some(args) = match_triggers(&ip.meta, false) {
-            let key = format!("trigger:{name}");
-            let dir = Db::pkg_dir(root, name, ip.meta.version());
-            s.script_at(&key, name, ip.meta.version(), &dir, "trigger", &args, false);
-        }
-    }
-    for p in pkgs.iter().skip(first_new) {
-        if let Some(args) = match_triggers(&p.meta, true) {
+        if pending {
             let key = format!("trigger:{}", p.meta.name());
             s.script(&key, p, "trigger", &args);
         }
     }
     s.crash("triggers");
 
-    // 6. durable, then forget the journal and old version dirs
-    if s.small_tx && s.rep.scripts == 0 {
-        s.sync_small()?;
-    } else {
-        s.sync()?;
-    }
+    // 6. durable, then forget the journal and the old versions
+    s.sync()?;
     let Switch { j, rep, .. } = s;
     j.remove(root)?;
     for op in &plan.ops {

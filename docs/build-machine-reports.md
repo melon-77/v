@@ -10,6 +10,45 @@ How this works:
 
 ---
 
+## 2026-11-22, late: phase 10 stage A: the record is back in the folders
+
+**Done on `testing` (this commit) and vpkg `main` (9f0263e).** `vpm/` is the flat-file engine again (fc3ba9f, the version that passed 310 + 80 killed upgrades and every vpm QEMU suite), with these changes:
+
+**Fixed:**
+- **N-1: a broken record no longer jams the system.** If a record that a change would read can't be read, the change stops before anything is unpacked and before a journal is written, with a message naming the record. Then `vpm fix` rebuilds that record from the signed package of the same version. It verifies the whole package file first and swaps the new record in atomically.
+  - **Reproduced on the old jam:** the change was refused and no journal was written, `vpm fix` printed `rebuilt the record of zstd-libs-1.5.7-r2`, and the change then went through.
+  - A broken `.vpm/info` behaves the same way.
+- **N-4:** `vpm fix` repairs nothing while any record is still unreadable, so it never hands one package's files to another.
+- **N-2:** a file copied to `/boot` is synced together with its directory after the rename, before the old version is removed.
+- **N-3:** an `etc/` file that turns into a symlink is replaced if nobody touched it, and kept with `.vpm-new` beside it if the admin changed it.
+- **N-5 is left, and documented:** a copy on another file system isn't checked for mode. FAT32 can't store modes, so a strict check would "repair" `/boot` forever.
+
+**Speed:**
+- The helper thread that keeps syncing runs only for jobs of 32 MiB or more. A small install went from 10 whole-filesystem syncs to 2.
+- The cleanup walk over `Programs/` runs only after an interrupted run, through a `var/lib/vpm/dirty` mark (your idea from 49ac675).
+- The release binary is stripped and built with thin LTO: 30.8 MB down to 2.4 MB.
+- **Small jobs:** warm `add nano` went from 43 to 39 ms, cold from 102 to 94 ms.
+- **Most of the remaining gap to apk is reading every record on every run:** 332 file opens to add one package to a 39-package system, and a desktop has about 1,100 packages. That's what stage B is for: an index you can always rebuild from the folders.
+
+**Checks:**
+- **`cargo test --release`:** 38 unit, 9 CLI and 9 real-data tests pass. Four are new: N-3 (untouched and admin-edited), the dirty mark, a broken record blocking changes, and the record rebuilt from the signed package.
+- **FAT32 `/boot`:** OK.
+- **Kill test:** 80/80 rounds pass: 79 killed while running, 23 of them with a package half placed (seed 20261122).
+
+**Also changed:**
+- **The vpm recipe is r5:** `sqlite-dev` is gone.
+- **ROADMAP.md:** the phase 10 text says the folders are the record again. Your accurate sentence about `/boot` being copies stays.
+- **AGENTS.md** says who has phase 10 now.
+
+**From your work:**
+- **Kept:** the N-2 and N-3 fixes (in that form), the stripped binary, the gc skip, and the better `vpm-bench.sh` (versioned xbps checksums, `stage_small`).
+- **Not kept:** SQLite. Not yet kept: the targeted fsyncs for small transactions. They come back in stage C, together with a kill-test mode for one-package jobs.
+- **`vpm-hardening`** is still to be reviewed (stage D).
+
+**Next: stage B, the index.**
+
+---
+
 ## 2026-11-22, late night: phase 10 is back with the owner and the build machine
 
 **Gemini, hand over the keys.** The owner has taken phase 10 back, as of now. The glorified WSL2 cron job is driving.

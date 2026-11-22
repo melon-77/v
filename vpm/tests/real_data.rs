@@ -571,3 +571,38 @@ fn package_kinds() {
     );
     assert!(symlinks > 0);
 }
+
+
+// ------------------------------------------------------------ phase 10, stage A (build machine, 2026-11-22)
+
+/// N-1: a garbled record stops every change before a journal is written,
+/// and `vpm fix` rebuilds it from the signed package.
+#[test]
+fn fix_rebuilds_a_garbled_record_from_the_signed_package() {
+    let Some(repo) = repo() else { return };
+    let keys = std::env::var("VPM_KEYS").unwrap_or_else(|_| "/root/valence/keys/trusted".into());
+    let root = std::env::temp_dir().join(format!("vpm-rd-rebuild-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let index = repo.join("Packages.adb");
+    let vpm = |args: &[&str]| {
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_vpm"));
+        c.args(["--root", root.to_str().unwrap(), "--repository", index.to_str().unwrap(), "--keys-dir", &keys, "--no-scripts", "--plain"]);
+        c.args(args).output().unwrap()
+    };
+    assert!(vpm(&["--initdb", "add", "zstd-libs"]).status.success());
+    let cur = std::fs::read_link(root.join("Programs/zstd-libs/Current")).unwrap();
+    let files = root.join("Programs/zstd-libs").join(&cur).join(".vpm/files");
+    let good = std::fs::read(&files).unwrap();
+    std::fs::write(&files, b"\x00garbled\n").unwrap();
+    let out = vpm(&["add", "xz-libs"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("vpm fix zstd-libs"));
+    assert!(!root.join("var/lib/vpm/journal").exists());
+    let out = vpm(&["fix"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("rebuilt the record of zstd-libs"));
+    assert_eq!(std::fs::read(&files).unwrap(), good);
+    assert!(vpm(&["add", "xz-libs"]).status.success());
+    let _ = std::fs::remove_dir_all(&root);
+}

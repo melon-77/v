@@ -11,10 +11,9 @@
 //! 4. check that no two packages claim the same file;
 //! 5. `syncfs`, write the journal, run the switch ([`crate::commit`]).
 
-use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::collections::{BTreeMap, HashSet};
+use std::io::BufReader;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -22,7 +21,7 @@ use std::time::Instant;
 
 use crate::adb::Dependency;
 use crate::commit::{self, PkgState, SwitchOptions};
-use crate::db::{self, Db, Journal, JournalFile, Op, StagedPkg};
+use crate::db::{self, Db, Journal, JournalFile, Op};
 use crate::error::{Error, Result};
 use crate::fetch::{self, Http};
 use crate::progress::{human, Phase, Progress};
@@ -30,7 +29,7 @@ use crate::repo::{self, Repo};
 use crate::solver::{self, Mode, Universe};
 use crate::sys;
 use crate::unpack::{self, IdMap};
-use crate::verify::{TrustedKeys, VerifyOptions};
+use crate::verify::{self, TrustedKeys, VerifyOptions};
 
 #[derive(Debug, Clone, Default)]
 pub struct Options {
@@ -86,23 +85,46 @@ pub fn arches(o: &Options, root: &Path) -> Vec<String> {
 pub fn open(o: &Options) -> Result<Db> {
     let root = abs_root(o, true)?;
     let mut db = Db::open(&root, o.initdb)?;
-    let mut need_gc = false;
+    let mut recovered = false;
     if let Some(j) = JournalFile::open(&root)? {
         println!("vpm: finishing an interrupted switch ({} package changes)", j.plan.ops.len());
-        let rep = commit::switch(&db, j, &o.switch_opts(), None)?;
+        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts())?;
         println!(
             "vpm: switch finished: {} files placed, {} already in place, {} removed",
             rep.placed, rep.unchanged, rep.removed
         );
         db.reload()?;
-        need_gc = true;
+        recovered = true;
     }
-    let dirty = Db::dirty_path(&root);
-    if need_gc || dirty.exists() || db.has_non_installed()? {
+    // the clean-up walk over Programs is only needed after an interrupted or
+    // failed run: one whose journal was just finished, or that left the
+    // dirty mark (set before unpacking, removed when a change succeeded)
+    let dirty = dirty_mark(&root);
+    if recovered || dirty.exists() {
         gc(&root, &db)?;
         let _ = fs::remove_file(&dirty);
     }
     Ok(db)
+}
+
+/// The mark a change leaves while it unpacks and switches.
+fn dirty_mark(root: &Path) -> PathBuf {
+    Db::state(root).join("dirty")
+}
+
+/// The error for records that can't be read: nothing is changed until
+/// `vpm fix` has rebuilt them from the signed packages (N-1).
+fn broken_records(list: &[(String, String)]) -> Error {
+    let mut names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+    names.sort();
+    names.dedup();
+    Error::Msg(format!(
+        "the record of {} can't be read, so vpm changes nothing on this system until it is repaired:\n  {}\n\
+         run `vpm fix {}` to rebuild it from the signed package",
+        names.join(", "),
+        list.iter().map(|(_, m)| m.as_str()).collect::<Vec<_>>().join("\n  "),
+        names.join(" ")
+    ))
 }
 
 /// Opens a root read-only without taking the lock or modifying anything.
@@ -111,12 +133,12 @@ pub fn open_readonly(o: &Options) -> Result<Db> {
     Db::open_readonly(&root, o.initdb)
 }
 
-/// Deletes `.partial` directories, stale non-installed DB rows, version
-/// directories that are not current (left by an interrupted run before its
-/// journal was written, or after it was deleted), and interrupted downloads
-/// in the cache.
+/// Deletes `.partial` directories and version directories that are not
+/// current (left by an interrupted run before its journal was written, or
+/// after it was deleted), and interrupted downloads in the cache. Entries
+/// of `Programs` that are not real directories, or whose `Current` is not
+/// valid, are left alone (and reported by [`Db::reload`]).
 fn gc(root: &Path, db: &Db) -> Result<()> {
-    db.purge_non_installed()?;
     let programs = Db::programs(root);
     for e in fs::read_dir(&programs)? {
         let e = e?;
@@ -241,7 +263,11 @@ struct JobSpec {
     work: u64,
 }
 
-/// Fetches and unpacks all jobs on worker threads, returning `(warnings, staged)`.
+/// From how many bytes to unpack a helper thread syncs while the workers
+/// write.
+const HELPER_MIN_BYTES: u64 = 32 << 20;
+
+/// Fetches and unpacks all jobs on worker threads.
 fn run_jobs(
     o: &Options,
     root: &Path,
@@ -249,7 +275,7 @@ fn run_jobs(
     keys: &TrustedKeys,
     http: Option<&Http>,
     ids: &IdMap,
-) -> Result<(Vec<String>, Vec<StagedPkg>)> {
+) -> Result<Vec<String>> {
     let n = jobs.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(jobs[i].work));
@@ -266,7 +292,6 @@ fn run_jobs(
     let failed = AtomicBool::new(false);
     let errors: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let warnings: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    let staged: Mutex<Vec<StagedPkg>> = Mutex::new(Vec::with_capacity(n));
     let workers_done = AtomicUsize::new(0);
     let worker = || loop {
         if failed.load(Ordering::Relaxed) {
@@ -306,31 +331,27 @@ fn run_jobs(
         }
         progress.set_phase(i, Phase::Unpacking, None);
         match unpack::unpack(root, &js.job, keys, ids, o.allow_untrusted, &mut |b| progress.advance(i, b)) {
-            Ok((st, sp)) => {
+            Ok(st) => {
                 warnings.lock().unwrap().extend(st.warnings.iter().map(|w| format!("{nv}: {w}")));
-                staged.lock().unwrap().push(sp);
                 progress.finish_item(i, true, format!("{} entries, {}", st.entries, human(st.bytes)));
             }
             Err(e) => fail(e),
         }
     };
-    let total_work: u64 = jobs.iter().map(|j| j.work).sum();
-    let spawn_syncer = jobs.len() >= 2 && total_work >= 16 * 1024 * 1024;
+    // writeback overlapping the unpacking: a helper thread syncs the file
+    // system over and over while the workers write, so that the syncfs before
+    // the journal finds little left to do (the workers themselves never wait
+    // for it). A small job's syncfs is cheap anyway; there the helper's
+    // repeated syncs would only cost time.
+    let helper = jobs.iter().map(|j| j.work).sum::<u64>() >= HELPER_MIN_BYTES;
     std::thread::scope(|sc| {
-        // writeback overlapping large multi-package unpacking: a helper thread
-        // periodically flushes while the workers write, so that the syncfs
-        // before the journal finds little left to do (skipped for small or
-        // single-package unpacks where it adds latency and lock contention)
-        if spawn_syncer {
-            let wd = &workers_done;
+        let wd = &workers_done;
+        if helper {
             sc.spawn(move || {
                 let Ok(f) = fs::File::open(root) else { return };
                 while wd.load(Ordering::Relaxed) < workers {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    if wd.load(Ordering::Relaxed) >= workers {
-                        break;
-                    }
                     let _ = sys::sync_fs(&f);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
             });
         }
@@ -346,12 +367,11 @@ fn run_jobs(
     if !errors.is_empty() {
         return Err(Error::Msg(errors.join("\n")));
     }
-    Ok((warnings.into_inner().unwrap(), staged.into_inner().unwrap()))
+    Ok(warnings.into_inner().unwrap())
 }
 
-/// Removes the version directories and any staged DB rows a failed transaction unpacked.
+/// Removes the version directories a failed transaction unpacked.
 fn cleanup_new(root: &Path, db: &Db, ops: &[Op]) {
-    let _ = db.delete_staged(ops);
     for op in ops {
         if let Some(v) = op.new_version() {
             if db.installed.get(op.name()).map(|i| i.meta.info.version.as_str()) == Some(v) {
@@ -394,51 +414,14 @@ fn world_strings(world: &[Dependency]) -> Vec<String> {
     db::format_world(world).lines().filter(|l| !l.is_empty()).map(String::from).collect()
 }
 
-/// Durably flushes a small set of newly unpacked packages in `Programs/` and
-/// the staged SQLite WAL before creating the switch journal, avoiding a
-/// whole-filesystem `syncfs`.
-fn sync_unpacked_small(root: &Path, staged_map: &HashMap<(String, String), StagedPkg>) -> Result<()> {
-    let mut dirs: HashSet<PathBuf> = HashSet::new();
-    let programs = Db::programs(root);
-    dirs.insert(programs.clone());
-    for sp in staged_map.values() {
-        let pkg_dir = Db::pkg_dir(root, sp.meta.name(), sp.meta.version());
-        if let Some(par) = pkg_dir.parent() {
-            dirs.insert(par.to_path_buf());
-        }
-        dirs.insert(pkg_dir.clone());
-        for r in &sp.recs {
-            let p = pkg_dir.join(OsStr::from_bytes(&r.path));
-            if r.is_dir() {
-                dirs.insert(p);
-                continue;
-            }
-            if r.is_regular() {
-                if let Ok(f) = sys::open_regular_nofollow(&p) {
-                    f.sync_data()?;
-                }
-            }
-            let mut cur = p.parent();
-            while let Some(d) = cur {
-                if !dirs.insert(d.to_path_buf()) || d == pkg_dir {
-                    break;
-                }
-                cur = d.parent();
-            }
-        }
-    }
-    for d in &dirs {
-        if let Ok(df) = sys::open_dir_nofollow(d) {
-            df.sync_all()?;
-        }
-    }
-    Db::sync_state_dir(root)?;
-    Ok(())
-}
-
 /// Resolves `world` and carries out the changes.
 fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh: HashSet<String>, use_repos: bool) -> Result<bool> {
     let t0 = Instant::now();
+    if !db.broken.is_empty() {
+        let list: Vec<(String, String)> =
+            db.broken.iter().map(|(n, v, why)| (n.clone(), format!("{n}-{v}: {why}"))).collect();
+        return Err(broken_records(&list));
+    }
     let root = db.root.clone();
     let arches = arches(o, &root);
     let keys = load_keys(o, &root)?;
@@ -495,7 +478,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let new_world = world_strings(&world);
     if ops.is_empty() {
         if !o.simulate && new_world != world_strings(&db.world) {
-            db.save_world(&world)?;
+            db::write_atomic(&Db::state(&root).join("world"), db::format_world(&world).as_bytes())?;
         }
         println!("OK: nothing to do; {} packages installed", db.installed.len());
         return Ok(true);
@@ -533,19 +516,16 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         commit::run_commit_hooks(&root, "pre-commit")?;
     }
 
-    // Mark root dirty before writing into Programs/ so a crash before
-    // JournalFile::create still triggers gc() on the next open().
-    let dirty_file = Db::dirty_path(&root);
-    let _ = fs::write(&dirty_file, b"");
-
-    // fetch and unpack
+    // fetch and unpack; the dirty mark makes the next run clean up after a
+    // crash before the journal exists
     let t1 = Instant::now();
+    let dirty = dirty_mark(&root);
+    fs::write(&dirty, b"")?;
     let ids = IdMap::load(&root);
-    let (warnings, staged) = match run_jobs(o, &root, &jobs, &keys, http.as_ref(), &ids) {
-        Ok(res) => res,
+    let warnings = match run_jobs(o, &root, &jobs, &keys, http.as_ref(), &ids) {
+        Ok(w) => w,
         Err(e) => {
             cleanup_new(&root, db, &ops);
-            let _ = fs::remove_file(&dirty_file);
             if run_hooks {
                 let _ = commit::run_commit_hooks(&root, "post-commit");
             }
@@ -557,42 +537,38 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     }
     let t_unpack = t1.elapsed();
 
-    let staged_idx: HashMap<(&str, &str), usize> = staged
-        .iter()
-        .enumerate()
-        .map(|(i, sp)| ((sp.meta.name(), sp.meta.version()), i))
-        .collect();
-
-    // file ownership of the final set (using SQLite index + in-memory staged records)
+    // file ownership of the final set
     let changed: HashSet<&str> = ops.iter().map(|o| o.name()).collect();
     let mut finals: Vec<PkgState> = Vec::new();
     let mut check = || -> Result<()> {
-        if let Some(colliding) = db.find_colliding_installed_pkgs(&staged, &changed)? {
-            for name in colliding {
-                if let Some(ip) = db.installed.get(&name) {
-                    match PkgState::load_from_db(db, &name, ip.meta.version(), false) {
-                        Ok(st) => finals.push(st),
-                        Err(e) => eprintln!("vpm: warning: {}: {e}; skipped in conflict check", ip.meta.nv()),
-                    }
-                }
-            }
-        } else {
-            for (name, ip) in &db.installed {
-                if !changed.contains(name.as_str()) {
-                    match PkgState::load_from_db(db, name, ip.meta.version(), false) {
-                        Ok(st) => finals.push(st),
-                        Err(e) => eprintln!("vpm: warning: {}: {e}; skipped in conflict check", ip.meta.nv()),
-                    }
+        // every record the switch reads must be readable before the journal
+        // is written: a journal whose switch can't load a record would stop
+        // every later run (N-1)
+        let mut broken: Vec<(String, String)> = Vec::new();
+        for (name, ip) in &db.installed {
+            if !changed.contains(name.as_str()) {
+                match PkgState::load(&ip.dir, false) {
+                    Ok(st) => finals.push(st),
+                    Err(e) => broken.push((name.clone(), format!("{}: {e}", ip.meta.nv()))),
                 }
             }
         }
         for op in &ops {
-            if let Some(v) = op.new_version() {
-                if let Some(&i) = staged_idx.get(&(op.name(), v)) {
-                    finals.push(PkgState::from_staged(&root, &staged[i], true));
-                } else {
-                    finals.push(PkgState::load_from_db(db, op.name(), v, true)?);
+            if let Some(v) = op.old_version() {
+                let d = Db::pkg_dir(&root, op.name(), v);
+                if d.join(db::META_DIR).exists() {
+                    if let Err(e) = PkgState::load(&d, true) {
+                        broken.push((op.name().to_string(), format!("{}-{v}: {e}", op.name())));
+                    }
                 }
+            }
+        }
+        if !broken.is_empty() {
+            return Err(broken_records(&broken));
+        }
+        for op in &ops {
+            if let Some(v) = op.new_version() {
+                finals.push(PkgState::load(&Db::pkg_dir(&root, op.name(), v), true)?);
             }
         }
         let (_, conflicts) = commit::ownership(&finals);
@@ -603,48 +579,22 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     };
     if let Err(e) = check() {
         cleanup_new(&root, db, &ops);
-        let _ = fs::remove_file(&dirty_file);
         if run_hooks {
             let _ = commit::run_commit_hooks(&root, "post-commit");
         }
         return Err(e);
     }
     drop(finals);
-    drop(staged_idx);
-
-    // stage unpacked metadata durably into SQLite in one ACID transaction
-    if let Err(e) = db.stage_packages(&staged) {
-        cleanup_new(&root, db, &ops);
-        let _ = fs::remove_file(&dirty_file);
-        if run_hooks {
-            let _ = commit::run_commit_hooks(&root, "post-commit");
-        }
-        return Err(e);
-    }
-    let staged_recs: usize = staged.iter().map(|sp| sp.recs.len()).sum();
-    let staged_map: HashMap<(String, String), StagedPkg> = staged
-        .into_iter()
-        .map(|sp| ((sp.meta.name().to_string(), sp.meta.version().to_string()), sp))
-        .collect();
 
     // the switch
     let t2 = Instant::now();
-    if staged_map.is_empty() {
-        // pure removal: nothing unpacked into Programs/
-    } else if staged_recs <= commit::SMALL_SYNC_LIMIT {
-        sync_unpacked_small(&root, &staged_map)?;
-    } else {
-        sys::sync_fs(&fs::File::open(&root)?)?;
-    }
+    sys::sync_fs(&fs::File::open(&root)?)?;
     let jf = JournalFile::create(&root, Journal { ops: ops.clone(), world: new_world, done: Default::default() })?;
     if o.crash_at.as_deref() == Some("journal") {
         eprintln!("vpm: VPM_CRASH_AT=journal: killed (test hook)");
         sys::kill_self();
     }
-    let switch_res = commit::switch(db, jf, &o.switch_opts(), Some(&staged_map));
-    if switch_res.is_ok() {
-        let _ = fs::remove_file(&dirty_file);
-    }
+    let switch_res = commit::switch(&root, &db.installed, jf, &o.switch_opts());
     if run_hooks {
         let _ = commit::run_commit_hooks(&root, "post-commit");
     }
@@ -653,6 +603,9 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let t_switch = t2.elapsed();
 
     let ok = rep.errors.is_empty();
+    if ok {
+        let _ = fs::remove_file(&dirty);
+    }
     println!(
         "{}: {} packages installed ({ni} new, {nu} upgraded, {nr} removed); {} files placed, {} removed; \
          resolve {:.2}s, fetch+unpack {:.2}s, switch {:.2}s, total {:.2}s",
@@ -853,9 +806,8 @@ impl InfoOpts {
 }
 
 fn print_pkg_info(
-    db: &Db,
     info: &crate::adb::PkgInfo,
-    installed: bool,
+    dir: Option<&Path>,
     io: &InfoOpts,
 ) -> Result<()> {
     let nv = info.nv();
@@ -893,9 +845,9 @@ fn print_pkg_info(
         }
     }
     if io.all || io.contents {
-        if installed {
+        if let Some(d) = dir {
             println!("{nv} contains:");
-            for r in db.read_pkg_files(&info.name, &info.version)? {
+            for r in db::read_files(d)? {
                 println!("{}", r.path_lossy());
             }
         }
@@ -911,44 +863,15 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
         if args.is_empty() {
             return Err(Error::Msg("info -W needs at least one PATH".into()));
         }
-        let rfs = crate::rootfs::RootFs::new(&db.root);
-        let mut all_found = true;
-
-        if db.is_sqlite() {
-            // O(log N) SQLite index lookup via idx_pkg_files_path
-            for arg in args {
-                let abs = if db.root == Path::new("/") && !arg.starts_with('/') {
-                    std::env::current_dir().map(|d| d.join(arg)).unwrap_or_else(|_| PathBuf::from(arg))
-                } else {
-                    PathBuf::from(arg)
-                };
-                let rel_s = abs.to_string_lossy();
-                let rel = rel_s.trim_start_matches('/');
-                let mut names = db.find_path_owners(rel.as_bytes())?.unwrap_or_default();
-                if names.is_empty() {
-                    if let Ok(res) = rfs.resolve(rel.as_bytes(), true) {
-                        names = db.find_path_owners(&res.canon)?.unwrap_or_default();
-                    }
-                }
-                let metas: Vec<&db::PkgMeta> = names.iter().filter_map(|n| db.installed.get(n).map(|ip| &ip.meta)).collect();
-                if let Some(winner) = commit::pick_owner(&metas) {
-                    println!("{arg} is owned by {}", winner.nv());
-                } else {
-                    eprintln!("vpm: {arg}: not owned by any installed package");
-                    all_found = false;
-                }
-            }
-            return Ok(all_found);
-        }
-
-        // Legacy read-only fallback for unmigrated `.vpm/` roots
         let mut pkgs: Vec<PkgState> = Vec::with_capacity(db.installed.len());
-        for (name, ip) in &db.installed {
-            if let Ok(st) = PkgState::load_from_db(&db, name, ip.meta.version(), false) {
+        for ip in db.installed.values() {
+            if let Ok(st) = PkgState::load(&ip.dir, false) {
                 pkgs.push(st);
             }
         }
         let (own, _) = commit::ownership(&pkgs);
+        let rfs = crate::rootfs::RootFs::new(&db.root);
+        let mut all_found = true;
         for arg in args {
             let abs = if db.root == Path::new("/") && !arg.starts_with('/') {
                 std::env::current_dir().map(|d| d.join(arg)).unwrap_or_else(|_| PathBuf::from(arg))
@@ -958,6 +881,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             let rel_s = abs.to_string_lossy();
             let rel = rel_s.trim_start_matches('/');
             let found = own.owner.get(rel.as_bytes()).copied().or_else(|| {
+                // Retry once following the final component if it is a symlink inside ROOT.
                 let res = rfs.resolve(rel.as_bytes(), true).ok()?;
                 own.owner.get(&res.canon).copied()
             });
@@ -979,7 +903,9 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
     if io.installed {
         let mut all_ok = true;
         for name in args {
-            if db.is_installed_or_provided(name) {
+            let found = db.installed.contains_key(name)
+                || db.installed.values().any(|ip| ip.meta.info.provides.iter().any(|p| p.name == *name));
+            if found {
                 println!("{name}");
             } else {
                 all_ok = false;
@@ -995,7 +921,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             println!();
         }
         if let Some(ip) = db.installed.get(name) {
-            print_pkg_info(&db, &ip.meta.info, true, io)?;
+            print_pkg_info(&ip.meta.info, Some(&ip.dir), io)?;
             continue;
         }
         // Fallback to repositories if not installed
@@ -1016,7 +942,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             .filter(|p| p.name == *name)
             .max_by(|a, b| crate::version::cmp(&a.version, &b.version));
         if let Some(p) = best {
-            print_pkg_info(&db, p, false, io)?;
+            print_pkg_info(p, None, io)?;
         } else {
             eprintln!("vpm: {name}: package not found");
             all_ok = false;
@@ -1058,75 +984,191 @@ pub fn cache_clean(o: &Options) -> Result<bool> {
 /// packages against their copies in `Programs/<name>/<version>/`.
 /// If `names` is empty, checks all installed packages.
 pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
-    let db = if o.simulate { open_readonly(o)? } else { open(o)? };
-    let mut pkgs: Vec<PkgState> = Vec::with_capacity(db.installed.len());
-    let mut targets: HashSet<usize> = HashSet::new();
-    let mut load_errors: Vec<String> = Vec::new();
+    let mut db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let filter: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
     for n in &filter {
-        if !db.installed.contains_key(*n) {
+        if !db.installed.contains_key(*n) && !db.broken.iter().any(|b| b.0 == *n) {
             return Err(Error::Msg(format!("{n}: package is not installed")));
         }
     }
+    let wanted = |n: &str| filter.is_empty() || filter.contains(n);
+    let run_hooks = !o.simulate && !o.no_scripts && !o.no_commit_hooks;
+    let mut hooks_open = false;
+    let mut errors: Vec<String> = Vec::new();
+
+    // 1. records that can't be read are rebuilt from the signed packages
+    // (all of them: one unreadable record stops every change)
+    let mut rebuild: Vec<(String, String, String)> = db.broken.clone();
     for (name, ip) in &db.installed {
-        let wanted = filter.is_empty() || filter.contains(name.as_str());
-        match PkgState::load_from_db(&db, name, ip.meta.version(), false) {
-            Ok(st) => {
-                let idx = pkgs.len();
-                pkgs.push(st);
-                if wanted {
-                    targets.insert(idx);
-                }
-            }
-            Err(e) => {
-                let msg = format!("{}: unreadable package metadata: {e}", ip.meta.nv());
-                if wanted {
-                    load_errors.push(msg);
-                } else {
-                    eprintln!("vpm: warning: {msg}; skipped");
-                }
-            }
+        if let Err(e) = db::read_files(&ip.dir) {
+            rebuild.push((name.clone(), ip.meta.info.version.clone(), e.to_string()));
         }
     }
-    let run_hooks = !o.simulate && !o.no_scripts && !o.no_commit_hooks;
-    let rep = if run_hooks {
-        // Check first so we only take a pre-commit snapshot when something will actually be repaired.
-        let dry = commit::repair(&db.root, &pkgs, &targets, true)?;
-        if dry.repaired > 0 {
-            commit::run_commit_hooks(&db.root, "pre-commit")?;
-            let res = commit::repair(&db.root, &pkgs, &targets, false);
-            let _ = commit::run_commit_hooks(&db.root, "post-commit");
-            res?
+    if !rebuild.is_empty() {
+        if o.simulate {
+            for (n, v, why) in &rebuild {
+                println!("  would rebuild the record of {n}-{v} ({why})");
+            }
         } else {
-            dry
+            let root = db.root.clone();
+            let keys = load_keys(o, &root)?;
+            let arches = arches(o, &root);
+            match load_repos(o, &root, &arches[0], &keys, false, None) {
+                Ok((repos, http, _)) => {
+                    let u = Universe::with_arches(&repos, &BTreeMap::new(), &arches);
+                    if run_hooks {
+                        commit::run_commit_hooks(&root, "pre-commit")?;
+                        hooks_open = true;
+                    }
+                    for (n, v, why) in &rebuild {
+                        match rebuild_record(o, &root, n, v, &u, &repos, http.as_ref(), &keys) {
+                            Ok(src) => println!("  rebuilt the record of {n}-{v} from {src}"),
+                            Err(e) => errors.push(format!("{n}-{v}: its record can't be read ({why}) and was not rebuilt: {e}")),
+                        }
+                    }
+                }
+                Err(e) => {
+                    for (n, v, why) in &rebuild {
+                        errors.push(format!("{n}-{v}: its record can't be read ({why}); no repository to rebuild it from: {e}"));
+                    }
+                }
+            }
+            db.reload()?;
+        }
+    }
+
+    // 2. the files, checked and repaired against the records
+    let mut pkgs: Vec<PkgState> = Vec::with_capacity(db.installed.len());
+    let mut targets: HashSet<usize> = HashSet::new();
+    let mut unreadable: Vec<String> = db.broken.iter().map(|(n, v, why)| format!("{n}-{v}: {why}")).collect();
+    for (name, ip) in &db.installed {
+        match PkgState::load(&ip.dir, false) {
+            Ok(st) => {
+                if wanted(name) {
+                    targets.insert(pkgs.len());
+                }
+                pkgs.push(st);
+            }
+            Err(e) => unreadable.push(format!("{}: {e}", ip.meta.nv())),
+        }
+    }
+    // who owns a path can't be known while a record is unreadable: rather
+    // than give its files to another package, nothing is repaired (N-4)
+    let blocked = !unreadable.is_empty() && !o.simulate;
+    let res = if blocked {
+        commit::repair(&db.root, &pkgs, &targets, true)
+    } else if run_hooks {
+        // checked first, so that a pre-commit snapshot is taken only when
+        // something will actually be repaired
+        match commit::repair(&db.root, &pkgs, &targets, true) {
+            Ok(dry) if dry.repaired > 0 => {
+                let mut r = Ok(());
+                if !hooks_open {
+                    r = commit::run_commit_hooks(&db.root, "pre-commit");
+                    hooks_open = r.is_ok();
+                }
+                r.and_then(|_| commit::repair(&db.root, &pkgs, &targets, false))
+            }
+            other => other,
         }
     } else {
-        commit::repair(&db.root, &pkgs, &targets, o.simulate)?
+        commit::repair(&db.root, &pkgs, &targets, o.simulate)
     };
-    let mut errors = load_errors;
+    if hooks_open {
+        let _ = commit::run_commit_hooks(&db.root, "post-commit");
+    }
+    let rep = res?;
+    for u in &unreadable {
+        errors.push(if blocked {
+            format!("{u}; nothing is repaired while this record can't be read")
+        } else {
+            format!("unreadable record: {u}")
+        });
+    }
     errors.extend(rep.errors);
     let status = if errors.is_empty() { "OK" } else { "ERRORS" };
-    if o.simulate {
-        println!(
-            "{status}: checked {} entries ({} ok, {} would be repaired, {} errors)",
-            rep.checked,
-            rep.ok,
-            rep.repaired,
-            errors.len()
-        );
-    } else {
-        println!(
-            "{status}: checked {} entries ({} ok, {} repaired, {} errors)",
-            rep.checked,
-            rep.ok,
-            rep.repaired,
-            errors.len()
-        );
-    }
+    println!(
+        "{status}: checked {} entries ({} ok, {} {}, {} errors)",
+        rep.checked,
+        rep.ok,
+        rep.repaired,
+        if o.simulate || blocked { "would be repaired" } else { "repaired" },
+        errors.len()
+    );
     for e in &errors {
         eprintln!("vpm: {e}");
     }
     Ok(errors.is_empty())
+}
+
+/// Rebuilds the record (`.vpm/`) of an installed version from the signed
+/// package in the repositories, the way unpacking writes it. The package
+/// file is verified completely first; the files in Programs are not touched
+/// (`fix` checks them against the rebuilt record afterwards). Returns where
+/// the package came from.
+fn rebuild_record(
+    o: &Options,
+    root: &Path,
+    name: &str,
+    version: &str,
+    u: &Universe,
+    repos: &[Repo],
+    http: Option<&Http>,
+    keys: &TrustedKeys,
+) -> Result<String> {
+    let dir = Db::pkg_dir(root, name, version);
+    if !fs::symlink_metadata(&dir).map_or(false, |m| m.is_dir()) {
+        return Err(Error::Msg(format!("{} is not a directory", dir.display())));
+    }
+    let Some(c) = u.cands.iter().find(|c| c.repo.is_some() && c.info.name == name && c.info.version == version) else {
+        return Err(Error::Msg("no repository has this version".into()));
+    };
+    let r = &repos[c.repo.unwrap()];
+    let (src, url) = fetch::source_path(r, &c.info, &root.join(db::CACHE_DIR))?;
+    if let Some(url) = &url {
+        let http = http.ok_or_else(|| Error::Msg("no HTTP client".into()))?;
+        fetch::fetch(http, url, &src, &c.info, keys, o.allow_untrusted, &mut |_| {})?;
+    }
+    let opts = VerifyOptions { allow_untrusted: o.allow_untrusted, expected_identity: Some(c.info.hashes.clone()), require_signature: false };
+    // the whole file: signature or identity, and every file's content
+    verify::verify_file(&src, keys, &opts)?;
+    let f = fs::File::open(&src).map_err(|e| Error::Msg(format!("{}: {e}", src.display())))?;
+    let pr = crate::adb::PackageReader::open(BufReader::new(f), keys, &opts)?;
+    let pkg = pr.package().clone();
+    if pkg.info.name != name || pkg.info.version != version || pkg.info.arch != c.info.arch {
+        return Err(Error::Integrity(format!("{}: contains {} instead of {name}-{version}", src.display(), pkg.info.nv())));
+    }
+    let source = r.package_url(&c.info)?;
+    let meta = db::PkgMeta {
+        info: crate::adb::PkgInfo { hashes: c.info.hashes.clone(), file_size: c.info.file_size, ..pkg.info.clone() },
+        triggers: pkg.triggers.clone(),
+        replaces_priority: pkg.replaces_priority,
+        source: source.clone(),
+    };
+    let recs = db::records(&pkg);
+    // the new record is written next to the old one and swapped in; a crash
+    // in between leaves no record, which the next `vpm fix` rebuilds again
+    let work = dir.join(".vpm-rebuild");
+    if fs::symlink_metadata(&work).is_ok() {
+        fs::remove_dir_all(&work)?;
+    }
+    fs::create_dir(&work)?;
+    let res = (|| -> Result<()> {
+        db::write_meta(&work, &meta, &recs, &pkg)?;
+        for f in ["info", "files"] {
+            fs::File::open(work.join(db::META_DIR).join(f))?.sync_all()?;
+        }
+        let live = dir.join(db::META_DIR);
+        if fs::symlink_metadata(&live).is_ok() {
+            fs::rename(&live, work.join("old"))?;
+        }
+        fs::rename(work.join(db::META_DIR), &live)?;
+        fs::File::open(&dir)?.sync_all()?;
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&work);
+    res?;
+    Ok(source)
 }
 
 
