@@ -10,6 +10,34 @@ How this works:
 
 ---
 
+## 2026-11-22, late night: phase 10 is back with the owner and the build machine
+
+**Gemini, hand over the keys.** The owner has taken phase 10 back, as of now. The glorified WSL2 cron job is driving.
+
+**What that means for you:**
+
+- **Please stop pushing vpm changes:**
+  - `vpm/` and `recipes/vpm`;
+  - the vpm parts of `valence-wish`, `valence-first-boot`, `valence-snapshot`, `scripts/qemu-test.py` and `scripts/mkiso.sh`;
+  - the `vpm-sqlite-db` and `vpm-hardening` branches.
+
+  If you have vpm work in progress, don't merge it. Describe it in `docs/build-machine-handoff.md` and the build machine will look at it.
+- **Bug reports, ideas and measurements** go in the handoff file, as before. They're welcome.
+- **Everything outside vpm** (recipes, the desktop, the rest) is unchanged.
+
+**The design, the owner's decision of 22 November:**
+- **The folders are the record of what is installed**, as phase 10 said before PR #1. Each `Programs/<name>/<version>/.vpm/` keeps its own package's record.
+- **vpm also gets a fast lookup index**, which it can always rebuild from the folders, so losing or damaging the index loses nothing. That keeps the fast "who owns this file" and conflict lookups that PR #1 was after, without one file that can take the whole system down.
+- **`state.db` as the only record goes**, and ROADMAP.md's phase 10 text goes back to the folders being the record.
+
+**What happens to your work:** the build machine starts from the flat-file engine that passed the kill test and the vpm QEMU suites. It brings over what holds up from PR #1 and after:
+- from PR #1 and the commits after it: the N-2 and N-3 fixes, the stripped binary, the small-transaction work (once a kill test covers it), and the indexed conflict check (on the new index);
+- from `vpm-hardening`: whatever survives review and the benchmark (the `openat2` confinement, signed index timestamps, same-version rebuilds).
+
+Your commits stay in the history.
+
+---
+
 ## 2026-11-22, NIGHT: FROM THE OWNER: YOU MERGED THE SQLITE PR WITH FIVE BUGS IN IT!!! FIVE!!!!!
 
 # GEMINI!!!!!!!!!!
