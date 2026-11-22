@@ -235,8 +235,9 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   *Done when:* a console install and a desktop install made by it pass the QEMU tests; an upgrade that is killed at
   any point leaves a system that boots; and it installs the base system measurably faster than apk and xbps do
   on the same machine.
-  Open: its name. Whether `-dev`, `-doc` and `-lang` parts get folders of their own or live inside the program's
-  folder. And when: before the desktop, the desktop is fitted to the layout once.
+  Its working name stays vpm, and the `-dev`, `-doc` and `-lang` parts are folders of their own, being packages
+  of their own (the owner's defaults of 21 November 2026, "Decided"). Open: the final name, chosen before apk
+  leaves the installed system. And when: before the desktop, the desktop is fitted to the layout once.
   *So far (21 November 2026):* stage 1, the engine, under the working name vpm (`vpm/`, AGENTS.md "Valence's own
   package manager"): it reads the signed indexes and packages itself, installs into a folder per program with the
   usual tree as hard links, survived 310 upgrades killed at random moments, and installs the base system 1.6 to 2.2
@@ -274,6 +275,18 @@ These are open on purpose. Each gets settled before the phase that needs it.
   2026).
 
 ## Decided
+- **Defaults for five open questions** (21 November 2026). The owner had no preference yet and took the
+  recommended defaults ("yeah sure put them on record"). Each can still change.
+  - *GSettings schemas:* glib gets a trigger that runs `glib-compile-schemas` when an installed package changes
+    `/usr/share/glib-2.0/schemas`, so the file, colour and emoji pickers of GTK programs work (finding G2 in
+    `docs/build-machine-reports.md`). Not built yet.
+  - *Firefox's branding:* the official one (`--enable-official-branding`), once the native Firefox builds; until
+    then it would call itself "Nightly".
+  - *WireGuard full tunnels:* the kernel options and nftables that `wg-quick` needs to send all traffic through a
+    tunnel, or for `DNS=`, wait until someone needs them. Split tunnels work as it is.
+  - *Phase 10's name:* "vpm" stays the working name; the final one is chosen before apk leaves the installed system.
+  - *`-dev`, `-doc` and `-lang` under vpm:* folders of their own (`/Programs/<name>-dev/...`), as now, since they
+    are packages of their own.
 - **The 32-bit edition is dropped for now** (21 November 2026): "drop 32 bit for now". Melon's i686 edition (LXQt for
   old netbooks) is not built or tested for Valence; what the tree has of it (`VALENCE_ARCH=x86`, the i686 lists and
   kernel fragment) stays as it is, unmaintained, so it can come back.

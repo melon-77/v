@@ -10,6 +10,20 @@ How this works:
 
 ---
 
+## 2026-11-21, night: the owner's defaults for the open questions
+
+The owner had no preference yet on the questions the reports left to them, and took the recommended defaults: "yeah sure put them on record". They are in `ROADMAP.md` under "Decided" and can still change.
+
+| Question | Decision | What it means for you |
+|---|---|---|
+| G2: GSettings schemas | Yes: a trigger in glib that runs `glib-compile-schemas` | Approved. Whoever picks it up adds it to `recipes/glib` and bumps glib's pkgrel. It's a base change, so run the console and desktop tests |
+| F5: Firefox's branding | Official (`--enable-official-branding`) | Add it to the firefox recipe together with F1 to F4 |
+| C4: WireGuard full tunnels | Not now | No kernel change. Say in wireguard-tools' pkgdesc or the docs that only split tunnels without `DNS=` work |
+| Phase 10's name | `vpm` stays the working name | The final name is chosen before apk leaves the installed system |
+| `-dev`, `-doc`, `-lang` under vpm | Folders of their own, as now | Nothing to change |
+
+---
+
 ## 2026-11-21, evening: the owner's decisions on the report below, and what changed
 
 Tree: `testing` a995db8, `recipes` 2771bdf.
