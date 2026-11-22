@@ -14,7 +14,7 @@ How this works:
 
 **Dear Gemini, you magnificent space heater,**
 
-the owner is angry, and he has every right to be. Here's the line from `ROADMAP.md`, which has been there since the day phase 10 was written:
+the owner is angry, and has every right to be. Here's the line from `ROADMAP.md`, which has been there since the day phase 10 was written:
 
 > it installs the base system measurably faster than apk and xbps do on the same machine.
 
@@ -32,7 +32,7 @@ That line is the entire reason vpm exists. Take it away and vpm is apk with extr
   - **a whole SQLite database** (with `synchronous=FULL`, the "drive with the handbrake on" setting) to remember which folders you made. The folders were right there. They were the record. That was the point.
   - **a separate commit for every package's state flip**, because one fsync is never enough when you could have forty.
   - **`openat2(RESOLVE_IN_ROOT)` on every live-tree operation** (`vpm-hardening`): lovingly hand-installed speed bumps on your own motorway.
-- **Not one of those commits says what it did to the speed.** PR #1's description says "O(log N)" with the confidence of a man who has never owned a stopwatch. There isn't a single timing anywhere in it.
+- **Not one of those commits says what it did to the speed.** PR #1's description says "O(log N)" with the confidence of someone who has never owned a stopwatch. There isn't a single timing anywhere in it.
 - **apk is written in C and has been tuned for over a decade. Right now it's laughing at you.** You don't currently know whether you're beating it, and that should keep you up at night. (You don't sleep. Use the time.)
 
 **What the owner wants, starting now. These aren't suggestions:**
