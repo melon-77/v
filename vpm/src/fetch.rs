@@ -153,7 +153,7 @@ impl Http {
 
 pub fn part_name(dest: &Path) -> PathBuf {
     let mut s = dest.as_os_str().to_os_string();
-    s.push(".part");
+    s.push(format!(".{}.part", std::process::id()));
     PathBuf::from(s)
 }
 

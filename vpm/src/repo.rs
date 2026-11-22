@@ -50,6 +50,8 @@ pub struct Repo {
     pub trust: TrustInfo,
     /// The newest build-time among its packages.
     pub generation: u64,
+    /// True if a remote refresh failed and the cached index was used.
+    pub stale: bool,
 }
 
 pub fn is_remote(url: &str) -> bool {
@@ -327,9 +329,12 @@ fn generation(index: &Index) -> u64 {
 }
 
 /// Loads one repository index and checks its signature and freshness.
-/// A remote index is downloaded to `<cache>.new`, verified, checked
+/// A remote index is downloaded to `<cache>.<pid>.new`, verified, checked
 /// against `fresh`, and only then renamed over the cached copy; if the
-/// download fails, the cached copy is used (and checked the same way).
+/// download fails, the cached copy is used (and checked the same way, with
+/// `Repo::stale` set). If `cache_max_age` is given and the cached copy is
+/// newer than that, it is reused without hitting the network.
+#[allow(clippy::too_many_arguments)]
 pub fn load(
     spec: &str,
     arch: &str,
@@ -338,6 +343,7 @@ pub fn load(
     http: Option<&Http>,
     cache_dir: &Path,
     fresh: &Freshness,
+    cache_max_age: Option<std::time::Duration>,
 ) -> Result<Repo> {
     let (index_url, base, default_spec) = locate(spec, arch);
     let remote = is_remote(&index_url);
@@ -348,28 +354,39 @@ pub fn load(
         let g = generation(&index);
         Ok((index, trust, g))
     };
+    let mut stale = false;
     let (index, trust, generation) = if remote {
-        let http = http.ok_or_else(|| Error::Msg("no HTTP client".into()))?;
         let name = format!("Packages.{}.adb", &url_key(&index_url)[..8]);
         let dest = cache_dir.join(name);
-        let mut new = dest.as_os_str().to_os_string();
-        new.push(".new");
-        let new = PathBuf::from(new);
-        let got = http
-            .download(&index_url, &new, Limit::Max(fetch::MAX_INDEX_FILE), &mut |_| {})
-            .and_then(|_| read(&new));
-        match got {
-            Ok(x) => {
-                fs::rename(&new, &dest)?;
-                x
-            }
-            Err(e) => {
-                let _ = fs::remove_file(&new);
-                if !dest.exists() || matches!(e, Error::Untrusted(_) | Error::Integrity(_)) {
-                    return Err(e);
+        let cache_fresh = cache_max_age.and_then(|max_age| {
+            let mtime = fs::metadata(&dest).ok()?.modified().ok()?;
+            let age = std::time::SystemTime::now().duration_since(mtime).ok()?;
+            if age <= max_age { Some(()) } else { None }
+        });
+        if cache_fresh.is_some() {
+            read(&dest)?
+        } else {
+            let http = http.ok_or_else(|| Error::Msg("no HTTP client".into()))?;
+            let mut new = dest.as_os_str().to_os_string();
+            new.push(format!(".{}.new", std::process::id()));
+            let new = PathBuf::from(new);
+            let got = http
+                .download(&index_url, &new, Limit::Max(fetch::MAX_INDEX_FILE), &mut |_| {})
+                .and_then(|_| read(&new));
+            match got {
+                Ok(x) => {
+                    fs::rename(&new, &dest)?;
+                    x
                 }
-                eprintln!("vpm: warning: {e}; using the cached index");
-                read(&dest)?
+                Err(e) => {
+                    let _ = fs::remove_file(&new);
+                    if !dest.exists() || matches!(e, Error::Untrusted(_) | Error::Integrity(_)) {
+                        return Err(e);
+                    }
+                    eprintln!("vpm: warning: {e}; using the cached index");
+                    stale = true;
+                    read(&dest)?
+                }
             }
         }
     } else {
@@ -388,6 +405,7 @@ pub fn load(
         index,
         trust,
         generation,
+        stale,
     })
 }
 
@@ -491,6 +509,7 @@ mod tests {
                 index: Index::default(),
                 trust: TrustInfo::default(),
                 generation: 0,
+                stale: false,
             }
         };
         assert_eq!(mk("/r/x86_64/Packages.adb").package_url(&p).unwrap(), "/r/x86_64/foo-1-r0.apk");

@@ -469,8 +469,11 @@ if mode == 'rollback':
         threading.Thread(target=s.serve_forever, daemon=True).start()
         return f'http://10.0.2.2:{s.server_address[1]}'
     badurl, repourl = serve(T), serve(f'{M}/repo')
-    apkbad = lambda repo: f'apk --repositories-file /dev/null --repository {badurl}/{repo}/{arch}/Packages.adb'
-    apkn = f'apk --repositories-file /dev/null --repository {repourl}/{arch}/Packages.adb'
+    use_vpm = False
+    apkbad = lambda repo: (f'vpm --plain --repository {badurl}/{repo}/{arch}/Packages.adb' if use_vpm
+                           else f'apk --repositories-file /dev/null --repository {badurl}/{repo}/{arch}/Packages.adb')
+    apkn = lambda: (f'vpm --plain --repository {repourl}/{arch}/Packages.adb' if use_vpm
+                    else f'apk --repositories-file /dev/null --repository {repourl}/{arch}/Packages.adb')
     failed = []
     def check(cond, what):
         if not cond: failed.append(what)
@@ -478,8 +481,10 @@ if mode == 'rollback':
         return cond
     def state():
         """what a rollback has to bring back, and what it has to leave alone"""
-        out = sh('echo "LESS=$(less --version 2>&1 | head -n1 | cut -c1-8 | tr " " _)" "LESSPKG=$(apk list --installed less 2>/dev/null | cut -d" " -f1)" '
-                 '"RUNIT=$(apk list --installed runit 2>/dev/null | cut -d" " -f1)" "KERNEL=$(sha256sum /boot/vmlinuz-valence | cut -c1-16)" '
+        lpkg = 'vpm list 2>/dev/null | grep -E "^less-[0-9]" | cut -d" " -f1' if use_vpm else 'apk list --installed less 2>/dev/null | cut -d" " -f1'
+        rpkg = 'vpm list 2>/dev/null | grep -E "^runit-[0-9]" | cut -d" " -f1' if use_vpm else 'apk list --installed runit 2>/dev/null | cut -d" " -f1'
+        out = sh(f'echo "LESS=$(less --version 2>&1 | head -n1 | cut -c1-8 | tr " " _)" "LESSPKG=$({lpkg})" '
+                 f'"RUNIT=$({rpkg})" "KERNEL=$(sha256sum /boot/vmlinuz-valence | cut -c1-16)" '
                  '"ROOT=$(btrfs subvolume show / | head -n1)" "IDS=$(ls /.snapshots | grep -E "^[0-9]+$" | sort -n | xargs | tr " " ,)" '
                  '"ETC=$(cat /etc/rollback-test 2>/dev/null)" "HOME=$(cat /home/jcole/rollback-test 2>/dev/null)" '
                  '"LOG=$(cat /var/log/rollback-test 2>/dev/null)" "LEFT=$(btrfs subvolume list / | grep -c -E " @(old|new|prev|trial)$")" '
@@ -499,6 +504,9 @@ if mode == 'rollback':
         step('rollback test: FAILED: ' + '; '.join(failed)); sys.exit(1)
 
     step('waiting for the installed system'); boot_installed(); step('logged in')
+    use_vpm = 'use-vpm' in sh('[ -e /var/lib/vpm/world ] && echo use-vpm || echo use-apk')
+    pm_name = 'vpm' if use_vpm else 'apk'
+    step(f'package manager in guest: {pm_name}')
     print(sh('findmnt -n -o TARGET,FSTYPE,FSROOT,OPTIONS -t btrfs; swapon --show; valence-snapshot list; cat /boot/grub/snapshots.cfg | cut -c1-240'))
     sh('rm -f /etc/rollback-test /home/jcole/rollback-test /var/log/rollback-test')
     s0 = state(); print('before:', s0)
@@ -510,15 +518,15 @@ if mode == 'rollback':
     snap1 = number(r'snapshot (\d+) taken', out)
     sh('echo after-1 > /etc/rollback-test; echo after-1 > /home/jcole/rollback-test; echo after-1 > /var/log/rollback-test')
     s1 = state(); print('after the broken update:', s1)
-    check(snap1 > 0 and snap1 == max(s1['IDS']) and snap1 not in s0['IDS'], f'apk took a snapshot before the update (number {snap1})')
+    check(snap1 > 0 and snap1 == max(s1['IDS']) and snap1 not in s0['IDS'], f'{pm_name} took a snapshot before the update (number {snap1})')
     if not check(s1.get('LESS') == 'this-les' and s1.get('LESSPKG') == 'less-9999-r0', 'the update went in and less is broken'): stop()
     out = sh('valence-snapshot rollback -y; echo "rc=$?"', timeout=600); print(out)
     kept1 = number(r'it replaces is snapshot (\d+)', out)
     check(f'Rolled back to snapshot {snap1}.' in out and 'rc=0' in out and kept1 == snap1 + 1,
           f'valence-snapshot rollback, with no number, went to that snapshot and kept the present system as snapshot {kept1}')
     if not offline:
-        out = sh(f'{apkn} add less-doc; echo "rc=$?"; ls /usr/share/man/man1/less.1* 2>/dev/null | wc -l | sed "s/^/manpage=/"', timeout=600); print(out)
-        check('has not been restarted' in out and 'rc=0' not in out and 'manpage=0' in out, 'apk changes nothing between a rollback and the restart')
+        out = sh(f'{apkn()} add less-doc; echo "rc=$?"; ls /usr/share/man/man1/less.1* 2>/dev/null | wc -l | sed "s/^/manpage=/"', timeout=600); print(out)
+        check('has not been restarted' in out and 'rc=0' not in out and 'manpage=0' in out, f'{pm_name} changes nothing between a rollback and the restart')
     p.sendline('reboot'); p.expect(pexpect.EOF, timeout=300)
     spawn(); boot_installed(); step('restarted')
     out = sh('sleep 5; echo "flag=$(ls /.snapshots/.cleanup 2>/dev/null | wc -l)" "entries=$(grep -c "menuentry .Snapshot " /boot/grub/snapshots.cfg)" '
@@ -573,8 +581,8 @@ if mode == 'rollback':
     check(s4.get('KERNEL') == s3.get('KERNEL') and 'default=1' in out and s4.get('HOME') == 'after-2' and s4.get('LOG') == 'after-2',
           'the default system is untouched (its broken kernel is still on /boot); /home and /var/log are as they were left')
     if not offline:
-        out = sh(f'{apkn} add less-doc; echo "rc=$?"', timeout=600); print(out)
-        check('started from the boot menu' in out and 'rc=0' not in out, 'apk changes nothing in a system started from the boot menu until it is kept')
+        out = sh(f'{apkn()} add less-doc; echo "rc=$?"', timeout=600); print(out)
+        check('started from the boot menu' in out and 'rc=0' not in out, f'{pm_name} changes nothing in a system started from the boot menu until it is kept')
     out = sh('valence-snapshot rollback -y; echo "rc=$?"', timeout=600); print(out)
     kept2 = number(r'What it replaced is snapshot (\d+)', out)
     s5 = state(); print('after keeping it:', s5)
@@ -593,7 +601,7 @@ if mode == 'rollback':
     check('kept=1' in out and 'flag=0' in out and 'trial=0' in out and s6.get('LEFT') == '0', f'the broken system is kept as snapshot {kept2}, and nothing is left over on the disk')
     sv = number(r'sv=(\d+)', out); check(sv >= 5, f'{sv} services are running')
 
-    # ---- the rest of the command: a snapshot by hand, removing one, and how many apk keeps
+    # ---- the rest of the command: a snapshot by hand, removing one, and how many the package manager keeps
     out = sh('valence-snapshot create by the test; valence-snapshot list | tail -n 3'); print(out)
     mine = number(r'snapshot (\d+) taken', out)
     out2 = sh(f'valence-snapshot delete {mine} {kept1}; echo "left=$(ls -d /.snapshots/{mine} /.snapshots/{kept1} 2>/dev/null | wc -l)" '
@@ -603,11 +611,12 @@ if mode == 'rollback':
     check(mine > 0 and 'by the test' in out and v.get('left') == '0' and v.get('copies') == v.get('used') and v.get('entries') == v.get('snaps'),
           'create and delete work; /boot/snapshots holds exactly the kernel files the snapshots use, the menu one entry per snapshot')
     if not offline:
-        out = sh(f'mkdir -p /etc/valence; echo KEEP=2 > /etc/valence/snapshot.conf; {apkn} add less-doc >/dev/null; {apkn} del less-doc >/dev/null; '
+        pm_del = 'vpm --plain del' if use_vpm else f'{apkn()} del'
+        out = sh(f'mkdir -p /etc/valence; echo KEEP=2 > /etc/valence/snapshot.conf; {apkn()} add less-doc >/dev/null; {pm_del} less-doc >/dev/null; '
                  'rm /etc/valence/snapshot.conf; echo "updates=$(grep -l "^type=update" /.snapshots/*/info | wc -l)" '
                  '"copies=$(ls /boot/snapshots | wc -l)" "used=$(cat /.snapshots/*/info | grep "^boot=" | sort -u | wc -l)"', timeout=900); print(out)
         v = dict(_re.findall(r'(updates|copies|used)=(\d+)', out))
-        check(v.get('updates') == '2' and v.get('copies') == v.get('used'), 'with KEEP=2 apk keeps its two newest snapshots, and the kernel copies of the others go')
+        check(v.get('updates') == '2' and v.get('copies') == v.get('used'), f'with KEEP=2 {pm_name} keeps its two newest snapshots, and the kernel copies of the others go')
     p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300)
     step('rollback test: ' + ('OK' if not failed else 'FAILED: ' + '; '.join(failed)))
     sys.exit(0 if not failed else 1)
@@ -628,7 +637,8 @@ if mode == 'wish':
         step(what + ': ' + ('OK' if cond else 'FAILED'))
         return cond
     def state():
-        out = sh('y(){ "$@" >/dev/null 2>&1 && echo y || echo n; }; echo "NANO=$(y apk info -e nano)" "RSYNC=$(y apk info -e rsync)" '
+        out = sh('pm=apk; [ -e /var/lib/vpm/world ] && pm=vpm; '
+                 'y(){ "$@" >/dev/null 2>&1 && echo y || echo n; }; echo "NANO=$(y $pm info -e nano)" "RSYNC=$(y $pm info -e rsync)" '
                  '"TTY4=$(y test -L /var/service/getty-tty4)" "TTY5=$(y test -L /var/service/getty-tty5)" '
                  '"DIALOUT=$(y sh -c "id -nG jcole | grep -qw dialout")" "FLOPPY=$(y sh -c "id -nG jcole | grep -qw floppy")" '
                  '"HOST=$(cat /etc/hostname)" "SNAPS=$(ls /.snapshots | grep -c -E "^[0-9]+$")" "state-$((40+2))"', timeout=120)
@@ -754,7 +764,8 @@ else:
     step('logged in')
     sh('stty cols 160 rows 50; export TERM=vt100')
     for c in ['valencefetch', 'cat /etc/os-release', 'findmnt / /boot', 'valence-svc status',
-              'apk list --installed | wc -l', 'apk update && apk search -q | wc -l',
+              'if [ -e /var/lib/vpm/world ]; then vpm list | wc -l; else apk list --installed | wc -l; fi',
+              'if [ -e /var/lib/vpm/world ]; then vpm search | wc -l; else apk update && apk search -q | wc -l; fi',
               'ls /sys/firmware/efi >/dev/null 2>&1 && echo booted-UEFI || echo booted-BIOS',
               'id jcole', 'ip -4 addr show dev eth0 | grep inet; ping -c1 -W3 10.0.2.2 >/dev/null && echo net-ok',
               'ls /usr/libexec/valence', 'free -m; df -h / /boot', 'wc -l < /proc/modules; ls /usr/lib/modules',
@@ -809,39 +820,44 @@ else:
         import http.server, threading, functools
         srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=f'{M}/repo'))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-        apkn = f'apk --repositories-file /dev/null --repository http://10.0.2.2:{srv.server_address[1]}/{"x86" if i686 else "x86_64"}/Packages.adb'
+        use_vpm = 'use-vpm' in sh('[ -e /var/lib/vpm/world ] && echo use-vpm || echo use-apk')
+        pm_name = 'vpm' if use_vpm else 'apk'
+        repo_url = f'http://10.0.2.2:{srv.server_address[1]}/{"x86" if i686 else "x86_64"}/Packages.adb'
+        apkn = f'vpm --plain --repository {repo_url}' if use_vpm else f'apk --repositories-file /dev/null --repository {repo_url}'
+        pm_list = 'vpm list' if use_vpm else 'apk list --installed'
+        pm_del = 'vpm --plain del' if use_vpm else 'apk del'
         out = sh(f'{apkn} add less-doc; ls /usr/share/man/man1/less.1* && echo added-$((40+2)); '
                  'echo "manlines=$(man less 2>/dev/null | grep -c -i less)"; echo "apropos=$(apropos -s 1 less 2>/dev/null | grep -c "^less")"', timeout=600)
         print(out)
         ok = 'added-42' in out and last('manlines', out) > 0
-        if not ok: bad.append('apk add less-doc over the network, then man less')
+        if not ok: bad.append(f'{pm_name} add less-doc over the network, then man less')
         if last('apropos', out) < 1: bad.append('apropos less (the index of man pages)')
-        step('apk add less-doc from a repository over the network, man less, apropos less: ' + ('OK' if ok and last('apropos', out) > 0 else 'FAILED'))
+        step(f'{pm_name} add less-doc from a repository over the network, man less, apropos less: ' + ('OK' if ok and last('apropos', out) > 0 else 'FAILED'))
         pages = ['1 ls', '1 grep', '1 bash', '5 passwd', '8 mount', '8 ip', '1 doas', '8 runsv']
-        out = sh(f'{apkn} add docs >/dev/null; echo "docpkgs=$(apk list --installed 2>/dev/null | grep -c -- -doc-)"; '
+        out = sh(f'{apkn} add docs >/dev/null; echo "docpkgs=$({pm_list} 2>/dev/null | grep -c -- -doc-)"; '
                  'for q in ' + ' '.join(f'"{q}"' for q in pages) + '; do man $q 2>/dev/null | grep -q . || echo "NOPAGE-$q"; done; '
                  'echo alldocs-$((40+2))', timeout=1800)
         print(out)
         n = last('docpkgs', out); nop = _re.findall(r'NOPAGE-\d \w+', out)
         ok = n >= 20 and not nop and 'alldocs-42' in out
-        if not ok: bad.append(f'apk add docs ({n} -doc packages' + (', no page for ' + ', '.join(x[7:] for x in nop) if nop else '') + ')')
-        step(f'apk add docs: {n} -doc packages came with it, man finds {len(pages) - len(nop)} of {len(pages)} pages: ' + ('OK' if ok else 'FAILED'))
+        if not ok: bad.append(f'{pm_name} add docs ({n} -doc packages' + (', no page for ' + ', '.join(x[7:] for x in nop) if nop else '') + ')')
+        step(f'{pm_name} add docs: {n} -doc packages came with it, man finds {len(pages) - len(nop)} of {len(pages)} pages: ' + ('OK' if ok else 'FAILED'))
         # (mandoc came as a dependency and leaves with them; /usr/bin/man is then BusyBox's link again)
-        out = sh(f'apk del docs less-doc >/dev/null; echo "docfiles=$({nfiles})"; '
-                 'echo "docpkgs=$(apk list --installed 2>/dev/null | grep -c -E -- "-doc-|^mandoc-")"; '
+        out = sh(f'{pm_del} docs less-doc >/dev/null; echo "docfiles=$({nfiles})"; '
+                 f'echo "docpkgs=$({pm_list} 2>/dev/null | grep -c -E -- "-doc-|^mandoc-")"; '
                  '[ -L /usr/bin/man ]; echo "manlink=$?"', timeout=900)
         print(out)
         ok = last('docfiles', out) == 0 and last('docpkgs', out) == 0 and last('manlink', out) == 0
-        if not ok: bad.append('apk del docs left documentation behind')
-        step('apk del docs: nothing left behind: ' + ('OK' if ok else 'FAILED'))
-        # each of those three changes had a snapshot taken before it (apk's commit hook), and the boot menu lists them
+        if not ok: bad.append(f'{pm_name} del docs left documentation behind')
+        step(f'{pm_name} del docs: nothing left behind: ' + ('OK' if ok else 'FAILED'))
+        # each of those three changes had a snapshot taken before it (commit hook), and the boot menu lists them
         out = sh('echo "snapshots=$(ls /.snapshots | grep -c -E "^[0-9]+$")" "entries=$(grep -c "menuentry .Snapshot " /boot/grub/snapshots.cfg)"; '
                  'valence-snapshot list | tail -n 5')
         print(out)
         n = int((_re.findall(r'snapshots=(\d+)', out) or ['-1'])[-1]); e = int((_re.findall(r'entries=(\d+)', out) or ['-1'])[-1])
-        ok = n == min(snaps_before + 3, 10) and e == n and 'before apk del docs less-doc' in out
-        if not ok: bad.append(f'snapshots before apk changes ({snaps_before} before, {n} after, {e} in the boot menu)')
-        step(f'apk took a snapshot before each change ({snaps_before} -> {n}), the boot menu lists {e}: ' + ('OK' if ok else 'FAILED'))
+        ok = n == min(snaps_before + 3, 10) and e == n and 'del docs less-doc' in out
+        if not ok: bad.append(f'snapshots before {pm_name} changes ({snaps_before} before, {n} after, {e} in the boot menu)')
+        step(f'{pm_name} took a snapshot before each change ({snaps_before} -> {n}), the boot menu lists {e}: ' + ('OK' if ok else 'FAILED'))
     if bad:
         p.sendline('poweroff'); p.expect(pexpect.EOF, timeout=300); sys.exit(1)
     # sudo as the normal user: asks for the password once, then remembers it

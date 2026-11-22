@@ -147,6 +147,12 @@ impl ChrootPrep {
         Ok(ChrootPrep { root: cstr(root)?, slash: CString::new("/").unwrap(), lock_fd: LOCK_FD.load(AtomicOrdering::Relaxed) })
     }
 
+    /// Like [`ChrootPrep::new`], but keeps the root lock `O_CLOEXEC` (for
+    /// commit hooks, which do not need to inherit the lock).
+    pub fn new_no_lock(root: &Path) -> io::Result<Self> {
+        Ok(ChrootPrep { root: cstr(root)?, slash: CString::new("/").unwrap(), lock_fd: -1 })
+    }
+
     /// # Safety
     /// To be called only in a forked child before exec.
     pub unsafe fn apply(&self) -> io::Result<()> {

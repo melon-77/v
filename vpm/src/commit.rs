@@ -152,6 +152,93 @@ fn is_etc(path: &[u8]) -> bool {
     path.starts_with(b"etc/")
 }
 
+/// `/boot` lives on its own FAT32 partition on installed systems, so files
+/// there are always copied rather than hard-linked (keeping both upgrades
+/// and squashfs unpacks free of cross-device link errors).
+fn is_boot(path: &[u8]) -> bool {
+    path.starts_with(b"boot/")
+}
+
+fn ignore_nonposix(r: io::Result<()>) -> io::Result<()> {
+    match r {
+        Ok(()) => Ok(()),
+        Err(e)
+            if matches!(
+                e.raw_os_error(),
+                Some(libc::EPERM | libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+            ) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// True when regular file `dst` has the same content as `r` (comparing
+/// against `r.hash`, or against `src` if `r.hash` is empty).
+fn same_content(dst: &Path, src: &Path, r: &FileRec) -> bool {
+    if let Some(alg) = Alg::from_len(r.hash.len()) {
+        return hash_file(dst, alg).map_or(false, |h| h == r.hash);
+    }
+    match (hash_file(dst, Alg::Sha256), hash_file(src, Alg::Sha256)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Copies regular file `src` (opened with `O_NOFOLLOW`) to `dst` via a
+/// temporary file and `rename`. When `sync_file` is set, calls `sync_all`
+/// before renaming (important when `dst` is on another filesystem such as
+/// `/boot`, since `syncfs(root)` does not flush other mounts). When
+/// `tolerate_nonposix` is set, `EPERM`/`EINVAL` from chown/chmod/utimens on
+/// FAT32 are ignored.
+fn copy_file_atomic(
+    src: &Path,
+    dst: &Path,
+    r: &FileRec,
+    chown: bool,
+    owner: (u32, u32),
+    sync_file: bool,
+    tolerate_nonposix: bool,
+) -> io::Result<()> {
+    let tmp = rootfs::tmp_name(dst);
+    let _ = fs::remove_file(&tmp);
+    let res = (|| {
+        let mut i = sys::open_regular_nofollow(src)?;
+        let mut o = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        io::copy(&mut i, &mut o)?;
+        if chown {
+            let r_ch = fchown(&o, Some(owner.0), Some(owner.1));
+            if tolerate_nonposix {
+                ignore_nonposix(r_ch)?;
+            } else {
+                r_ch?;
+            }
+        }
+        let r_perm = o.set_permissions(fs::Permissions::from_mode(r.mode & 0o7777));
+        if tolerate_nonposix {
+            ignore_nonposix(r_perm)?;
+        } else {
+            r_perm?;
+        }
+        let t = UNIX_EPOCH + Duration::from_secs(r.mtime);
+        let r_time = o.set_times(FileTimes::new().set_accessed(t).set_modified(t));
+        if tolerate_nonposix {
+            ignore_nonposix(r_time)?;
+        } else {
+            r_time?;
+        }
+        if sync_file {
+            o.sync_all()?;
+        }
+        fs::rename(&tmp, dst)
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
 /// Hashes a live file. A final symlink is not followed and only a regular
 /// file is read (a FIFO or device in its place is an error, not a hang).
 fn hash_file(p: &Path, alg: Alg) -> io::Result<Vec<u8>> {
@@ -235,10 +322,9 @@ impl<'a> Switch<'a> {
     }
 
     /// Hard link `src` (in Programs) to `dst`; nothing to do if `dst` is
-    /// already that inode. A new name is linked directly (`link` makes it
-    /// appear atomically with its complete content); an existing one is
-    /// replaced through a temporary name and `rename`.
-    fn place_link(&mut self, src: &Path, dst: &Resolved) -> io::Result<()> {
+    /// already that inode (or, across filesystems, a regular file with the
+    /// same content). Falls back to an atomic synced copy on `EXDEV`.
+    fn place_link(&mut self, src: &Path, r: &FileRec, dst: &Resolved) -> io::Result<()> {
         match fs::symlink_metadata(&dst.host) {
             Ok(dm) => {
                 let sm = fs::symlink_metadata(src)?;
@@ -249,6 +335,10 @@ impl<'a> Switch<'a> {
                 if dm.is_dir() {
                     return Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))));
                 }
+                if dm.dev() != sm.dev() && dm.is_file() && r.is_regular() && same_content(&dst.host, src, r) {
+                    self.rep.unchanged += 1;
+                    return Ok(());
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::hard_link(src, &dst.host) {
                 Ok(()) => {
@@ -256,13 +346,22 @@ impl<'a> Switch<'a> {
                     return Ok(());
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => {
+                    return self.copy_cross_dev(src, &dst.host, r);
+                }
                 Err(e) => return Err(e),
             },
             Err(e) => return Err(e),
         }
         let tmp = rootfs::tmp_name(&dst.host);
         let _ = fs::remove_file(&tmp);
-        fs::hard_link(src, &tmp)?;
+        match fs::hard_link(src, &tmp) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => {
+                return self.copy_cross_dev(src, &dst.host, r);
+            }
+            Err(e) => return Err(e),
+        }
         if let Err(e) = fs::rename(&tmp, &dst.host) {
             let _ = fs::remove_file(&tmp);
             return Err(e);
@@ -271,16 +370,31 @@ impl<'a> Switch<'a> {
         Ok(())
     }
 
-    fn place_symlink(&mut self, target: &[u8], r: &FileRec, dst: &Resolved) -> io::Result<()> {
+    fn place_symlink(&mut self, target: &[u8], r: &FileRec, old: Option<&FileRec>, dst: &Resolved) -> io::Result<()> {
+        let mut write_new = false;
         match fs::symlink_metadata(&dst.host) {
             Ok(m) if m.file_type().is_symlink() => {
-                if fs::read_link(&dst.host)?.as_os_str().as_bytes() == target {
+                let cur = fs::read_link(&dst.host)?;
+                if cur.as_os_str().as_bytes() == target {
                     self.rep.unchanged += 1;
                     return Ok(());
+                }
+                if is_etc(&r.path) {
+                    let pristine = matches!(
+                        old.map(|o| &o.kind),
+                        Some(RecKind::File(FileKind::Symlink(ot))) if cur.as_os_str().as_bytes() == ot.as_slice()
+                    );
+                    if !pristine {
+                        write_new = true;
+                    }
                 }
             }
             Ok(m) if m.is_dir() => {
                 return Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))))
+            }
+            Ok(_) if is_etc(&r.path) => {
+                // Admin replaced an etc/ symlink with a regular file or other node: keep it.
+                write_new = true;
             }
             // a new name: made directly when it needs no owner change (a
             // symlink appears atomically with its target; an lchown after it
@@ -296,6 +410,37 @@ impl<'a> Switch<'a> {
                 }
             }
             _ => {}
+        }
+        if write_new {
+            let mut n = dst.host.as_os_str().to_os_string();
+            n.push(".vpm-new");
+            let newp = PathBuf::from(n);
+            let already = fs::symlink_metadata(&newp).map_or(false, |m| {
+                m.file_type().is_symlink()
+                    && fs::read_link(&newp).map_or(false, |t| t.as_os_str().as_bytes() == target)
+            });
+            if !already {
+                let tmp = rootfs::tmp_name(&newp);
+                let _ = fs::remove_file(&tmp);
+                symlink(OsStr::from_bytes(target), &tmp)?;
+                if self.chown {
+                    let (u, g) = self.owner_ids(r);
+                    lchown(&tmp, Some(u), Some(g))?;
+                }
+                if let Err(e) = fs::rename(&tmp, &newp) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                self.file_placed();
+            }
+            let msg = format!(
+                "/{} was changed locally; kept, new version in /{}.vpm-new",
+                String::from_utf8_lossy(&dst.canon),
+                String::from_utf8_lossy(&dst.canon)
+            );
+            println!("  {msg}");
+            self.rep.new_configs.push(msg);
+            return Ok(());
         }
         let tmp = rootfs::tmp_name(&dst.host);
         let _ = fs::remove_file(&tmp);
@@ -315,27 +460,34 @@ impl<'a> Switch<'a> {
     /// Copies `src` to `dst` (through a temporary name) with the record's
     /// mode, owner and mtime.
     fn copy_to(&mut self, src: &Path, dst: &Path, r: &FileRec) -> io::Result<()> {
-        let tmp = rootfs::tmp_name(dst);
-        let _ = fs::remove_file(&tmp);
-        let res = (|| {
-            let mut i = File::open(src)?;
-            let mut o = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
-            io::copy(&mut i, &mut o)?;
-            if self.chown {
-                let (u, g) = self.owner_ids(r);
-                fchown(&o, Some(u), Some(g))?;
-            }
-            o.set_permissions(fs::Permissions::from_mode(r.mode & 0o7777))?;
-            let t = UNIX_EPOCH + Duration::from_secs(r.mtime);
-            o.set_times(FileTimes::new().set_accessed(t).set_modified(t))?;
-            fs::rename(&tmp, dst)
-        })();
-        if res.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        res?;
+        let owner = self.owner_ids(r);
+        copy_file_atomic(src, dst, r, self.chown, owner, false, false)?;
         self.file_placed();
         Ok(())
+    }
+
+    /// Copies `src` to `dst` on another filesystem (e.g. FAT32 `/boot`),
+    /// syncing the file before rename and tolerating non-POSIX metadata errors.
+    fn copy_cross_dev(&mut self, src: &Path, dst: &Path, r: &FileRec) -> io::Result<()> {
+        let owner = self.owner_ids(r);
+        copy_file_atomic(src, dst, r, self.chown, owner, true, true)?;
+        self.file_placed();
+        Ok(())
+    }
+
+    /// Places a file under `boot/` as a synced copy (never hard-linked).
+    fn place_boot(&mut self, src: &Path, r: &FileRec, dst: &Resolved) -> io::Result<()> {
+        match fs::symlink_metadata(&dst.host) {
+            Ok(dm) if dm.is_dir() => {
+                return Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))));
+            }
+            Ok(dm) if dm.is_file() && same_content(&dst.host, src, r) => {
+                self.rep.unchanged += 1;
+                return Ok(());
+            }
+            Ok(_) | Err(_) => {}
+        }
+        self.copy_cross_dev(src, &dst.host, r)
     }
 
     /// The `etc/` rule: a copy, unless the admin changed the live file.
@@ -387,12 +539,15 @@ impl<'a> Switch<'a> {
         let dst = self.fs.entry(&r.path)?;
         let src = p.dir.join(OsStr::from_bytes(&r.path));
         match &r.kind {
-            RecKind::File(FileKind::Symlink(t)) => self.place_symlink(t, r, &dst),
+            RecKind::File(FileKind::Symlink(t)) => self.place_symlink(t, r, old, &dst),
             RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if is_etc(&r.path) => {
                 self.place_etc(&src, r, old, &dst)
             }
-            // regular files, hard links and device nodes: one inode
-            _ => self.place_link(&src, &dst),
+            RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if is_boot(&r.path) => {
+                self.place_boot(&src, r, &dst)
+            }
+            // regular files, hard links and device nodes: one inode (EXDEV falls back to copy)
+            _ => self.place_link(&src, r, &dst),
         }
     }
 
@@ -941,12 +1096,13 @@ fn lock_old_version(dir: &Path) {
     }
 }
 
-/// Directories inside a root searched for commit hooks, in precedence order.
+/// Directories inside a root searched for commit hooks, in precedence order
+/// (`etc/` admin overrides before `usr/lib/` package hooks, matching apk).
 const COMMIT_HOOK_DIRS: &[&[u8]] = &[
     b"etc/vpm/commit_hooks.d",
+    b"etc/apk/commit_hooks.d",
     b"usr/lib/vpm/commit_hooks.d",
     b"lib/vpm/commit_hooks.d",
-    b"etc/apk/commit_hooks.d",
     b"usr/lib/apk/commit_hooks.d",
     b"lib/apk/commit_hooks.d",
 ];
@@ -994,21 +1150,25 @@ pub fn discover_commit_hooks(root: &Path) -> Vec<(String, String)> {
 }
 
 /// Runs commit hooks inside `root` for `stage` (`"pre-commit"` or
-/// `"post-commit"`), matching apk's `commit_hooks.d` contract.
-/// A failing hook aborts immediately and returns an error.
+/// `"post-commit"`), matching apk's `commit_hooks.d` contract:
+/// - `pre-commit`: a failing hook aborts immediately and returns an error.
+/// - `post-commit`: all hooks run; failures are printed as warnings and do
+///   not fail an already-committed transaction.
 pub fn run_commit_hooks(root: &Path, stage: &str) -> Result<()> {
     let hooks = discover_commit_hooks(root);
     if hooks.is_empty() {
         return Ok(());
     }
+    let is_pre = stage == "pre-commit";
     let snap_text = std::env::var("VALENCE_SNAPSHOT_TEXT").ok();
     for (name, inside) in hooks {
         println!("  executing hook {name} {stage}");
-        let prep = sys::ChrootPrep::new(root)?;
+        let prep = sys::ChrootPrep::new_no_lock(root)?;
         let mut cmd = Command::new(&inside);
         cmd.arg(stage)
             .env_clear()
             .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("APK_SCRIPT", stage)
             .stdin(std::process::Stdio::null());
         if let Some(ref t) = snap_text {
             cmd.env("VALENCE_SNAPSHOT_TEXT", t);
@@ -1018,9 +1178,17 @@ pub fn run_commit_hooks(root: &Path, stage: &str) -> Result<()> {
         unsafe {
             cmd.pre_exec(move || prep.apply());
         }
-        let out = cmd
-            .output()
-            .map_err(|e| Error::Msg(format!("commit hook {name} ({stage}): cannot execute: {e}")))?;
+        let out = match cmd.output() {
+            Ok(o) => o,
+            Err(e) => {
+                let msg = format!("commit hook {name} ({stage}): cannot execute: {e}");
+                if is_pre {
+                    return Err(Error::Msg(msg));
+                }
+                eprintln!("vpm: warning: {msg}");
+                continue;
+            }
+        };
         for l in String::from_utf8_lossy(&out.stdout)
             .lines()
             .chain(String::from_utf8_lossy(&out.stderr).lines())
@@ -1028,7 +1196,11 @@ pub fn run_commit_hooks(root: &Path, stage: &str) -> Result<()> {
             println!("  * {l}");
         }
         if !out.status.success() {
-            return Err(Error::Msg(format!("commit hook {name} ({stage}) exited with {}", out.status)));
+            let msg = format!("commit hook {name} ({stage}) exited with {}", out.status);
+            if is_pre {
+                return Err(Error::Msg(msg));
+            }
+            eprintln!("vpm: warning: {msg}");
         }
     }
     Ok(())
@@ -1047,11 +1219,16 @@ pub struct RepairReport {
 /// packages at `target_indices` inside `pkgs` against their copies in
 /// `Programs/<name>/<version>/`.
 ///
-/// - Regular files outside `etc/` are checked by `(dev, ino)` against their
-///   `Programs` copy and re-linked atomically when missing or unlinked.
-/// - Files under `etc/` are restored only when missing, preserving admin edits.
-/// - Symlinks are restored when missing or pointing at a different target.
-/// - Directories are created when missing.
+/// - Regular files outside `etc/` and `boot/`: verifies the `Programs` copy
+///   matches its recorded hash (detecting in-place corruption), then checks
+///   `(dev, ino)` (or content hash across filesystems) and atomically relinks
+///   (or copies on `EXDEV`) when missing or drifted.
+/// - Files under `boot/`: verified by content hash and restored as synced
+///   copies (never hard-linked, since `/boot` is FAT32).
+/// - Files and symlinks under `etc/`: restored only when missing, preserving
+///   admin edits and replacements.
+/// - Symlinks outside `etc/`: restored when missing or pointing elsewhere.
+/// - Directories: created when missing (following symlinked directory paths).
 pub fn repair(
     root: &Path,
     pkgs: &[PkgState],
@@ -1081,7 +1258,7 @@ pub fn repair(
         for (ri, r) in p.recs.iter().enumerate() {
             if r.is_dir() {
                 rep.checked += 1;
-                let dst = match rfs.resolve(&r.path, false) {
+                let dst = match rfs.resolve(&r.path, true) {
                     Ok(d) => d,
                     Err(e) => {
                         rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy()));
@@ -1129,13 +1306,19 @@ pub fn repair(
 
             match &r.kind {
                 RecKind::File(FileKind::Symlink(target)) => {
-                    let intact = fs::symlink_metadata(&dst.host)
-                        .map_or(false, |m| {
-                            m.file_type().is_symlink()
-                                && fs::read_link(&dst.host)
-                                    .map_or(false, |t| t.as_os_str().as_bytes() == target.as_slice())
-                        });
+                    let live_md = fs::symlink_metadata(&dst.host);
+                    let intact = live_md.as_ref().map_or(false, |m| {
+                        m.file_type().is_symlink()
+                            && fs::read_link(&dst.host)
+                                .map_or(false, |t| t.as_os_str().as_bytes() == target.as_slice())
+                    });
                     if intact {
+                        rep.ok += 1;
+                        continue;
+                    }
+                    if is_etc(&r.path) && live_md.is_ok() {
+                        // Preserve admin-modified symlinks or files under etc/ (V-1).
+                        println!("  kept locally changed /{}", r.path_lossy());
                         rep.ok += 1;
                         continue;
                     }
@@ -1174,39 +1357,67 @@ pub fn repair(
                         continue;
                     }
                     let src = p.dir.join(OsStr::from_bytes(&r.path));
-                    if !src.is_file() {
+                    if !fs::symlink_metadata(&src).map_or(false, |m| m.is_file()) {
                         rep.errors.push(format!("{}: /{}: missing in Programs", p.meta.nv(), r.path_lossy()));
                         continue;
+                    }
+                    if let Some(alg) = Alg::from_len(r.hash.len()) {
+                        if hash_file(&src, alg).map_or(true, |h| h != r.hash) {
+                            rep.errors.push(format!("{}: /{}: corrupt in Programs (hash mismatch)", p.meta.nv(), r.path_lossy()));
+                            continue;
+                        }
                     }
                     if simulate {
                         println!("  would restore etc /{}", r.path_lossy());
                         rep.repaired += 1;
                         continue;
                     }
+                    let owner = owner_ids(r);
                     let res = (|| -> io::Result<()> {
                         ensure_parents(&mut rfs, &r.path)?;
                         let dst = rfs.resolve(&r.path, false)?;
-                        let tmp = rootfs::tmp_name(&dst.host);
-                        let _ = fs::remove_file(&tmp);
-                        let mut i = File::open(&src)?;
-                        let mut o = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
-                        io::copy(&mut i, &mut o)?;
-                        if chown {
-                            let (u, g) = owner_ids(r);
-                            fchown(&o, Some(u), Some(g))?;
-                        }
-                        o.set_permissions(fs::Permissions::from_mode(r.mode & 0o7777))?;
-                        let t = UNIX_EPOCH + Duration::from_secs(r.mtime);
-                        o.set_times(FileTimes::new().set_accessed(t).set_modified(t))?;
-                        if let Err(e) = fs::rename(&tmp, &dst.host) {
-                            let _ = fs::remove_file(&tmp);
-                            return Err(e);
-                        }
-                        Ok(())
+                        copy_file_atomic(&src, &dst.host, r, chown, owner, false, false)
                     })();
                     match res {
                         Ok(()) => {
                             println!("  repaired etc /{}", r.path_lossy());
+                            rep.repaired += 1;
+                        }
+                        Err(e) => rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy())),
+                    }
+                }
+                RecKind::File(FileKind::Regular | FileKind::Hardlink(_)) if is_boot(&r.path) => {
+                    let src = p.dir.join(OsStr::from_bytes(&r.path));
+                    if !fs::symlink_metadata(&src).map_or(false, |m| m.is_file()) {
+                        rep.errors.push(format!("{}: /{}: missing in Programs", p.meta.nv(), r.path_lossy()));
+                        continue;
+                    }
+                    if let Some(alg) = Alg::from_len(r.hash.len()) {
+                        if hash_file(&src, alg).map_or(true, |h| h != r.hash) {
+                            rep.errors.push(format!("{}: /{}: corrupt in Programs (hash mismatch)", p.meta.nv(), r.path_lossy()));
+                            continue;
+                        }
+                    }
+                    let intact = fs::symlink_metadata(&dst.host)
+                        .map_or(false, |dm| dm.is_file() && same_content(&dst.host, &src, r));
+                    if intact {
+                        rep.ok += 1;
+                        continue;
+                    }
+                    if simulate {
+                        println!("  would copy /{}", r.path_lossy());
+                        rep.repaired += 1;
+                        continue;
+                    }
+                    let owner = owner_ids(r);
+                    let res = (|| -> io::Result<()> {
+                        ensure_parents(&mut rfs, &r.path)?;
+                        let dst = rfs.resolve(&r.path, false)?;
+                        copy_file_atomic(&src, &dst.host, r, chown, owner, true, true)
+                    })();
+                    match res {
+                        Ok(()) => {
+                            println!("  repaired /{}", r.path_lossy());
                             rep.repaired += 1;
                         }
                         Err(e) => rep.errors.push(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy())),
@@ -1221,8 +1432,18 @@ pub fn repair(
                             continue;
                         }
                     };
-                    let intact = fs::symlink_metadata(&dst.host)
-                        .map_or(false, |dm| dm.dev() == sm.dev() && dm.ino() == sm.ino());
+                    if r.is_regular() {
+                        if let Some(alg) = Alg::from_len(r.hash.len()) {
+                            if hash_file(&src, alg).map_or(true, |h| h != r.hash) {
+                                rep.errors.push(format!("{}: /{}: corrupt in Programs (hash mismatch)", p.meta.nv(), r.path_lossy()));
+                                continue;
+                            }
+                        }
+                    }
+                    let intact = fs::symlink_metadata(&dst.host).map_or(false, |dm| {
+                        (dm.dev() == sm.dev() && dm.ino() == sm.ino())
+                            || (dm.dev() != sm.dev() && dm.is_file() && r.is_regular() && same_content(&dst.host, &src, r))
+                    });
                     if intact {
                         rep.ok += 1;
                         continue;
@@ -1232,17 +1453,25 @@ pub fn repair(
                         rep.repaired += 1;
                         continue;
                     }
+                    let owner = owner_ids(r);
                     let res = (|| -> io::Result<()> {
                         ensure_parents(&mut rfs, &r.path)?;
                         let dst = rfs.resolve(&r.path, false)?;
                         let tmp = rootfs::tmp_name(&dst.host);
                         let _ = fs::remove_file(&tmp);
-                        fs::hard_link(&src, &tmp)?;
-                        if let Err(e) = fs::rename(&tmp, &dst.host) {
-                            let _ = fs::remove_file(&tmp);
-                            return Err(e);
+                        match fs::hard_link(&src, &tmp) {
+                            Ok(()) => {
+                                if let Err(e) = fs::rename(&tmp, &dst.host) {
+                                    let _ = fs::remove_file(&tmp);
+                                    return Err(e);
+                                }
+                                Ok(())
+                            }
+                            Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => {
+                                copy_file_atomic(&src, &dst.host, r, chown, owner, true, true)
+                            }
+                            Err(e) => Err(e),
                         }
-                        Ok(())
                     })();
                     match res {
                         Ok(()) => {

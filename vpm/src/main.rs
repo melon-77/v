@@ -19,16 +19,19 @@ usage: vpm [OPTIONS] COMMAND [ARGS]
 
 options:
   --root DIR             root to manage (default /)
-  --repository INDEX     a Packages.adb path or http(s) URL (repeatable;
-                         default: the lines of ROOT/etc/apk/repositories)
+  --repository INDEX     use ONLY these Packages.adb paths/URLs (repeatable;
+                         replaces ROOT/etc/apk/repositories)
+  --add-repository INDEX, -X INDEX
+                         add a Packages.adb path or URL in addition to
+                         ROOT/etc/apk/repositories (repeatable)
   --keys-dir DIR         trusted public keys (default ROOT/etc/apk/keys,
                          then ROOT/lib/apk/keys)
   --arch ARCH            override target architecture
   --print-arch           print the architecture of ROOT and exit
   --initdb               create vpm's database in ROOT
   --plain                plain progress lines instead of the full-screen view
-  --simulate, -s         show what add/del/upgrade would do without changing
-                         anything
+  --simulate, -s         show what add/del/upgrade/update/fix/cache clean
+                         would do without changing anything
   --upgrade, -u          with add: upgrade named packages if already installed
   --no-scripts           do not run package scripts, triggers or commit hooks
   --no-commit-hooks      do not run commit hooks (pre-commit / post-commit)
@@ -46,7 +49,8 @@ commands:
   update                 refresh repository indexes
   list                   list the installed packages ([world] = asked for)
   search [-x] [-d] [PAT...]
-                         search repositories (-x exact name, -d descriptions)
+                         search repositories by name or provides
+                         (-x exact match, -d include descriptions)
   info [-e|-a|-d|-L|-R|-P|-s|-W] [NAME...]
                          show package information (-e installed check,
                          -W who owns PATH; no args lists installed names)
@@ -62,7 +66,7 @@ commands:
 layout of a root managed by vpm:
   ROOT/Programs/NAME/VERSION/   the package's files (+ .vpm/ metadata)
   ROOT/Programs/NAME/Current    symlink to the version in use
-  the usual tree: hard links to Programs (copies under etc/)
+  the usual tree: hard links to Programs (copies under etc/ and boot/)
   ROOT/var/lib/vpm/             world, journal, lock
   ROOT/var/cache/vpm/           downloaded packages
 ";
@@ -70,6 +74,7 @@ layout of a root managed by vpm:
 struct Opts {
     root: PathBuf,
     repositories: Vec<String>,
+    extra_repositories: Vec<String>,
     keys_dir: Option<PathBuf>,
     arch: Option<String>,
     print_arch: bool,
@@ -94,6 +99,7 @@ impl Opts {
         engine::Options {
             root: self.root.clone(),
             repositories: self.repositories.clone(),
+            extra_repositories: self.extra_repositories.clone(),
             keys_dir: self.keys_dir.clone(),
             arch: self.arch.clone(),
             initdb: self.initdb,
@@ -114,6 +120,7 @@ fn parse_args() -> Result<Opts, String> {
     let mut o = Opts {
         root: PathBuf::from("/"),
         repositories: Vec::new(),
+        extra_repositories: Vec::new(),
         keys_dir: None,
         arch: None,
         print_arch: false,
@@ -139,7 +146,8 @@ fn parse_args() -> Result<Opts, String> {
         let cmd = positional.first().map(|s: &String| s.as_str()).unwrap_or("");
         match a.as_str() {
             "--root" | "-p" => o.root = PathBuf::from(val("--root")?),
-            "--repository" | "-X" => o.repositories.push(val("--repository")?),
+            "--repository" => o.repositories.push(val("--repository")?),
+            "--add-repository" | "-X" => o.extra_repositories.push(val("--add-repository")?),
             "--keys-dir" => o.keys_dir = Some(PathBuf::from(val("--keys-dir")?)),
             "--arch" => o.arch = Some(val("--arch")?),
             "--print-arch" => o.print_arch = true,

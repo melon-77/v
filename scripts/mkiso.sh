@@ -38,6 +38,11 @@ if [ "$PKG_MGR" = vpm ]; then
   [ -x "$VPM" ] || VPM=$M/hosttools/bin/vpm
   [ -x "$VPM" ] || { echo "VALENCE_PKG=vpm needs host vpm (run: cd vpm && cargo build --release)" >&2; exit 1; }
   case " $PKGS " in *" vpm "*) ;; *) PKGS="$PKGS vpm" ;; esac
+  if [ "$EDITION" = desktop ]; then
+    OUTISO=$M/out/valence-vpm-desktop-$DATE-$ISOARCH.iso
+  else
+    OUTISO=$M/out/valence-vpm-$DATE-$ISOARCH.iso
+  fi
   pmx(){ "$VPM" --plain --arch $APK_ARCH --keys-dir $M/keys/trusted --repository $REPO/$APK_ARCH/Packages.adb --no-commit-hooks "$@"; }
 else
   pmx(){ apkx "$@"; }
@@ -208,7 +213,11 @@ if [ -f $ROOT/usr/share/valence/grub/themes/valence/theme.txt ]; then
   sed -i "s|^insmod all_video\$|insmod all_video\nif loadfont unicode; then set gfxmode=auto; insmod gfxterm; insmod png; terminal_output gfxterm serial; ${fonts}set theme=/boot/grub/themes/valence/theme.txt; fi|" $ISO/boot/grub/grub.cfg
 fi
 mkdir -p $M/out
-if [ "$EDITION" = desktop ]; then rm -f $M/out/valence-desktop-*-$ISOARCH.iso; else rm -f $M/out/valence-2*-$ISOARCH.iso; fi
+if [ "$PKG_MGR" = vpm ]; then
+  if [ "$EDITION" = desktop ]; then rm -f $M/out/valence-vpm-desktop-2*-$ISOARCH.iso; else rm -f $M/out/valence-vpm-2*-$ISOARCH.iso; fi
+else
+  if [ "$EDITION" = desktop ]; then rm -f $M/out/valence-desktop-2*-$ISOARCH.iso; else rm -f $M/out/valence-2*-$ISOARCH.iso; fi
+fi
 $M/hosttools/grub$ARCH_SUFFIX/bin/grub-mkrescue -o $OUTISO $ISO -- -volid VALENCE 2>&1 | grep -v -E '^xorriso|^Drive|^Media|^libisofs|^Added|^ISO image|^Writing|^Written|^$' || true
 ( cd $M/out && sha256sum valence-*.iso > SHA256SUMS )
 ls -la $OUTISO

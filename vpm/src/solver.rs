@@ -608,6 +608,7 @@ mod tests {
             index: Index { packages: pkgs, ..Default::default() },
             trust: TrustInfo::default(),
             generation: 0,
+            stale: false,
         };
         let inst: BTreeMap<String, Installed> = installed
             .iter()

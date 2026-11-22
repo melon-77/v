@@ -229,3 +229,72 @@ f\t0644\troot\troot\t10\t0\t-\t-\t-\tetc/missing.conf
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn fix_preserves_etc_symlink_copies_boot_and_detects_programs_corruption() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = temp_root("fix-extra");
+    seed_root(&root);
+    let pkg_dir = root.join("Programs/hello/1.0-r0");
+    fs::create_dir_all(pkg_dir.join("etc/ssl")).unwrap();
+    fs::create_dir_all(pkg_dir.join("boot")).unwrap();
+    fs::write(pkg_dir.join("boot/vmlinuz-test"), b"kernel-image").unwrap();
+    // Real sha256 of "#!/bin/sh\necho hi\n" and "kernel-image"
+    let hello_hash = vpm::digest::hex(&vpm::digest::sha256(b"#!/bin/sh\necho hi\n"));
+    let boot_hash = vpm::digest::hex(&vpm::digest::sha256(b"kernel-image"));
+
+    fs::write(
+        pkg_dir.join(".vpm/files"),
+        format!(
+            "\
+d\t0755\troot\troot\t0\t0\t-\t-\t-\tusr
+d\t0755\troot\troot\t0\t0\t-\t-\t-\tusr/bin
+f\t0755\troot\troot\t18\t0\t{hello_hash}\t-\t-\tusr/bin/hello
+d\t0755\troot\troot\t0\t0\t-\t-\t-\tetc
+d\t0755\troot\troot\t0\t0\t-\t-\t-\tetc/ssl
+l\t0777\troot\troot\t0\t0\t-\tcerts/ca.crt\t-\tetc/ssl/cert.pem
+d\t0755\troot\troot\t0\t0\t-\t-\t-\tboot
+f\t0644\troot\troot\t12\t0\t{boot_hash}\t-\t-\tboot/vmlinuz-test
+"
+        ),
+    )
+    .unwrap();
+
+    // Admin put a custom regular file at etc/ssl/cert.pem — must NOT be overwritten by fix (V-1)!
+    fs::create_dir_all(root.join("etc/ssl")).unwrap();
+    fs::write(root.join("etc/ssl/cert.pem"), b"custom-ca-bundle\n").unwrap();
+    fs::create_dir_all(root.join("usr/bin")).unwrap();
+    fs::hard_link(pkg_dir.join("usr/bin/hello"), root.join("usr/bin/hello")).unwrap();
+
+    let r = root.to_str().unwrap();
+    let out = Command::new(vpm_bin()).args(["--root", r, "fix"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    // etc/ssl/cert.pem kept intact, boot/vmlinuz-test copied (NOT hard-linked!)
+    assert_eq!(fs::read_to_string(root.join("etc/ssl/cert.pem")).unwrap(), "custom-ca-bundle\n");
+    assert_eq!(fs::read(root.join("boot/vmlinuz-test")).unwrap(), b"kernel-image");
+    let boot_src = fs::symlink_metadata(pkg_dir.join("boot/vmlinuz-test")).unwrap();
+    let boot_dst = fs::symlink_metadata(root.join("boot/vmlinuz-test")).unwrap();
+    assert_ne!(boot_src.ino(), boot_dst.ino(), "/boot file must be a copy, not a hard link");
+
+    // Corrupt usr/bin/hello in-place through the hard link -> Programs copy is corrupted too -> fix detects it (V-2, V-13)!
+    fs::write(root.join("usr/bin/hello"), b"tampered-in-place\n").unwrap();
+    let out = Command::new(vpm_bin()).args(["--root", r, "--simulate", "fix"]).output().unwrap();
+    assert!(!out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("ERRORS:"), "simulate fix with error must print ERRORS: (V-13), got: {s}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("corrupt in Programs"));
+
+    // cache clean --simulate does not delete files (V-9)
+    let cache = root.join("var/cache/vpm");
+    fs::write(cache.join("demo-1.0.apk"), b"apk").unwrap();
+    let out = Command::new(vpm_bin()).args(["--root", r, "--simulate", "cache", "clean"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(cache.join("demo-1.0.apk").exists());
+
+    // info -W skips directories (V-8)
+    let out = Command::new(vpm_bin()).args(["--root", r, "info", "-W", "/usr/bin"]).output().unwrap();
+    assert!(!out.status.success());
+
+    let _ = fs::remove_dir_all(&root);
+}

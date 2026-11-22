@@ -34,6 +34,8 @@ use crate::verify::{TrustedKeys, VerifyOptions};
 pub struct Options {
     pub root: PathBuf,
     pub repositories: Vec<String>,
+    /// Additional repositories appended to `ROOT/etc/apk/repositories` (`-X` / `--add-repository`).
+    pub extra_repositories: Vec<String>,
     pub keys_dir: Option<PathBuf>,
     pub arch: Option<String>,
     pub initdb: bool,
@@ -163,33 +165,66 @@ fn load_keys(o: &Options, root: &Path) -> Result<TrustedKeys> {
     Ok(keys)
 }
 
-fn load_repos(
-    o: &Options,
-    root: &Path,
-    arch: &str,
-    keys: &TrustedKeys,
-    save_freshness: bool,
-) -> Result<(Vec<Repo>, Option<Http>)> {
-    let specs = if o.repositories.is_empty() { repo::read_repositories_file(root)? } else { o.repositories.clone() };
+fn repo_specs(o: &Options, root: &Path) -> Result<Vec<String>> {
+    let mut specs = if o.repositories.is_empty() {
+        repo::read_repositories_file(root)?
+    } else {
+        o.repositories.clone()
+    };
+    for extra in &o.extra_repositories {
+        if !specs.contains(extra) {
+            specs.push(extra.clone());
+        }
+    }
     if specs.is_empty() {
         return Err(Error::Msg(format!(
             "no repositories (give --repository, or list them in {}/etc/apk/repositories)",
             root.display()
         )));
     }
+    Ok(specs)
+}
+
+fn load_repos(
+    o: &Options,
+    root: &Path,
+    arch: &str,
+    keys: &TrustedKeys,
+    save_freshness: bool,
+    cache_max_age: Option<std::time::Duration>,
+) -> Result<(Vec<Repo>, Option<Http>, usize)> {
+    let specs = repo_specs(o, root)?;
     let remote = specs.iter().any(|s| repo::is_remote(&repo::locate(s, arch).0));
     let http = if remote { Some(Http::new()?) } else { None };
     let vo = VerifyOptions { allow_untrusted: o.allow_untrusted, ..Default::default() };
     let cache = root.join(db::CACHE_DIR);
     let mut fresh = repo::Freshness::load(root, o.allow_rollback);
     let mut repos = Vec::new();
+    let mut problems: usize = 0;
+    let mut last_err: Option<Error> = None;
     for s in &specs {
-        repos.push(repo::load(s, arch, keys, &vo, http.as_ref(), &cache, &fresh)?);
+        match repo::load(s, arch, keys, &vo, http.as_ref(), &cache, &fresh, cache_max_age) {
+            Ok(r) => {
+                if r.stale {
+                    problems += 1;
+                }
+                repos.push(r);
+            }
+            Err(e @ (Error::Untrusted(_) | Error::Integrity(_))) => return Err(e),
+            Err(e) => {
+                eprintln!("vpm: warning: {s}: {e}; skipped");
+                problems += 1;
+                last_err = Some(e);
+            }
+        }
+    }
+    if repos.is_empty() {
+        return Err(last_err.unwrap_or_else(|| Error::Msg("no usable repositories".into())));
     }
     if save_freshness {
         fresh.save(&repos)?;
     }
-    Ok((repos, http))
+    Ok((repos, http, problems))
 }
 
 struct JobSpec {
@@ -347,8 +382,8 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let root = db.root.clone();
     let arches = arches(o, &root);
     let keys = load_keys(o, &root)?;
-    let (repos, http) =
-        if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate)? } else { (Vec::new(), None) };
+    let (repos, http, _) =
+        if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate, None)? } else { (Vec::new(), None, 0) };
     let u = Universe::with_arches(&repos, &db.installed, &arches);
     if use_repos {
         warn_newer_installed(db, &u);
@@ -445,6 +480,9 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         Ok(w) => w,
         Err(e) => {
             cleanup_new(&root, db, &ops);
+            if run_hooks {
+                let _ = commit::run_commit_hooks(&root, "post-commit");
+            }
             return Err(e);
         }
     };
@@ -459,7 +497,10 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let mut check = || -> Result<()> {
         for (name, ip) in &db.installed {
             if !changed.contains(name.as_str()) {
-                finals.push(PkgState::load(&ip.dir, false)?);
+                match PkgState::load(&ip.dir, false) {
+                    Ok(st) => finals.push(st),
+                    Err(e) => eprintln!("vpm: warning: {}: {e}; skipped in conflict check", ip.meta.nv()),
+                }
             }
         }
         for op in &ops {
@@ -475,6 +516,9 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     };
     if let Err(e) = check() {
         cleanup_new(&root, db, &ops);
+        if run_hooks {
+            let _ = commit::run_commit_hooks(&root, "post-commit");
+        }
         return Err(e);
     }
     drop(finals);
@@ -487,18 +531,15 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         eprintln!("vpm: VPM_CRASH_AT=journal: killed (test hook)");
         sys::kill_self();
     }
-    let rep = commit::switch(&root, &db.installed, jf, &o.switch_opts())?;
+    let switch_res = commit::switch(&root, &db.installed, jf, &o.switch_opts());
+    if run_hooks {
+        let _ = commit::run_commit_hooks(&root, "post-commit");
+    }
+    let rep = switch_res?;
     db.reload()?;
     let t_switch = t2.elapsed();
 
-    let mut hook_err = None;
-    if run_hooks {
-        if let Err(e) = commit::run_commit_hooks(&root, "post-commit") {
-            hook_err = Some(e);
-        }
-    }
-
-    let ok = rep.errors.is_empty() && hook_err.is_none();
+    let ok = rep.errors.is_empty();
     println!(
         "{}: {} packages installed ({ni} new, {nu} upgraded, {nr} removed); {} files placed, {} removed; \
          resolve {:.2}s, fetch+unpack {:.2}s, switch {:.2}s, total {:.2}s",
@@ -516,9 +557,6 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         for e in &rep.errors {
             eprintln!("  {e}");
         }
-    }
-    if let Some(e) = hook_err {
-        eprintln!("vpm: {e}");
     }
     Ok(ok)
 }
@@ -594,15 +632,34 @@ pub fn list(o: &Options) -> Result<bool> {
 }
 
 /// Refreshes all configured repository indexes and saves freshness state.
+/// Returns `Ok(false)` (exit 1) when any repository failed or fell back to cache.
 pub fn update(o: &Options) -> Result<bool> {
+    if o.simulate {
+        let root = abs_root(o, false)?;
+        let specs = repo_specs(o, &root)?;
+        for s in &specs {
+            println!("  would fetch {s}");
+        }
+        println!("OK: simulated ({} repositories)", specs.len());
+        return Ok(true);
+    }
     let db = open(o)?;
     let root = &db.root;
     let arches = arches(o, root);
     let keys = load_keys(o, root)?;
-    let (repos, _) = load_repos(o, root, &arches[0], &keys, true)?;
+    let (repos, _, problems) = load_repos(o, root, &arches[0], &keys, true, None)?;
     let total: usize = repos.iter().map(|r| r.index.packages.len()).sum();
     for r in &repos {
-        println!("  {} ({} packages)", r.index_url, r.index.packages.len());
+        println!(
+            "  {} ({} packages{})",
+            r.index_url,
+            r.index.packages.len(),
+            if r.stale { ", cached" } else { "" }
+        );
+    }
+    if problems > 0 {
+        println!("ERRORS: {problems} unavailable or stale repositories; {} packages available", total);
+        return Ok(false);
     }
     println!("OK: {} repositories, {} packages available", repos.len(), total);
     Ok(true)
@@ -614,38 +671,41 @@ pub struct SearchOpts {
     pub description: bool,
 }
 
-fn pattern_matches(pat: &str, name: &str, desc: &str, so: &SearchOpts) -> bool {
-    if so.exact {
-        return name == pat;
+fn match_text(pat: &str, text: &str, exact: bool) -> bool {
+    if exact {
+        return text == pat;
     }
     if pat.contains('*') || pat.contains('?') {
-        if sys::glob_match(pat.as_bytes(), name.as_bytes()) {
-            return true;
-        }
-        return so.description && sys::glob_match(pat.as_bytes(), desc.as_bytes());
+        return sys::glob_match(pat.as_bytes(), text.as_bytes());
     }
-    let p = pat.to_ascii_lowercase();
-    if name.to_ascii_lowercase().contains(&p) {
-        return true;
-    }
-    so.description && desc.to_ascii_lowercase().contains(&p)
+    text.to_ascii_lowercase().contains(&pat.to_ascii_lowercase())
 }
 
-/// Searches configured repositories for packages matching `patterns` (or all
-/// packages if `patterns` is empty).
+fn pkg_matches(pat: &str, p: &crate::adb::PkgInfo, so: &SearchOpts) -> bool {
+    if match_text(pat, &p.name, so.exact) {
+        return true;
+    }
+    if p.provides.iter().any(|pr| match_text(pat, &pr.name, so.exact)) {
+        return true;
+    }
+    !so.exact && so.description && match_text(pat, &p.description, false)
+}
+
+/// Searches configured repositories for packages matching `patterns` (by
+/// package name or provides, or all packages if `patterns` is empty).
 pub fn search(o: &Options, so: &SearchOpts, patterns: &[String]) -> Result<bool> {
     let root = abs_root(o, false)?;
+    db::real_dir(&root.join(db::CACHE_DIR)).map_err(Error::Io)?;
     let arches = arches(o, &root);
     let keys = load_keys(o, &root)?;
-    let (repos, _) = load_repos(o, &root, &arches[0], &keys, false)?;
+    let (repos, _, _) = load_repos(o, &root, &arches[0], &keys, false, Some(std::time::Duration::from_secs(60)))?;
     let mut matches: std::collections::BTreeMap<(String, String), String> = std::collections::BTreeMap::new();
     for r in &repos {
         for p in &r.index.packages {
             if !p.arch.is_empty() && p.arch != "noarch" && !arches.iter().any(|a| a == &p.arch) {
                 continue;
             }
-            let ok = patterns.is_empty()
-                || patterns.iter().any(|pat| pattern_matches(pat, &p.name, &p.description, so));
+            let ok = patterns.is_empty() || patterns.iter().any(|pat| pkg_matches(pat, p, so));
             if ok {
                 matches.entry((p.name.clone(), p.version.clone())).or_insert_with(|| p.description.clone());
             }
@@ -737,21 +797,30 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
         if args.is_empty() {
             return Err(Error::Msg("info -W needs at least one PATH".into()));
         }
-        let mut all_found = true;
-        // Build path -> package nv lookup once across installed packages.
-        let mut owners: std::collections::HashMap<Vec<u8>, String> = std::collections::HashMap::new();
+        let mut pkgs: Vec<PkgState> = Vec::with_capacity(db.installed.len());
         for ip in db.installed.values() {
-            let nv = ip.meta.nv();
-            if let Ok(recs) = db::read_files(&ip.dir) {
-                for r in recs {
-                    owners.entry(r.path).or_insert_with(|| nv.clone());
-                }
+            if let Ok(st) = PkgState::load(&ip.dir, false) {
+                pkgs.push(st);
             }
         }
+        let (own, _) = commit::ownership(&pkgs);
+        let rfs = crate::rootfs::RootFs::new(&db.root);
+        let mut all_found = true;
         for arg in args {
-            let rel = arg.trim_start_matches('/');
-            if let Some(nv) = owners.get(rel.as_bytes()) {
-                println!("{arg} is owned by {nv}");
+            let abs = if db.root == Path::new("/") && !arg.starts_with('/') {
+                std::env::current_dir().map(|d| d.join(arg)).unwrap_or_else(|_| PathBuf::from(arg))
+            } else {
+                PathBuf::from(arg)
+            };
+            let rel_s = abs.to_string_lossy();
+            let rel = rel_s.trim_start_matches('/');
+            let found = own.owner.get(rel.as_bytes()).copied().or_else(|| {
+                // Retry once following the final component if it is a symlink inside ROOT.
+                let res = rfs.resolve(rel.as_bytes(), true).ok()?;
+                own.owner.get(&res.canon).copied()
+            });
+            if let Some((pi, _)) = found {
+                println!("{arg} is owned by {}", pkgs[pi].meta.nv());
             } else {
                 eprintln!("vpm: {arg}: not owned by any installed package");
                 all_found = false;
@@ -794,8 +863,8 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             let root = &db.root;
             let arches = arches(o, root);
             let keys = load_keys(o, root)?;
-            match load_repos(o, root, &arches[0], &keys, false) {
-                Ok((repos, _)) => repos_cache = Some(repos),
+            match load_repos(o, root, &arches[0], &keys, false, Some(std::time::Duration::from_secs(60))) {
+                Ok((repos, _, _)) => repos_cache = Some(repos),
                 Err(_) => repos_cache = Some(Vec::new()),
             }
         }
@@ -819,7 +888,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
 /// Removes downloaded `.apk` files from `ROOT/var/cache/vpm/`, keeping
 /// cached repository indexes.
 pub fn cache_clean(o: &Options) -> Result<bool> {
-    let db = open(o)?;
+    let db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let cache = db.root.join(db::CACHE_DIR);
     let mut count: u64 = 0;
     let mut bytes: u64 = 0;
@@ -829,13 +898,19 @@ pub fn cache_clean(o: &Options) -> Result<bool> {
             let nb = n.as_encoded_bytes();
             if nb.ends_with(b".apk") && e.file_type().map_or(false, |t| t.is_file()) {
                 let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
-                fs::remove_file(e.path())?;
+                if !o.simulate {
+                    fs::remove_file(e.path())?;
+                }
                 count += 1;
                 bytes += sz;
             }
         }
     }
-    println!("OK: removed {count} cached packages ({} freed)", human(bytes));
+    if o.simulate {
+        println!("OK: would remove {count} cached packages ({})", human(bytes));
+    } else {
+        println!("OK: removed {count} cached packages ({} freed)", human(bytes));
+    }
     Ok(true)
 }
 
@@ -846,41 +921,72 @@ pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
     let db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let mut pkgs: Vec<PkgState> = Vec::with_capacity(db.installed.len());
     let mut targets: HashSet<usize> = HashSet::new();
+    let mut load_errors: Vec<String> = Vec::new();
     let filter: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
     for n in &filter {
         if !db.installed.contains_key(*n) {
             return Err(Error::Msg(format!("{n}: package is not installed")));
         }
     }
-    for (idx, (name, ip)) in db.installed.iter().enumerate() {
-        pkgs.push(PkgState::load(&ip.dir, false)?);
-        if filter.is_empty() || filter.contains(name.as_str()) {
-            targets.insert(idx);
+    for (name, ip) in &db.installed {
+        let wanted = filter.is_empty() || filter.contains(name.as_str());
+        match PkgState::load(&ip.dir, false) {
+            Ok(st) => {
+                let idx = pkgs.len();
+                pkgs.push(st);
+                if wanted {
+                    targets.insert(idx);
+                }
+            }
+            Err(e) => {
+                let msg = format!("{}: unreadable package metadata: {e}", ip.meta.nv());
+                if wanted {
+                    load_errors.push(msg);
+                } else {
+                    eprintln!("vpm: warning: {msg}; skipped");
+                }
+            }
         }
     }
-    let rep = commit::repair(&db.root, &pkgs, &targets, o.simulate)?;
+    let run_hooks = !o.simulate && !o.no_scripts && !o.no_commit_hooks;
+    let rep = if run_hooks {
+        // Check first so we only take a pre-commit snapshot when something will actually be repaired.
+        let dry = commit::repair(&db.root, &pkgs, &targets, true)?;
+        if dry.repaired > 0 {
+            commit::run_commit_hooks(&db.root, "pre-commit")?;
+            let res = commit::repair(&db.root, &pkgs, &targets, false);
+            let _ = commit::run_commit_hooks(&db.root, "post-commit");
+            res?
+        } else {
+            dry
+        }
+    } else {
+        commit::repair(&db.root, &pkgs, &targets, o.simulate)?
+    };
+    let mut errors = load_errors;
+    errors.extend(rep.errors);
+    let status = if errors.is_empty() { "OK" } else { "ERRORS" };
     if o.simulate {
         println!(
-            "OK: checked {} entries ({} ok, {} would be repaired, {} errors)",
+            "{status}: checked {} entries ({} ok, {} would be repaired, {} errors)",
             rep.checked,
             rep.ok,
             rep.repaired,
-            rep.errors.len()
+            errors.len()
         );
     } else {
         println!(
-            "{}: checked {} entries ({} ok, {} repaired, {} errors)",
-            if rep.errors.is_empty() { "OK" } else { "ERRORS" },
+            "{status}: checked {} entries ({} ok, {} repaired, {} errors)",
             rep.checked,
             rep.ok,
             rep.repaired,
-            rep.errors.len()
+            errors.len()
         );
     }
-    for e in &rep.errors {
+    for e in &errors {
         eprintln!("vpm: {e}");
     }
-    Ok(rep.errors.is_empty())
+    Ok(errors.is_empty())
 }
 
 

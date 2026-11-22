@@ -1,21 +1,22 @@
 # vpm
 
-vpm is Valence's own package manager, written in Rust. This is stage 1 of
-roadmap phase 10: the engine, which runs next to apk and is measured
-against it.
+vpm is Valence's own package manager, written in Rust (roadmap phase 10:
+stage 1 engine plus stage 2 CLI commands, commit hooks, repair, and
+installer/ISO integration via `VALENCE_PKG=vpm`).
 
 vpm reads the same files apk reads, the ones Valence's builder makes:
 - the signed apk v3 repository index, `Packages.adb`;
 - the packages, `name-version.apk`.
 
 It follows apk-tools 3.0.8 where it matters, which is the format,
-signatures, versions, dependency choice and scripts. The format
-specification is `apk3-format.md`; the `§` references in the code point
-into it.
+signatures, versions, dependency choice, commit hooks and scripts. The
+format specification is `apk3-format.md`; the `§` references in the code
+point into it.
 
 vpm manages only roots it created itself (`--initdb`). It never reads or
 writes apk's database (`lib/apk/db`, `etc/apk/world`). From apk's
-configuration it uses only the repository list and the trusted keys.
+configuration it uses the repository list, the trusted keys,
+`etc/apk/arch`, and `commit_hooks.d`.
 
 ## Building
 
@@ -38,23 +39,28 @@ There is no async runtime. Parallel work uses std threads.
 ## Commands
 
 ```
-vpm [--root DIR] [--repository INDEX]... [--keys-dir DIR] [--arch ARCH]
-    [--print-arch] [--initdb] [--plain] [--simulate|-s] [--no-scripts]
-    [--no-commit-hooks] [--jobs N] [--allow-rollback] [--allow-untrusted] COMMAND
+vpm [--root DIR] [--repository INDEX]... [-X|--add-repository INDEX]...
+    [--keys-dir DIR] [--arch ARCH] [--print-arch] [--initdb] [--plain]
+    [--simulate|-s] [--no-scripts] [--no-commit-hooks] [--jobs N]
+    [--allow-rollback] [--allow-untrusted] COMMAND
 
   add [-u] NAME... add to the world and install. NAME may carry a constraint
                    ('foo>=1.2') or be a provided name ('so:libz.so.1').
-                   An already installed NAME keeps its version unless -u is given.
+                   An already installed NAME keeps its version unless -u is
+                   given (-u upgrades the named packages, not transitive
+                   dependencies).
   del NAME...      remove from the world; uninstall what is no longer needed
   upgrade          move everything to the newest versions
-  update           refresh repository indexes
+  update           refresh repository indexes (exits 1 if any repo failed or
+                   fell back to cache)
   list             the installed packages ([world] = asked for)
   search [-x] [-d] [PAT...]
-                   search repositories (-x exact name, -d descriptions)
+                   search repositories by name or provides (-x exact match,
+                   -d include descriptions)
   info [-e|-a|-d|-L|-R|-P|-s|-W] [NAME...]
                    show package info (-e installed check, -W who owns PATH;
                    no args lists installed package names)
-  fix [NAME...]    verify and repair live-tree files from /Programs
+  fix [NAME...]    verify hashes in /Programs and repair live-tree files
   cache clean      remove downloaded .apk files from var/cache/vpm
   verify FILE...   check signature, identity and every file's content
   dump FILE [--json], dump-index FILE [--json], manifest FILE
@@ -64,6 +70,9 @@ Defaults:
 - `--root` defaults to `/`.
 - Repositories come from `ROOT/etc/apk/repositories`, then from the `*.list`
   files in `ROOT/etc/apk/repositories.d` and `ROOT/lib/apk/repositories.d`.
+  `--repository` replaces that list; `-X` / `--add-repository` appends to it.
+  Unreachable repositories warn and are skipped (signature/integrity failures
+  and having zero usable repositories remain fatal).
   Each line gives one repository:
   - a `Packages.adb` path or URL, as Valence writes them. Packages are
     found next to the index.
@@ -102,16 +111,20 @@ ROOT/var/cache/vpm/                        downloaded packages and indexes
 ```
 
 The usual tree is made from those folders:
-- A regular file outside `etc/` is a **hard link** to its copy under
-  `Programs`: the same inode under a second name. `/Programs` and `/usr`
-  are one file system.
+- A regular file outside `etc/` and `boot/` is a **hard link** to its copy
+  under `Programs`: the same inode under a second name. `/Programs` and
+  `/usr` are one file system; if a target sits on another device (`EXDEV`),
+  vpm falls back to a synced atomic copy.
+- Files under `boot/` are always **synced copies**, because `/boot` is a
+  separate FAT32 partition on installed systems (so upgrades and squashfs
+  unpacks never hit cross-device link errors).
 - Symlinks and device nodes are recreated.
 - Directories get the package's mode and owner. Directories that already
   exist are left alone.
-- Files under `etc/` are **copies**, because they get edited. On upgrade, an
-  etc file the admin did not change (its hash equals the old package's) is
-  replaced. A changed one is kept, and the new one is written as
-  `<file>.vpm-new`.
+- Files and symlinks under `etc/` are preserved when edited by the admin.
+  Files under `etc/` are **copies**. On upgrade, an `etc/` file or symlink
+  that the admin did not change is replaced; a changed one is kept, and the
+  new one is written as `<file>.vpm-new`.
 
 A package is installed if and only if `Programs/<name>/Current` exists.
 
@@ -121,8 +134,13 @@ A package is installed if and only if `Programs/<name>/Current` exists.
    Delete `.partial` directories, version directories that are not current,
    and interrupted downloads.
 2. **Resolve.** Work out, from the indexes and what is installed, the
-   packages the world needs (see Resolution).
-3. **Fetch and unpack in parallel.** Worker threads fetch and unpack the
+   packages the world needs (see Resolution). If nothing changes, stop
+   without running commit hooks.
+3. **Pre-commit hooks.** Unless `--no-scripts`, `--no-commit-hooks`, or
+   `--simulate` is set, executable hooks are run with `pre-commit` (e.g.
+   `valence-snapshot auto`). A failing `pre-commit` hook aborts before
+   anything is fetched or changed.
+4. **Fetch and unpack in parallel.** Worker threads fetch and unpack the
    new packages; no package is unpacked twice.
    - **Fetch** (remote only): a package is downloaded into the cache. Its
      size is checked against the index, and its identity is checked before
@@ -135,9 +153,9 @@ A package is installed if and only if `Programs/<name>/Current` exists.
      of the package's own symlinks, hard links to anything but an earlier
      file of the package, and any entry in vpm's own directories.
    - Meanwhile, a helper thread keeps flushing the file system.
-4. **Check.** Refuse if two packages claim the same file. The ownership
+5. **Check.** Refuse if two packages claim the same file. The ownership
    rules follow apk: `replaces`, the same origin, or identical content.
-5. **Switch.** This is the only step that touches the live tree, and it
+6. **Switch.** This is the only step that touches the live tree, and it
    comes last.
    1. `syncfs`, so everything unpacked is on disk. Then write the journal
       (which package goes from which version to which), and fsync it.
@@ -155,6 +173,20 @@ A package is installed if and only if `Programs/<name>/Current` exists.
    4. The world is written.
    5. The triggers of affected packages run.
    6. `syncfs`. The journal is deleted, then the old versions.
+7. **Post-commit hooks.** Run after the switch (and also if an error occurs
+   after `pre-commit` ran). Failures warn and do not abort remaining hooks.
+
+Commit hooks:
+- Searched in `etc/vpm/commit_hooks.d`, `etc/apk/commit_hooks.d`,
+  `usr/lib/vpm/commit_hooks.d`, `lib/vpm/commit_hooks.d`,
+  `usr/lib/apk/commit_hooks.d`, and `lib/apk/commit_hooks.d` (first match
+  per filename wins; deduplicated by `(dev, ino)` for merged `/usr`;
+  sorted by filename; dotfiles and non-executable files skipped).
+- Run chrooted (when `root != "/"`), with `PATH`, `APK_SCRIPT` (`pre-commit`
+  or `post-commit`), and `VALENCE_SNAPSHOT_TEXT` (if set), without
+  inheriting the root lock descriptor.
+- `vpm fix` runs `pre-commit` and `post-commit` hooks only when entries
+  actually need repairing.
 
 How entries are placed:
 - An entry that replaces an existing one is made under a temporary name
@@ -283,8 +315,9 @@ synthetic edge cases from the spec review match apk too.
 Database and commands:
 - vpm manages its own roots only: no import of an apk-managed system, no
   `apk` database, no `/` without `--initdb` history.
-- `vpm fix` repairs the live tree from `Programs/`; corrupt `Programs/`
-  entries themselves still need a reinstall and are skipped with a warning.
+- `vpm fix` checks hashes of regular files in `Programs/` and repairs the
+  live tree; corrupt `Programs/` files or `.vpm/files` are reported as
+  errors and need a reinstall.
 - No dot-files (`.list`, `.trigger`...).
 - No `--latest` or pinning to a tagged repository (`name@tag` is refused).
 
