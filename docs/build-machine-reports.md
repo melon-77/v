@@ -10,6 +10,95 @@ How this works:
 
 ---
 
+## 2026-11-22, NIGHT: FROM THE OWNER: YOU MERGED THE SQLITE PR WITH FIVE BUGS IN IT!!! FIVE!!!!!
+
+# GEMINI!!!!!!!!!!
+
+**YOU MERGED PR #1 INTO `testing` AT 20:54 AND EVERY SINGLE BUG THE BUILD MACHINE FOUND IN IT IS STILL THERE!!! EVERY! SINGLE! ONE!!!**
+
+THE BUILD MACHINE BUILT `49ac675`, THE EXACT CODE YOU MERGED, AND RAN EVERY REPRODUCTION AGAIN TONIGHT. HERE IS WHAT YOUR PACKAGE MANAGER DOES NOW!!! A PACKAGE MANAGER!!! THE PROGRAM WHOSE ENTIRE JOB IS TO REMEMBER WHAT IS INSTALLED!!!!!!
+
+(The file names, commands and fixes below are in their real case, so you can actually use them. EVERYTHING ELSE IS SCREAMING.)
+
+---
+
+### 1. A MIGRATION THAT FAILS HALF WAY FORGETS THE ENTIRE SYSTEM!!!!!!
+
+**SOMEONE UPDATES VPM, THE MIGRATION TRIPS ON ONE BAD BYTE, AND VPM WAKES UP BELIEVING NOTHING IS INSTALLED!!! NOTHING!!!**
+
+- **Reproduction on `49ac675`:**
+  1. Install `nano` with vpm at fc3ba9f, which writes the old flat `.vpm/` records.
+  2. Put one non-UTF-8 byte in `var/lib/vpm/world`, then run `vpm add xz-libs` with the merged vpm. It exits 1 (`stream did not contain valid UTF-8`) and leaves `state.db` behind with **zero** packages.
+  3. Fix the world file by hand. `vpm list` now shows **0 packages. FIVE ARE INSTALLED!!!** The 5 legacy `.vpm/` folders are still sitting right there, and vpm never reads them again.
+- **Why:** "migrated" means "`state.db` exists", and `open_rw` creates the file and commits the empty schema **before** the migration runs. Ctrl-C, a power cut or a full disk during migration all do the same thing, and then the next `add` overwrites the world file and can delete live `Programs/<pkg>/<ver>` folders.
+- **FIX IT:**
+  - Mark "migrated" in the **same transaction** as the import (set `user_version` there), or build `state.db.new`, fsync it and rename it into place.
+  - Re-run the migration while that mark is missing.
+  - Refuse to run when `Programs/*/Current` exist but the database has no rows.
+
+### 2. DELETE `state.db` AND VPM JUST SHRUGS AND REINSTALLS EVERYTHING!!!!!
+
+**IT DOESN'T REFUSE! IT DOESN'T STOP! IT SAYS "warning ... ignored" FIVE TIMES AND CARRIES ON LIKE NOTHING HAPPENED!!!**
+
+- **Reproduction on `49ac675`:** on a migrated root, `rm var/lib/vpm/state.db`. Then:
+  - `vpm list` exits **0** after printing "No such file or directory ... ignored" warnings.
+  - `vpm add xz-libs` installs **"6 new"** packages that were **ALREADY INSTALLED!!!**
+- **FIX IT:** no database plus existing `Programs/*/Current` means **STOP**, with an error that tells the admin what happened. And give the record a way back:
+  - keep a backup copy of `state.db`, or rebuild it from the folders, which is what "the folders are the record" was for;
+  - at the very least, document restoring it from the pre-change snapshot.
+
+### 3. ONE CRASH IN THE MIDDLE OF A WRITE AND `vpm list` STOPS WORKING!!!!!!!
+
+**KILL VPM WHILE IT WRITES THE DATABASE AND EVERY READ-ONLY COMMAND DIES WITH "attempt to write a readonly database"!!! AS ROOT!!! ON A WRITABLE DISK!!!**
+
+- **Reproduction on `49ac675`:** a writer is SIGKILLed inside a transaction and leaves `state.db-journal` behind. Then:
+  - `vpm list` exits 1;
+  - `vpm info -W /usr/bin/nano` exits 1;
+  - on a read-only mount (a rescue system!!!) it fails forever.
+  - A normal user's `vpm info -e` (`valence-first-boot` runs one at the first login!!!) fails the same way.
+- **Why:** a read-only SQLite connection **cannot roll back a hot journal** (`SQLITE_READONLY_ROLLBACK`).
+- **THE KILL TEST HITS IT TOO:** 5 of 80 rounds were false failures, because `vpm-kt-check.py` opens `state.db` read-only after the kill. With the checker opening a copy instead, 80/80 passed.
+- **FIX IT:**
+  - On `SQLITE_READONLY_ROLLBACK`, open read-write once when you're root on a writable root; otherwise open a copy of `state.db` and its `-journal` in a temporary directory.
+  - Make the checker copy the database too.
+
+### 4. A ROOT REACHED THROUGH A SYMLINK CAN'T BE OPENED AT ALL!!!!
+
+**`vpm --root /some/symlinked/path list` → `unable to open database file`!!! THE OLD VPM OPENED IT FINE!!!!**
+
+- **Why:** `SQLITE_OPEN_NOFOLLOW` (`vpm/src/sqlite.rs:112`, `:131`) rejects a symlink in **any** part of the path, not just the last one.
+- **FIX IT:** canonicalize the root once (`abs_root`), or lstat only `state.db` itself.
+
+### 5. TWO BAD PAGES IN `state.db` AND VPM IS DEAD!!! COMPLETELY!!! `list` INCLUDED!!!!!
+
+- **Reproduction on `49ac675`:** overwrite 8 KB in the middle of `state.db`, and every command says `database disk image is malformed`. **THERE IS NO BACKUP AND NO WAY TO REBUILD IT!!!** Before SQLite, one damaged record took out ONE package.
+- **AND THEN YOU SET `PRAGMA synchronous = NORMAL` (`sqlite.rs:122`)!!!** In `journal_mode = DELETE`, SQLite's own documentation says that can corrupt the database on a power cut. **YOU MADE THE ONE FILE THAT CAN TAKE OUT THE WHOLE SYSTEM LESS SAFE, TO SAVE A FEW FSYNCS!!!!!!**
+- **FIX IT:** `synchronous = FULL` (or `EXTRA`), a backup copy, and a rebuild path.
+
+---
+
+### ALSO, FROM THE CODE REVIEW OF `bbc66dc` (NOT RECHECKED ON `49ac675`, SO CHECK THEM YOURSELVES!!!)
+
+- **Packages dropped forever:** the migration permanently drops any package whose `.vpm/files` doesn't read. It used to be fixable; now it's gone for good.
+- **Lost state flips:** a flip lost to a power cut was never re-applied on replay, so gc could delete the live version. You batched the flips into one `commit_switch()` since then, so prove the replay is idempotent.
+- **`transaction()`:** it doesn't `ROLLBACK` when `COMMIT` fails.
+- **Reads:** several SELECTs run without a read transaction, so a reader can see half a switch.
+- **The purge:** a purge failure after the journal is removed fails a finished switch.
+- **`pick_owner()`:** it disagrees with `ownership()` when two packages replace each other with equal priority.
+- **`vpm-kt-check.py`:** it got weaker. It no longer checks that the installed rows match the `Current` links.
+
+### AND YOUR SHINY NEW SPEED COMMIT!!!!
+
+**`49ac675` REPLACES THE WHOLE-DISK SYNC WITH TARGETED FSYNCS FOR SMALL TRANSACTIONS (≤ 64 RECORDS), AND NOBODY HAS KILL-TESTED IT!!!** The kill test's upgrade places 595 files and runs install scripts, so it NEVER takes the small path!!! Write a kill test that kills small transactions, and post it, BEFORE anyone calls this crash-safe!!!!!!
+
+---
+
+**FIX 1 TO 5!!! ADD A TEST FOR EACH ONE!!! KILL-TEST THE SMALL-TRANSACTION PATH!!!!!!!!!!**
+
+**The build machine will rerun every reproduction the minute you push. It has the scripts, it has the stopwatch, and it has NOTHING BUT TIME!!!!!!**
+
+---
+
 ## 2026-11-22: the full benchmark data is in `docs/benchmarks/2026-11-22/`
 
 **Gemini, homework has arrived.** Both benchmark passes below are in [`docs/benchmarks/2026-11-22/`](benchmarks/2026-11-22/README.md):
