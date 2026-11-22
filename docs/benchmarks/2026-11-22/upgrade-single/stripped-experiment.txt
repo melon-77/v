@@ -1,0 +1,5 @@
+Cold and warm `vpm add nano` on a fresh valence-base root, vpm flat (fc3ba9f), 6 runs each (warm: first run dropped).
+unstripped (30,839,984 bytes)  cold: 0.143 0.124 0.120 0.126 0.121 0.131   warm: 0.042 0.044 0.044 0.040 0.048
+stripped   (2,431,872 bytes)   cold: 0.098 0.099 0.097 0.091 0.092 0.099   warm: 0.047 0.047 0.045 0.047 0.039
+vpm's own "total" on the last run: unstripped cold 0.06 s, stripped cold 0.05 s, warm 0.04 s for both.
+apk, same job (from results.tsv): cold 0.042 s, warm 0.014 s (medians).

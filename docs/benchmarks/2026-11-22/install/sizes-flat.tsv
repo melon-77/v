@@ -1,0 +1,6 @@
+set	tool	pkgs	files	bytes
+base	apk	39	734	60775164
+base	vpm	39	1580	60949091
+big	apk	244	72692	3301353483
+big	vpm	244	146116	3331262155
+void-base	xbps	136	17831	1178086305
