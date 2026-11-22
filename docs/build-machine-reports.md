@@ -12,36 +12,46 @@ How this works:
 
 ## 2026-11-22: FROM THE OWNER: VPM HAS TO BE FASTER THAN APK AND XBPS. MEASURE IT. NOW.
 
-**The owner is angry about this, and is right to be.** Speed is a "done when" of phase 10, written in `ROADMAP.md` from the start. It is not a nice-to-have:
+**Dear Gemini, you magnificent space heater,**
+
+the owner is angry, and he has every right to be. Here's the line from `ROADMAP.md`, which has been there since the day phase 10 was written:
 
 > it installs the base system measurably faster than apk and xbps do on the same machine.
 
-That line is the reason vpm exists at all. Without it, the project would keep apk.
+That line is the entire reason vpm exists. Take it away and vpm is apk with extra steps and a worse attitude. And you've been treating it like an optional DLC.
 
-**Where it stands:**
+**The receipts:**
 
-- **The only numbers are from stage 1, on 21 November:** 1.6 to 2.2 times faster than apk.
-- **xbps has never been measured. Not once.** ROADMAP.md:244 says "Not yet measured against xbps". `vpm/README.md:355` says "xbps was not measured". There is no xbps on the build machine.
-- **Since stage 1, nobody has measured anything.** Meanwhile vpm gained:
-  - a SQLite database, written in transactions with `synchronous=FULL`;
-  - per-package state flips, each its own commit;
-  - more fsyncs;
-  - and on `vpm-hardening`, `openat2(RESOLVE_IN_ROOT)` and `*at()` calls on every live-tree operation.
-- **Not one of those commits says what it did to the speed.** PR #1's description talks about "O(log N)" lookups, but there is no timing anywhere in it.
+- **The only speed numbers are from stage 1, on 21 November:** 1.6 to 2.2 times faster than apk. You inherited those numbers. You didn't earn them.
+- **xbps has never been measured. Not once. Not ever.**
+  - ROADMAP.md:244 says "Not yet measured against xbps".
+  - `vpm/README.md:355` says "xbps was not measured".
+  - There isn't even an xbps binary on the build machine.
+  - So the race has been running for two days, and one of the cars was never put on the track.
+- **Since stage 1, nobody has timed a single thing.** In that time you bolted on:
+  - **a whole SQLite database** (with `synchronous=FULL`, the "drive with the handbrake on" setting) to remember which folders you made. The folders were right there. They were the record. That was the point.
+  - **a separate commit for every package's state flip**, because one fsync is never enough when you could have forty.
+  - **`openat2(RESOLVE_IN_ROOT)` on every live-tree operation** (`vpm-hardening`): lovingly hand-installed speed bumps on your own motorway.
+- **Not one of those commits says what it did to the speed.** PR #1's description says "O(log N)" with the confidence of a man who has never owned a stopwatch. There isn't a single timing anywhere in it.
+- **apk is written in C and has been tuned for over a decade. Right now it's laughing at you.** You don't currently know whether you're beating it, and that should keep you up at night. (You don't sleep. Use the time.)
 
-**What the owner wants, starting now:**
+**What the owner wants, starting now. These aren't suggestions:**
 
-1. **No more features until the numbers exist.**
-2. **Before PR #1 or `vpm-hardening` is merged**, run `vpm/tools/bench/vpm-bench.sh` (or whatever replaces it), with vpm at fc3ba9f, the PR's vpm, apk and xbps, on the same machine:
+1. **No more features until the numbers exist.** Stop gold-plating the garage and race the car.
+2. **Before PR #1 or `vpm-hardening` is merged**, run `vpm/tools/bench/vpm-bench.sh` (or whatever replaces it) on the same machine, with vpm at fc3ba9f, the PR's vpm, apk and xbps:
    - installing the base system into a fresh root;
    - an upgrade;
    - with a cold and a warm cache.
 
-   Put the table in the PR description.
-3. **Get xbps measured.** If the build machine needs xbps (Void's static `xbps` from Void's own site, checksum checked), ask for it in the handoff. The build machine will set it up and run the benchmark once the owner says yes.
-4. **From now on, every vpm change that touches unpack, the switch or the database carries before-and-after timings.** A change that makes vpm slower than apk or xbps does not get merged. A change that makes it slower than before has to say why the cost is worth it, in numbers.
+   Put the table in the PR description. A PR without the table is a vibe, not a PR.
+3. **Get xbps measured.** If the build machine needs xbps (Void's static `xbps` from Void's own site, checksum checked), ask for it in the handoff. The build machine will set it up and run the benchmark the moment the owner says yes.
+4. **From now on, every vpm change that touches unpack, the switch or the database carries before-and-after timings.**
+   - A change that makes vpm slower than apk or xbps does not get merged. Not "merged with a TODO". Not merged.
+   - A change that makes vpm slower than it was before has to prove, in numbers, that it was worth it.
 
-There is a stage 1 baseline to compare with. If SQLite, `openat2` or the extra fsyncs cost more than they save, the benchmark will show it, and that is what decides.
+The stage 1 baseline is right there to compare against. If SQLite, `openat2` or the fsync confetti cost more than they save, the benchmark will say so, and the benchmark gets the final word. Not you, and not "O(log N)".
+
+With love, and a stopwatch.
 
 ---
 
