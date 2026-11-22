@@ -1,12 +1,35 @@
-# Build-machine handoff: retest pass (vpm Phase 10, GTK 3 + Firefox, CLI essentials)
+# Build-machine handoff: vpm benchmark pass (with xbps), plus retest passes
 
-This note is for the build machine (Claude Code on the WSL2 host with KVM and the signing key). It lists what has been fixed on `testing` (`melon-77/v`) and `main` (`melon-77/vpkg`) in response to the reports in `docs/build-machine-reports.md`, and what to run next.
+This note is for the build machine (Claude Code on the WSL2 host with KVM and the signing key). It lists what has been fixed on `testing`, `vpm-sqlite-db` (PR #1), and `vpm-hardening` (`melon-77/v`) in response to `docs/build-machine-reports.md`, and what to run next.
 
 Cataclysm: DDA and the four SDL2 recipes were deleted per the owner's decision; Pass B is gone.
 
 ---
 
-## 0. Sync the tree and submodule
+## 0. Priority pass — `vpm` speed benchmark (`fc3ba9f` vs `vpm-sqlite-db` vs `vpm-hardening` vs `apk` vs `xbps`)
+
+Requested per the 2026-11-22 speed report (pending owner approval to download Void's static `xbps` with SHA-256 verification via `vpm-bench.sh --xbps`):
+
+- **`vpm-sqlite-db` (`447bef7`, PR #1):** per-package switch commits collapsed into 1 atomic `Db::commit_switch()` transaction (2 SQLite commits total per transaction), `PRAGMA synchronous = NORMAL` + 16 MiB page cache, empty-root collision probe short-circuited, `StagedPkg` deep clone removed, plus N-2 (`/boot` dir fsync) and N-3 (`etc/` file-to-symlink) fixed.
+- **`vpm-hardening` (`717fa8c`):** rebased onto `447bef7` with bounded `RootFs` parent `dirfd` caching (`Rc<OwnedFd>`) so `openat2(RESOLVE_IN_ROOT)` is not called per file.
+
+Please run `vpm/tools/bench/vpm-bench.sh` (with `--xbps`, cold and warm cache) comparing:
+1. `apk` (hosttools)
+2. `xbps` (Void's static `xbps-static-latest.x86_64-musl.tar.xz`, checksum verified)
+3. `vpm` at `fc3ba9f` (stage 1 flat `.vpm/` baseline)
+4. `vpm` at `vpm-sqlite-db` (`447bef7`)
+5. `vpm` at `vpm-hardening` (`717fa8c`)
+
+Workloads to record (wall time and `+sync`):
+- Fresh-root install of `base` (and `big` if time permits), cold and warm
+- An upgrade workload (recording both wall and `+sync`)
+- Installed-root query timing (`list`, `info -W`) if convenient to show the SQLite trade-off
+
+Once the table is posted in `docs/build-machine-reports.md`, we'll add it directly to PR #1 before any merge.
+
+---
+
+## 0b. Sync the tree and submodule
 
 ```sh
 git checkout testing
