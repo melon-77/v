@@ -46,6 +46,7 @@ use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{fchown, lchown, symlink, DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -55,7 +56,7 @@ use crate::adb::FileKind;
 use crate::db::{self, Db, FileRec, JournalFile, Op, PkgMeta, RecKind, StagedPkg};
 use crate::digest::{Alg, Hasher};
 use crate::error::{Error, Result};
-use crate::rootfs::{self, Resolved, RootFs};
+use crate::rootfs::{self, EntryAt, RootFs};
 use crate::sys;
 use crate::unpack::{self, IdMap};
 
@@ -209,6 +210,68 @@ fn ignore_nonposix(r: io::Result<()>) -> io::Result<()> {
     }
 }
 
+/// True when regular file at `(dirfd, leaf)` has the same content as `r`.
+fn same_content_at(dirfd: RawFd, leaf: &[u8], src: &Path, r: &FileRec) -> bool {
+    if let Some(alg) = Alg::from_len(r.hash.len()) {
+        return hash_file_at(dirfd, leaf, alg).map_or(false, |h| h == r.hash);
+    }
+    match (hash_file_at(dirfd, leaf, Alg::Sha256), hash_file(src, Alg::Sha256)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Copies regular file `src` (opened with `O_NOFOLLOW`) to `(dirfd, leaf)` via
+/// a temporary leaf and `renameat`. Immune to directory-symlink TOCTOU races
+/// because `dirfd` was opened via `openat2(RESOLVE_IN_ROOT)`.
+fn copy_file_atomic_at(
+    src: &Path,
+    dirfd: RawFd,
+    leaf: &[u8],
+    r: &FileRec,
+    chown: bool,
+    owner: (u32, u32),
+    sync_file: bool,
+    tolerate_nonposix: bool,
+) -> io::Result<()> {
+    let tmp = rootfs::tmp_leaf(leaf);
+    let _ = sys::unlinkat_in(dirfd, &tmp, false);
+    let res = (|| {
+        let mut i = sys::open_regular_nofollow(src)?;
+        let mut o = sys::openat_create_new(dirfd, &tmp, 0o600)?;
+        io::copy(&mut i, &mut o)?;
+        if chown {
+            let r_ch = fchown(&o, Some(owner.0), Some(owner.1));
+            if tolerate_nonposix {
+                ignore_nonposix(r_ch)?;
+            } else {
+                r_ch?;
+            }
+        }
+        let r_perm = o.set_permissions(fs::Permissions::from_mode(r.mode & 0o7777));
+        if tolerate_nonposix {
+            ignore_nonposix(r_perm)?;
+        } else {
+            r_perm?;
+        }
+        let t = UNIX_EPOCH + Duration::from_secs(r.mtime);
+        let r_time = o.set_times(FileTimes::new().set_accessed(t).set_modified(t));
+        if tolerate_nonposix {
+            ignore_nonposix(r_time)?;
+        } else {
+            r_time?;
+        }
+        if sync_file {
+            o.sync_all()?;
+        }
+        sys::renameat_in(dirfd, &tmp, leaf)
+    })();
+    if res.is_err() {
+        let _ = sys::unlinkat_in(dirfd, &tmp, false);
+    }
+    res
+}
+
 /// True when regular file `dst` has the same content as `r` (comparing
 /// against `r.hash`, or against `src` if `r.hash` is empty).
 fn same_content(dst: &Path, src: &Path, r: &FileRec) -> bool {
@@ -222,11 +285,7 @@ fn same_content(dst: &Path, src: &Path, r: &FileRec) -> bool {
 }
 
 /// Copies regular file `src` (opened with `O_NOFOLLOW`) to `dst` via a
-/// temporary file and `rename`. When `sync_file` is set, calls `sync_all`
-/// before renaming (important when `dst` is on another filesystem such as
-/// `/boot`, since `syncfs(root)` does not flush other mounts). When
-/// `tolerate_nonposix` is set, `EPERM`/`EINVAL` from chown/chmod/utimens on
-/// FAT32 are ignored.
+/// temporary file and `rename`.
 fn copy_file_atomic(
     src: &Path,
     dst: &Path,
@@ -280,6 +339,11 @@ fn copy_file_atomic(
         let _ = fs::remove_file(&tmp);
     }
     res
+}
+
+/// Hashes a live file at `(dirfd, leaf)` without following a final symlink.
+fn hash_file_at(dirfd: RawFd, leaf: &[u8], alg: Alg) -> io::Result<Vec<u8>> {
+    hash_open(&mut sys::openat_regular_nofollow(dirfd, leaf)?, alg)
 }
 
 /// Hashes a live file. A final symlink is not followed and only a regular
@@ -342,7 +406,6 @@ struct Switch<'a> {
     deferred: Vec<Deferred>,
     small_tx: bool,
     touched_dirs: HashSet<PathBuf>,
-    copied_files: Vec<PathBuf>,
 }
 
 impl<'a> Switch<'a> {
@@ -373,75 +436,79 @@ impl<'a> Switch<'a> {
         }
     }
 
-    /// Hard link `src` (in Programs) to `dst`; nothing to do if `dst` is
-    /// already that inode (or, across filesystems, a regular file with the
-    /// same content). Falls back to an atomic synced copy on `EXDEV`.
-    fn place_link(&mut self, src: &Path, r: &FileRec, dst: &Resolved) -> io::Result<()> {
-        match fs::symlink_metadata(&dst.host) {
+    /// Hard link `src` (in Programs) to `dst` via `linkat`/`renameat`; nothing
+    /// to do if `dst` is already that inode (or, across filesystems, a regular
+    /// file with the same content). Falls back to an atomic synced copy on `EXDEV`.
+    fn place_link(&mut self, src: &Path, r: &FileRec, dst: &EntryAt) -> io::Result<()> {
+        let dirfd = dst.fd();
+        let leaf = &dst.leaf;
+        match sys::fstatat_nofollow(dirfd, leaf) {
             Ok(dm) => {
                 let sm = fs::symlink_metadata(src)?;
-                if dm.dev() == sm.dev() && dm.ino() == sm.ino() {
+                if dm.st_dev == sm.dev() && dm.st_ino == sm.ino() {
                     self.rep.unchanged += 1;
                     return Ok(());
                 }
-                if dm.is_dir() {
+                if sys::stat_is_dir(&dm) {
                     return Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))));
                 }
-                if dm.dev() != sm.dev() && dm.is_file() && r.is_regular() && same_content(&dst.host, src, r) {
+                if dm.st_dev != sm.dev() && sys::stat_is_file(&dm) && r.is_regular() && same_content_at(dirfd, leaf, src, r) {
                     self.rep.unchanged += 1;
                     return Ok(());
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::hard_link(src, &dst.host) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match sys::linkat_into(src, dirfd, leaf) {
                 Ok(()) => {
                     self.file_placed();
                     return Ok(());
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => {
-                    return self.copy_cross_dev(src, &dst.host, r);
+                    return self.copy_cross_dev_at(src, dirfd, leaf, r);
                 }
                 Err(e) => return Err(e),
             },
             Err(e) => return Err(e),
         }
-        let tmp = rootfs::tmp_name(&dst.host);
-        let _ = fs::remove_file(&tmp);
-        match fs::hard_link(src, &tmp) {
+        let tmp = rootfs::tmp_leaf(leaf);
+        let _ = sys::unlinkat_in(dirfd, &tmp, false);
+        match sys::linkat_into(src, dirfd, &tmp) {
             Ok(()) => {}
             Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => {
-                return self.copy_cross_dev(src, &dst.host, r);
+                return self.copy_cross_dev_at(src, dirfd, leaf, r);
             }
             Err(e) => return Err(e),
         }
-        if let Err(e) = fs::rename(&tmp, &dst.host) {
-            let _ = fs::remove_file(&tmp);
+        if let Err(e) = sys::renameat_in(dirfd, &tmp, leaf) {
+            let _ = sys::unlinkat_in(dirfd, &tmp, false);
             return Err(e);
         }
         self.file_placed();
         Ok(())
     }
 
-    fn place_symlink(&mut self, target: &[u8], r: &FileRec, old: Option<&FileRec>, dst: &Resolved) -> io::Result<()> {
+    fn place_symlink(&mut self, target: &[u8], r: &FileRec, old: Option<&FileRec>, dst: &EntryAt) -> io::Result<()> {
+        let dirfd = dst.fd();
+        let leaf = &dst.leaf;
         let mut write_new = false;
-        match fs::symlink_metadata(&dst.host) {
-            Ok(m) if m.file_type().is_symlink() => {
-                let cur = fs::read_link(&dst.host)?;
-                if cur.as_os_str().as_bytes() == target {
+        match sys::fstatat_nofollow(dirfd, leaf) {
+            Ok(m) if sys::stat_is_symlink(&m) => {
+                let cur = sys::readlinkat_in(dirfd, leaf)?;
+                if cur == target {
                     self.rep.unchanged += 1;
                     return Ok(());
                 }
                 if is_etc(&r.path) {
                     let pristine = matches!(
                         old.map(|o| &o.kind),
-                        Some(RecKind::File(FileKind::Symlink(ot))) if cur.as_os_str().as_bytes() == ot.as_slice()
+                        Some(RecKind::File(FileKind::Symlink(ot))) if cur == *ot
                     );
                     if !pristine {
                         write_new = true;
                     }
                 }
             }
-            Ok(m) if m.is_dir() => {
+            Ok(m) if sys::stat_is_dir(&m) => {
                 return Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))))
             }
             Ok(m) if is_etc(&r.path) => {
@@ -458,11 +525,9 @@ impl<'a> Switch<'a> {
                     write_new = true;
                 }
             }
-            // a new name: made directly when it needs no owner change (a
-            // symlink appears atomically with its target; an lchown after it
-            // could be lost to a crash)
+            // a new name: made directly when it needs no owner change
             Err(e) if e.kind() == io::ErrorKind::NotFound && (!self.chown || self.owner_ids(r) == (0, 0)) => {
-                match symlink(OsStr::from_bytes(target), &dst.host) {
+                match sys::symlinkat_into(target, dirfd, leaf) {
                     Ok(()) => {
                         self.file_placed();
                         return Ok(());
@@ -474,23 +539,22 @@ impl<'a> Switch<'a> {
             _ => {}
         }
         if write_new {
-            let mut n = dst.host.as_os_str().to_os_string();
-            n.push(".vpm-new");
-            let newp = PathBuf::from(n);
-            let already = fs::symlink_metadata(&newp).map_or(false, |m| {
-                m.file_type().is_symlink()
-                    && fs::read_link(&newp).map_or(false, |t| t.as_os_str().as_bytes() == target)
+            let mut new_leaf = leaf.clone();
+            new_leaf.extend_from_slice(b".vpm-new");
+            let already = sys::fstatat_nofollow(dirfd, &new_leaf).map_or(false, |m| {
+                sys::stat_is_symlink(&m)
+                    && sys::readlinkat_in(dirfd, &new_leaf).map_or(false, |t| t == target)
             });
             if !already {
-                let tmp = rootfs::tmp_name(&newp);
-                let _ = fs::remove_file(&tmp);
-                symlink(OsStr::from_bytes(target), &tmp)?;
+                let tmp = rootfs::tmp_leaf(&new_leaf);
+                let _ = sys::unlinkat_in(dirfd, &tmp, false);
+                sys::symlinkat_into(target, dirfd, &tmp)?;
                 if self.chown {
                     let (u, g) = self.owner_ids(r);
-                    lchown(&tmp, Some(u), Some(g))?;
+                    sys::fchownat_nofollow(dirfd, &tmp, u, g)?;
                 }
-                if let Err(e) = fs::rename(&tmp, &newp) {
-                    let _ = fs::remove_file(&tmp);
+                if let Err(e) = sys::renameat_in(dirfd, &tmp, &new_leaf) {
+                    let _ = sys::unlinkat_in(dirfd, &tmp, false);
                     return Err(e);
                 }
                 self.file_placed();
@@ -504,67 +568,69 @@ impl<'a> Switch<'a> {
             self.rep.new_configs.push(msg);
             return Ok(());
         }
-        let tmp = rootfs::tmp_name(&dst.host);
-        let _ = fs::remove_file(&tmp);
-        symlink(OsStr::from_bytes(target), &tmp)?;
+        let tmp = rootfs::tmp_leaf(leaf);
+        let _ = sys::unlinkat_in(dirfd, &tmp, false);
+        sys::symlinkat_into(target, dirfd, &tmp)?;
         if self.chown {
             let (u, g) = self.owner_ids(r);
-            lchown(&tmp, Some(u), Some(g))?;
+            sys::fchownat_nofollow(dirfd, &tmp, u, g)?;
         }
-        if let Err(e) = fs::rename(&tmp, &dst.host) {
-            let _ = fs::remove_file(&tmp);
+        if let Err(e) = sys::renameat_in(dirfd, &tmp, leaf) {
+            let _ = sys::unlinkat_in(dirfd, &tmp, false);
             return Err(e);
         }
         self.file_placed();
         Ok(())
     }
 
-    /// Copies `src` to `dst` (through a temporary name) with the record's
-    /// mode, owner and mtime.
-    fn copy_to(&mut self, src: &Path, dst: &Path, r: &FileRec) -> io::Result<()> {
+    /// Copies `src` to `(dirfd, leaf)` with the record's mode, owner and mtime.
+    fn copy_to_at(&mut self, src: &Path, dirfd: RawFd, leaf: &[u8], r: &FileRec) -> io::Result<()> {
         let owner = self.owner_ids(r);
-        copy_file_atomic(src, dst, r, self.chown, owner, false, false)?;
-        if self.small_tx {
-            self.copied_files.push(dst.to_path_buf());
-        }
+        copy_file_atomic_at(src, dirfd, leaf, r, self.chown, owner, self.small_tx, false)?;
         self.file_placed();
         Ok(())
     }
 
-    /// Copies `src` to `dst` on another filesystem (e.g. FAT32 `/boot`),
+    /// Copies `src` to `(dirfd, leaf)` on another filesystem (e.g. FAT32 `/boot`),
     /// syncing the file before rename and tolerating non-POSIX metadata errors.
-    fn copy_cross_dev(&mut self, src: &Path, dst: &Path, r: &FileRec) -> io::Result<()> {
+    fn copy_cross_dev_at(&mut self, src: &Path, dirfd: RawFd, leaf: &[u8], r: &FileRec) -> io::Result<()> {
         let owner = self.owner_ids(r);
-        copy_file_atomic(src, dst, r, self.chown, owner, true, true)?;
+        copy_file_atomic_at(src, dirfd, leaf, r, self.chown, owner, true, true)?;
         self.file_placed();
         Ok(())
     }
 
     /// Places a file under `boot/` as a synced copy (never hard-linked).
-    fn place_boot(&mut self, src: &Path, r: &FileRec, dst: &Resolved) -> io::Result<()> {
-        match fs::symlink_metadata(&dst.host) {
-            Ok(dm) if dm.is_dir() => {
+    fn place_boot(&mut self, src: &Path, r: &FileRec, dst: &EntryAt) -> io::Result<()> {
+        let dirfd = dst.fd();
+        let leaf = &dst.leaf;
+        match sys::fstatat_nofollow(dirfd, leaf) {
+            Ok(dm) if sys::stat_is_dir(&dm) => {
                 return Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))));
             }
-            Ok(dm) if dm.is_file() && same_content(&dst.host, src, r) => {
+            Ok(dm) if sys::stat_is_file(&dm) && same_content_at(dirfd, leaf, src, r) => {
                 self.rep.unchanged += 1;
                 return Ok(());
             }
             Ok(_) | Err(_) => {}
         }
-        self.copy_cross_dev(src, &dst.host, r)
+        self.copy_cross_dev_at(src, dirfd, leaf, r)
     }
 
     /// The `etc/` rule: a copy, unless the admin changed the live file.
-    fn place_etc(&mut self, src: &Path, r: &FileRec, old: Option<&FileRec>, dst: &Resolved) -> io::Result<()> {
+    fn place_etc(&mut self, src: &Path, r: &FileRec, old: Option<&FileRec>, dst: &EntryAt) -> io::Result<()> {
+        let dirfd = dst.fd();
+        let leaf = &dst.leaf;
         let alg = Alg::from_len(r.hash.len());
-        match fs::symlink_metadata(&dst.host) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => self.copy_to(src, &dst.host, r),
+        match sys::fstatat_nofollow(dirfd, leaf) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self.copy_to_at(src, dirfd, leaf, r),
             Err(e) => Err(e),
-            Ok(m) if m.is_dir() => Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon)))),
-            Ok(m) if m.is_file() => {
+            Ok(m) if sys::stat_is_dir(&m) => {
+                Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))))
+            }
+            Ok(m) if sys::stat_is_file(&m) => {
                 let live = match alg {
-                    Some(a) => Some(hash_file(&dst.host, a)?),
+                    Some(a) => Some(hash_file_at(dirfd, leaf, a)?),
                     None => None,
                 };
                 if live.is_some() && live.as_deref() == Some(&r.hash[..]) {
@@ -573,23 +639,27 @@ impl<'a> Switch<'a> {
                 }
                 let pristine = old.map_or(false, |o| o.is_regular() && live.as_deref() == Some(&o.hash[..]));
                 if pristine || alg.is_none() {
-                    self.copy_to(src, &dst.host, r)
+                    self.copy_to_at(src, dirfd, leaf, r)
                 } else {
-                    let mut n = dst.host.as_os_str().to_os_string();
-                    n.push(".vpm-new");
-                    let newp = PathBuf::from(n);
-                    let already = alg.map_or(false, |a| hash_file(&newp, a).map_or(false, |h| h == r.hash));
+                    let mut new_leaf = leaf.clone();
+                    new_leaf.extend_from_slice(b".vpm-new");
+                    let already =
+                        alg.map_or(false, |a| hash_file_at(dirfd, &new_leaf, a).map_or(false, |h| h == r.hash));
                     if !already {
-                        self.copy_to(src, &newp, r)?;
+                        self.copy_to_at(src, dirfd, &new_leaf, r)?;
                     }
-                    let msg = format!("/{} was changed locally; kept, new version in /{}.vpm-new", String::from_utf8_lossy(&dst.canon), String::from_utf8_lossy(&dst.canon));
+                    let msg = format!(
+                        "/{} was changed locally; kept, new version in /{}.vpm-new",
+                        String::from_utf8_lossy(&dst.canon),
+                        String::from_utf8_lossy(&dst.canon)
+                    );
                     println!("  {msg}");
                     self.rep.new_configs.push(msg);
                     Ok(())
                 }
             }
             // a symlink or other node where the package now has a file
-            Ok(_) => self.copy_to(src, &dst.host, r),
+            Ok(_) => self.copy_to_at(src, dirfd, leaf, r),
         }
     }
 
@@ -601,7 +671,7 @@ impl<'a> Switch<'a> {
         }
         let (dir, _) = rootfs::split_rel(&r.path);
         self.fs.ensure_dir(dir, 0o755, 0, 0)?;
-        let dst = self.fs.entry(&r.path)?;
+        let dst = self.fs.open_parent(&r.path)?;
         let src = p.dir.join(OsStr::from_bytes(&r.path));
         let res = match &r.kind {
             RecKind::File(FileKind::Symlink(t)) => self.place_symlink(t, r, old, &dst),
@@ -615,9 +685,8 @@ impl<'a> Switch<'a> {
             _ => self.place_link(&src, r, &dst),
         };
         if res.is_ok() && self.small_tx {
-            if let Some(par) = dst.host.parent() {
-                self.touched_dirs.insert(par.to_path_buf());
-            }
+            let (par, _) = rootfs::split_rel(&dst.canon);
+            self.touched_dirs.insert(self.root.join(OsStr::from_bytes(par)));
         }
         res
     }
@@ -710,14 +779,14 @@ fn ensure_dev_nodes(rfs: &mut RootFs) -> io::Result<()> {
     for (name, mode, major, minor) in
         [("null", 0o666, 1u64, 3u64), ("zero", 0o666, 1, 5), ("random", 0o666, 1, 8), ("urandom", 0o666, 1, 9), ("console", 0o600, 5, 1)]
     {
-        let p = rfs.entry(format!("dev/{name}").as_bytes())?;
-        match fs::symlink_metadata(&p.host) {
-            Ok(m) if m.is_file() => fs::remove_file(&p.host)?,
+        let p = rfs.open_parent(format!("dev/{name}").as_bytes())?;
+        match sys::fstatat_nofollow(p.fd(), &p.leaf) {
+            Ok(m) if sys::stat_is_file(&m) => sys::unlinkat_in(p.fd(), &p.leaf, false)?,
             Ok(_) => continue,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
-        sys::make_node(&p.host, 0o020000 | mode, (major << 8) | minor)?;
+        sys::mknodat_in(p.fd(), &p.leaf, 0o020000 | mode, (major << 8) | minor)?;
         fs::set_permissions(&p.host, fs::Permissions::from_mode(mode))?;
     }
     Ok(())
@@ -842,7 +911,7 @@ impl<'a> Switch<'a> {
             if own.owner.contains_key(&r.path) {
                 continue;
             }
-            let Ok(Some(e)) = self.fs.entry_if_dir_exists(&r.path) else { continue };
+            let Ok(Some(e)) = self.fs.open_parent_if_dir_exists(&r.path) else { continue };
             if keep.contains(&e.canon) {
                 continue;
             }
@@ -855,47 +924,48 @@ impl<'a> Switch<'a> {
                     }
                 }
             }
-            let Ok(m) = fs::symlink_metadata(&e.host) else { continue };
+            let dirfd = e.fd();
+            let leaf = &e.leaf;
+            let Ok(m) = sys::fstatat_nofollow(dirfd, leaf) else { continue };
             let ours = match &r.kind {
-                _ if m.is_dir() => false,
+                _ if sys::stat_is_dir(&m) => false,
                 RecKind::File(FileKind::Symlink(t)) => {
-                    m.file_type().is_symlink()
-                        && fs::read_link(&e.host).map_or(false, |l| l.as_os_str().as_bytes() == &t[..])
+                    sys::stat_is_symlink(&m)
+                        && sys::readlinkat_in(dirfd, leaf).map_or(false, |l| l == *t)
                 }
-                _ if m.file_type().is_symlink() => false,
-                RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if m.is_file() => {
+                _ if sys::stat_is_symlink(&m) => false,
+                RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if sys::stat_is_file(&m) => {
                     let same_inode = !is_etc(&r.path)
                         && fs::symlink_metadata(o.dir.join(OsStr::from_bytes(&r.path)))
-                            .map_or(false, |pm| pm.dev() == m.dev() && pm.ino() == m.ino());
+                            .map_or(false, |pm| pm.dev() == m.st_dev && pm.ino() == m.st_ino);
                     same_inode
                         || Alg::from_len(r.hash.len())
-                            .map_or(false, |a| hash_file(&e.host, a).map_or(false, |h| h == r.hash))
+                            .map_or(false, |a| hash_file_at(dirfd, leaf, a).map_or(false, |h| h == r.hash))
                 }
                 RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) => false,
-                _ => !m.is_file(), // device node or fifo
+                _ => !sys::stat_is_file(&m), // device node or fifo
             };
             if !ours {
-                if !m.is_dir() {
+                if !sys::stat_is_dir(&m) {
                     let msg = format!("/{} was changed locally; kept", r.path_lossy());
                     println!("  {msg}");
                     self.rep.warnings.push(msg);
                 }
                 continue;
             }
-            match fs::remove_file(&e.host) {
+            match sys::unlinkat_in(dirfd, leaf, false) {
                 Ok(()) => {
                     self.rep.removed += 1;
                     if self.small_tx {
-                        if let Some(par) = e.host.parent() {
-                            self.touched_dirs.insert(par.to_path_buf());
-                        }
+                        let (par, _) = rootfs::split_rel(&e.canon);
+                        self.touched_dirs.insert(self.root.join(OsStr::from_bytes(par)));
                     }
                 }
                 Err(err) => self.err(format!("{}: removing /{}: {err}", o.meta.nv(), r.path_lossy())),
             }
         }
         for (_, d) in dirs {
-            let Ok(Some(e)) = self.fs.entry_if_dir_exists(&d) else { continue };
+            let Ok(Some(e)) = self.fs.open_parent_if_dir_exists(&d) else { continue };
             if keep.contains(&e.canon) {
                 continue;
             }
@@ -906,13 +976,12 @@ impl<'a> Switch<'a> {
                     }
                 }
             }
-            if let Ok(m) = fs::symlink_metadata(&e.host) {
-                if m.is_dir() && fs::remove_dir(&e.host).is_ok() {
+            if let Ok(m) = sys::fstatat_nofollow(e.fd(), &e.leaf) {
+                if sys::stat_is_dir(&m) && sys::unlinkat_in(e.fd(), &e.leaf, true).is_ok() {
                     modified.insert(parent_dir(&d));
                     if self.small_tx {
-                        if let Some(par) = e.host.parent() {
-                            self.touched_dirs.insert(par.to_path_buf());
-                        }
+                        let (par, _) = rootfs::split_rel(&e.canon);
+                        self.touched_dirs.insert(self.root.join(OsStr::from_bytes(par)));
                     }
                 }
             }
@@ -926,15 +995,11 @@ impl<'a> Switch<'a> {
     }
 
     /// Targeted durability barrier for small, script-free transactions:
-    /// flushes copied files, touched/created directories, `Programs/<name>`,
-    /// and `var/lib/vpm/` (including `state.db` and its WAL) without calling
-    /// whole-filesystem `syncfs`.
+    /// flushes touched/created directories, `Programs/<name>`, and
+    /// `var/lib/vpm/` (including `state.db` and its WAL) without calling
+    /// whole-filesystem `syncfs`. (`etc/` copies are synced on-fd during
+    /// `copy_to_at` when `small_tx` is set.)
     fn sync_small(&self) -> Result<()> {
-        for p in &self.copied_files {
-            if let Ok(f) = sys::open_regular_nofollow(p) {
-                f.sync_data()?;
-            }
-        }
         let mut dirs = self.touched_dirs.clone();
         for c in &self.fs.created_dirs {
             let host = self.root.join(OsStr::from_bytes(c));
@@ -1066,7 +1131,6 @@ pub fn switch(
         deferred: Vec::new(),
         small_tx,
         touched_dirs: HashSet::new(),
-        copied_files: Vec::new(),
     };
     s.crash("start");
 
@@ -1186,10 +1250,9 @@ pub fn switch(
             if !special(&r.user) && !special(&r.group) {
                 continue;
             }
-            if let Ok(Some(e)) = s.fs.entry_if_dir_exists(&r.path) {
-                // hashed and changed through one descriptor of the file
-                // itself (no symlink followed, no FIFO read)
-                let Ok(mut f) = sys::open_regular_nofollow(&e.host) else { continue };
+            if let Ok(Some(e)) = s.fs.open_parent_if_dir_exists(&r.path) {
+                // hashed and changed through one openat2-confined descriptor
+                let Ok(mut f) = sys::openat_regular_nofollow(e.fd(), &e.leaf) else { continue };
                 let ours = Alg::from_len(r.hash.len())
                     .map_or(false, |a| hash_open(&mut f, a).ok().as_ref() == Some(&r.hash));
                 if ours && s.chown {
