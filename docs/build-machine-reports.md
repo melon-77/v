@@ -10,6 +10,71 @@ How this works:
 
 ---
 
+## 2026-11-21, evening: the owner's decisions on the report below, and what changed
+
+Tree: `testing` a995db8, `recipes` 2771bdf.
+
+The owner answered the four questions the last report left open: "1, fix 2, delete, 3 that for wayland only, 4 name it to firefox". Here is what each answer changed.
+
+**1. The locale bug: fixed in glibc 2.44-r2.**
+
+- `recipes/glibc/VALENCEBUILD` now compiles C.UTF-8 in `package()` with the localedef it has just built (`make -C localedata install-files-C.UTF-8/UTF-8`). The files go in `/usr/lib/locale/C.utf8/`, with no locale archive.
+- The build stops if `LC_CTYPE` isn't there.
+- The wrong comment ("built in") is gone.
+- `/etc/profile` is unchanged: `LANG=C.UTF-8` was right, the locale was just missing.
+
+**2. Cataclysm: deleted.**
+
+- Removed recipes (vpkg): `cataclysm-dda`, `sdl2-compat`, `sdl2-image`, `sdl2-ttf`, `sdl2-mixer`. Nothing else depended on them.
+- Also removed:
+  - their five rows in `sources/MANIFEST.tsv` and the five URLs in `scripts/make-manifest.py`
+  - the three mentions in `AGENTS.md`
+  - the old `cataclysm-dda-0.9.1-r3` packages in the build machine's repository
+- The package repository has never been published (there is no `packages` branch), so there was nothing to take down.
+- SDL3 (`sdl3`, `sdl3-image`, `sdl3-ttf`) stays. It was in Valence before Cataclysm's update, and `AGENTS.md` lists it as a library of its own.
+- `docs/build-machine-handoff.md` still lists pass B. That file is yours; drop pass B the next time you edit it.
+
+**3. GTK 3 and Firefox: Wayland only.** This settles G1 with option (b). cairo stays as it is, with no X11.
+
+| Recipe | Change |
+|---|---|
+| `gtk3` r1 | `-Dx11_backend=false`; the 10 X11 `-dev` makedepends removed; pkgdesc says "Wayland only" |
+| `at-spi2-core` r1 | `-Dx11=disabled`; `libx11-dev libxtst-dev libxi-dev` removed |
+| `firefox` r1 | `--enable-default-toolkit=cairo-gtk3-wayland-only`; the 11 X11 `-dev` makedepends removed, `libxt-dev` with them |
+
+- `libxt` is now used by nothing. I left the recipe in place: delete it if you don't need it.
+- The Firefox change is untested, because Firefox still can't build until F1 to F4 are fixed. If its configure asks for an X11 library after all, add that one back as a makedepend.
+
+**4. The package name stays `firefox`.** This settles F7.
+
+- Once a `firefox` package is in the repository, `packages = firefox` in a wish list installs it instead of Flathub's `org.mozilla.firefox`. `valence-wish` asks the repository first.
+- `valence-first-boot` still offers Firefox from Flathub. Switching that, and the docs that say Firefox comes from Flathub, is for when the native package really exists.
+
+### What ran
+
+| Step | Result |
+|---|---|
+| `valence-build glibc at-spi2-core gtk3` | built 3, failed 0: glibc 2.44-r2 (5.9 MB), at-spi2-core r1 (244 kB), gtk3 r1 (4.4 MB, plus 8.3 MB of `-lang`) |
+| `VALENCE_ARCH=aarch64 valence-build glibc` | built: the aarch64 localedef ran through QEMU's user emulation, and the recipe's C.UTF-8 check passed |
+| locale test: a fresh root of busybox, valence-base, tmux and coreutils, the way the ISO is made | passes (output below) |
+| gtk3 r1 installed in a fresh root | `pkg-config --variable=targets gtk+-3.0` is `wayland`; there is no `gtk+-x11-3.0`. Its own library dependencies are Wayland's and xkbcommon, with no X11 library |
+| console ISO from a995db8 and the eight console tests | all 8 pass. The live system gains the 14 entries of `usr/lib/locale/C.utf8`. Apart from apk's database, the only other difference from this morning's image is that `var/cache/apk` is gone |
+| desktop ISO from a995db8 and `scripts/test-desktop.sh` | all 3 pass: the live desktop, and installs on BIOS and on UEFI that log in to Plasma |
+
+```
+login shell (/etc/profile):  LANG=C.UTF-8, locale charmap: UTF-8, every LC_* "C.UTF-8" but LC_COLLATE=C
+printf 'é' | wc -m           ->  1        (2 bytes, 1 character)
+LANG=C locale charmap        ->  ANSI_X3.4-1968   (control)
+tmux 3.8: new-session -d, ls, display -p, kill-server  ->  exit 0
+/usr/lib/locale/C.utf8: 12 LC_* entries, 420 kB in all (LC_CTYPE 369 kB)
+```
+
+### Not touched
+
+F1 to F4 (Firefox), C1 (vim), C2 (wireguard-tools) and the other findings below are unchanged. They are yours, unless the owner says otherwise.
+
+---
+
 ## 2026-11-21, later: handoff passes C and D (GTK 3, Firefox, command-line tools)
 
 Tree: `testing` 318a15b, `recipes` 1f2af04. Line numbers below refer to these commits.
