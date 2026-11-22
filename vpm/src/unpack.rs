@@ -156,8 +156,9 @@ fn integrity(path: &[u8], e: io::Error) -> Error {
     }
 }
 
-/// Unpacks `job` into `ROOT/Programs/<name>/<version>`. `progress` gets
-/// content bytes as they are written.
+/// Unpacks `job` into `ROOT/Programs/<name>/<version>` and returns its stats
+/// plus extracted metadata (`StagedPkg`) ready to stage into `state.db`.
+/// `progress` gets content bytes as they are written.
 pub fn unpack(
     root: &Path,
     job: &Job,
@@ -165,7 +166,7 @@ pub fn unpack(
     ids: &IdMap,
     allow_untrusted: bool,
     progress: &mut dyn FnMut(u64),
-) -> Result<Stats> {
+) -> Result<(Stats, db::StagedPkg)> {
     if !db::safe_component(&job.name) || !db::safe_version(&job.version) {
         return Err(Error::Schema(format!("unsafe package name or version '{}-{}'", job.name, job.version)));
     }
@@ -194,9 +195,9 @@ pub fn unpack(
     fs::DirBuilder::new().mode(0o755).create(&partial)?;
     let r = unpack_into(&partial, job, keys, ids, allow_untrusted, progress);
     match r {
-        Ok(st) => {
+        Ok(res) => {
             fs::rename(&partial, &fin)?;
-            Ok(st)
+            Ok(res)
         }
         Err(e) => {
             let _ = fs::remove_dir_all(&partial);
@@ -212,7 +213,7 @@ fn unpack_into(
     ids: &IdMap,
     allow_untrusted: bool,
     progress: &mut dyn FnMut(u64),
-) -> Result<Stats> {
+) -> Result<(Stats, db::StagedPkg)> {
     let identity = &job.index_info.hashes;
     let opts = VerifyOptions { allow_untrusted, expected_identity: Some(identity.clone()), require_signature: false };
     let f = File::open(&job.src).map_err(|e| Error::Msg(format!("{}: {e}", job.src.display())))?;
@@ -333,8 +334,9 @@ fn unpack_into(
         source: job.source.clone(),
     };
     let recs = db::records(&pkg);
-    db::write_meta(dest, &meta, &recs, &pkg)?;
-    Ok(st)
+    let scripts: Vec<(String, Vec<u8>)> = pkg.scripts.iter().map(|(n, b)| (n.to_string(), b.to_vec())).collect();
+    let staged = db::StagedPkg { meta, recs, scripts };
+    Ok((st, staged))
 }
 
 /// Re-applies owners of entries whose user or group is not `root`, now

@@ -298,3 +298,62 @@ f\t0644\troot\troot\t12\t0\t{boot_hash}\t-\t-\tboot/vmlinuz-test
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn sqlite_migration_and_indexed_queries() {
+    let root = temp_root("sqlite-migrate");
+    seed_root(&root);
+    let r = root.to_str().unwrap();
+
+    // Before migration: state.db does not exist; read-only command succeeds via legacy fallback
+    // without creating state.db.
+    assert!(!root.join("var/lib/vpm/state.db").exists());
+    let out = Command::new(vpm_bin()).args(["--root", r, "info", "-W", "/usr/bin/hello"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("owned by hello-1.0-r0"));
+    assert!(!root.join("var/lib/vpm/state.db").exists());
+
+    // First writable command (`cache clean`) triggers automatic migration into state.db and removes .vpm/.
+    let out = Command::new(vpm_bin()).args(["--root", r, "cache", "clean"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(root.join("var/lib/vpm/state.db").exists(), "state.db should be created on migration");
+    assert!(!root.join("Programs/hello/1.0-r0/.vpm").exists(), "legacy .vpm/ dir should be removed after migration");
+    assert!(!root.join("var/lib/vpm/state.db-wal").exists(), "DELETE journal mode must leave no -wal sidecar");
+    assert!(!root.join("var/lib/vpm/state.db-shm").exists(), "DELETE journal mode must leave no -shm sidecar");
+
+    // Now every query hits SQLite directly: list, info -e, info -a, info -W (direct + symlink), fix.
+    let out = Command::new(vpm_bin()).args(["--root", r, "list"]).output().unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("hello-1.0-r0 x86_64 {hello} (MIT) [world]"), "stdout: {s}");
+
+    let out = Command::new(vpm_bin()).args(["--root", r, "info", "-e", "cmd:hello"]).output().unwrap();
+    assert!(out.status.success());
+
+    let out = Command::new(vpm_bin()).args(["--root", r, "info", "-a", "hello"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("usr/bin/hello"));
+
+    // Create a symlink in the live tree and verify indexed `info -W` resolves through it.
+    fs::create_dir_all(root.join("usr/bin")).unwrap();
+    symlink("hello", root.join("usr/bin/hello-link")).unwrap();
+    let out = Command::new(vpm_bin()).args(["--root", r, "info", "-W", "/usr/bin/hello-link"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("owned by hello-1.0-r0"));
+
+    // `vpm fix` repairs from SQLite records + Programs/hello/1.0-r0/usr/bin/hello
+    let out = Command::new(vpm_bin()).args(["--root", r, "fix"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(root.join("usr/bin/hello").exists());
+
+    // Verify `del` removes hello from SQLite AND updates var/lib/vpm/world mirror
+    let out = Command::new(vpm_bin()).args(["--root", r, "--no-scripts", "del", "hello"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(!root.join("Programs/hello").exists());
+    assert_eq!(fs::read_to_string(root.join("var/lib/vpm/world")).unwrap().trim(), "");
+    let out = Command::new(vpm_bin()).args(["--root", r, "list"]).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "");
+
+    let _ = fs::remove_dir_all(&root);
+}
