@@ -965,6 +965,27 @@ impl Db {
     pub fn journal_path(root: &Path) -> PathBuf {
         root.join(STATE_DIR).join("journal")
     }
+    pub fn dirty_path(root: &Path) -> PathBuf {
+        root.join(STATE_DIR).join("dirty")
+    }
+
+    /// Flushes `state.db`, `state.db-wal` (if present), and the `var/lib/vpm`
+    /// directory so WAL commits made under `PRAGMA synchronous = NORMAL` are
+    /// durable without calling whole-filesystem `syncfs`.
+    pub fn sync_state_dir(root: &Path) -> Result<()> {
+        let state = Self::state(root);
+        for name in [STATE_DB, "state.db-wal"] {
+            let p = state.join(name);
+            if let Ok(f) = sys::open_regular_nofollow(&p) {
+                f.sync_data()?;
+            }
+        }
+        if let Ok(d) = sys::open_dir_nofollow(&state) {
+            d.sync_all()?;
+        }
+        Ok(())
+    }
+
 
     fn own_dirs(root: &Path) -> [PathBuf; 6] {
         [
@@ -1476,6 +1497,168 @@ impl Db {
         }
         Ok(Some(out))
     }
+
+    /// True if `state.db` contains any `'staged'` or `'removing'` rows (a
+    /// pure read-only check so clean `open()` avoids starting a write tx).
+    pub fn has_non_installed(&self) -> Result<bool> {
+        let Some(conn) = &self.conn else { return Ok(false) };
+        let mut st = conn.prepare("SELECT 1 FROM packages WHERE state != 'installed' LIMIT 1")?;
+        st.step_row()
+    }
+
+    /// Indexed O(M log N) lookup returning the names of installed packages
+    /// (excluding `exclude`) that own any non-directory path in `paths`.
+    /// Returns `Ok(None)` for legacy non-SQLite roots.
+    pub fn find_colliding_paths(
+        &self,
+        paths: &[&[u8]],
+        exclude: &std::collections::HashSet<&str>,
+    ) -> Result<Option<std::collections::BTreeSet<String>>> {
+        let Some(conn) = &self.conn else {
+            return Ok(None);
+        };
+        if self.installed.is_empty() || self.installed.keys().all(|k| exclude.contains(k.as_str())) {
+            return Ok(Some(std::collections::BTreeSet::new()));
+        }
+        let mut st = conn.prepare(
+            "SELECT DISTINCT p.name FROM pkg_files f \
+             JOIN packages p ON p.id = f.pkg_id \
+             WHERE f.path = ?1 AND p.state = 'installed' AND f.kind != 'd'",
+        )?;
+        let mut out = std::collections::BTreeSet::new();
+        for p in paths {
+            st.bind_blob(1, p)?;
+            while st.step_row()? {
+                let name = st.col_text(0);
+                if !exclude.contains(name.as_str()) {
+                    out.insert(name);
+                }
+            }
+            st.reset();
+        }
+        Ok(Some(out))
+    }
+
+    /// Returns the subset of `dirs` still owned by at least one installed
+    /// package not in `exclude`. Returns `Ok(None)` for legacy roots.
+    pub fn find_owned_dirs(
+        &self,
+        dirs: &[&[u8]],
+        exclude: &std::collections::HashSet<&str>,
+    ) -> Result<Option<std::collections::HashSet<Vec<u8>>>> {
+        let Some(conn) = &self.conn else {
+            return Ok(None);
+        };
+        let mut out = std::collections::HashSet::new();
+        if dirs.is_empty() || self.installed.is_empty() || self.installed.keys().all(|k| exclude.contains(k.as_str())) {
+            return Ok(Some(out));
+        }
+        let mut st = conn.prepare(
+            "SELECT p.name FROM pkg_files f \
+             JOIN packages p ON p.id = f.pkg_id \
+             WHERE f.path = ?1 AND p.state = 'installed' AND f.kind = 'd'",
+        )?;
+        for d in dirs {
+            st.bind_blob(1, d)?;
+            while st.step_row()? {
+                let name = st.col_text(0);
+                if !exclude.contains(name.as_str()) {
+                    out.insert(d.to_vec());
+                    break;
+                }
+            }
+            st.reset();
+        }
+        Ok(Some(out))
+    }
+
+    /// Returns the subset of `dirs` that exist in the current `'installed'` set
+    /// (either as an explicit directory record or as an ancestor of any file
+    /// record, using O(log N) B-tree index probes on `pkg_files.path`).
+    /// Intended for use after `commit_switch` when matching triggers.
+    pub fn dir_present_in_installed(
+        &self,
+        dirs: &[&[u8]],
+    ) -> Result<Option<std::collections::HashSet<Vec<u8>>>> {
+        let Some(conn) = &self.conn else {
+            return Ok(None);
+        };
+        let mut out = std::collections::HashSet::new();
+        if dirs.is_empty() {
+            return Ok(Some(out));
+        }
+        let mut st_exact = conn.prepare(
+            "SELECT 1 FROM pkg_files f \
+             JOIN packages p ON p.id = f.pkg_id \
+             WHERE f.path = ?1 AND f.kind = 'd' AND p.state = 'installed' LIMIT 1",
+        )?;
+        let mut st_prefix = conn.prepare(
+            "SELECT 1 FROM pkg_files f \
+             JOIN packages p ON p.id = f.pkg_id \
+             WHERE f.path >= ?1 AND f.path < ?2 AND p.state = 'installed' LIMIT 1",
+        )?;
+        let mut lo = Vec::new();
+        let mut hi = Vec::new();
+        for &d in dirs {
+            if d.is_empty() {
+                out.insert(Vec::new());
+                continue;
+            }
+            st_exact.bind_blob(1, d)?;
+            let found = st_exact.step_row()?;
+            st_exact.reset();
+            if found {
+                out.insert(d.to_vec());
+                continue;
+            }
+            // In BLOB byte order, '/' is 0x2F and '0' is 0x30, so
+            // [d || '/', d || '0') matches every path with prefix `d/`.
+            lo.clear();
+            lo.extend_from_slice(d);
+            lo.push(b'/');
+            hi.clear();
+            hi.extend_from_slice(d);
+            hi.push(b'0');
+            st_prefix.bind_blob(1, &lo)?;
+            st_prefix.bind_blob(2, &hi)?;
+            let has_child = st_prefix.step_row()?;
+            st_prefix.reset();
+            if has_child {
+                out.insert(d.to_vec());
+            }
+        }
+        Ok(Some(out))
+    }
+
+    /// Returns all directory paths (explicit dirs, file parent dirs, and their
+    /// ancestors) in the current `'installed'` set. Called only when a changed
+    /// package declares triggers.
+    pub fn list_all_installed_dirs(&self) -> Result<Option<std::collections::BTreeSet<Vec<u8>>>> {
+        let Some(conn) = &self.conn else {
+            return Ok(None);
+        };
+        let mut out = std::collections::BTreeSet::new();
+        out.insert(Vec::new());
+        let mut st = conn.prepare(
+            "SELECT f.path, f.kind FROM pkg_files f \
+             JOIN packages p ON p.id = f.pkg_id \
+             WHERE p.state = 'installed'",
+        )?;
+        while st.step_row()? {
+            let path = st.col_blob(0);
+            let kind = st.col_text(1);
+            let mut d = if kind == "d" {
+                path
+            } else {
+                crate::rootfs::split_rel(&path).0.to_vec()
+            };
+            while !d.is_empty() && out.insert(d.clone()) {
+                d = crate::rootfs::split_rel(&d).0.to_vec();
+            }
+        }
+        Ok(Some(out))
+    }
+
 
     /// Checks whether `name` is installed or provided by an installed package.
     pub fn is_installed_or_provided(&self, name: &str) -> bool {

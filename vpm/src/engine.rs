@@ -12,7 +12,9 @@
 //! 5. `syncfs`, write the journal, run the switch ([`crate::commit`]).
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -84,6 +86,7 @@ pub fn arches(o: &Options, root: &Path) -> Vec<String> {
 pub fn open(o: &Options) -> Result<Db> {
     let root = abs_root(o, true)?;
     let mut db = Db::open(&root, o.initdb)?;
+    let mut need_gc = false;
     if let Some(j) = JournalFile::open(&root)? {
         println!("vpm: finishing an interrupted switch ({} package changes)", j.plan.ops.len());
         let rep = commit::switch(&db, j, &o.switch_opts(), None)?;
@@ -92,8 +95,13 @@ pub fn open(o: &Options) -> Result<Db> {
             rep.placed, rep.unchanged, rep.removed
         );
         db.reload()?;
+        need_gc = true;
     }
-    gc(&root, &db)?;
+    let dirty = Db::dirty_path(&root);
+    if need_gc || dirty.exists() || db.has_non_installed()? {
+        gc(&root, &db)?;
+        let _ = fs::remove_file(&dirty);
+    }
     Ok(db)
 }
 
@@ -306,19 +314,26 @@ fn run_jobs(
             Err(e) => fail(e),
         }
     };
+    let total_work: u64 = jobs.iter().map(|j| j.work).sum();
+    let spawn_syncer = jobs.len() >= 2 && total_work >= 16 * 1024 * 1024;
     std::thread::scope(|sc| {
-        // writeback overlapping the unpacking: a helper thread syncs the
-        // file system over and over while the workers write, so that the
-        // syncfs before the journal finds little left to do (the workers
-        // themselves never wait for it)
-        let wd = &workers_done;
-        sc.spawn(move || {
-            let Ok(f) = fs::File::open(root) else { return };
-            while wd.load(Ordering::Relaxed) < workers {
-                let _ = sys::sync_fs(&f);
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        });
+        // writeback overlapping large multi-package unpacking: a helper thread
+        // periodically flushes while the workers write, so that the syncfs
+        // before the journal finds little left to do (skipped for small or
+        // single-package unpacks where it adds latency and lock contention)
+        if spawn_syncer {
+            let wd = &workers_done;
+            sc.spawn(move || {
+                let Ok(f) = fs::File::open(root) else { return };
+                while wd.load(Ordering::Relaxed) < workers {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if wd.load(Ordering::Relaxed) >= workers {
+                        break;
+                    }
+                    let _ = sys::sync_fs(&f);
+                }
+            });
+        }
         for _ in 0..workers {
             sc.spawn(|| {
                 worker();
@@ -377,6 +392,48 @@ fn warn_newer_installed(db: &Db, u: &Universe) {
 
 fn world_strings(world: &[Dependency]) -> Vec<String> {
     db::format_world(world).lines().filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+/// Durably flushes a small set of newly unpacked packages in `Programs/` and
+/// the staged SQLite WAL before creating the switch journal, avoiding a
+/// whole-filesystem `syncfs`.
+fn sync_unpacked_small(root: &Path, staged_map: &HashMap<(String, String), StagedPkg>) -> Result<()> {
+    let mut dirs: HashSet<PathBuf> = HashSet::new();
+    let programs = Db::programs(root);
+    dirs.insert(programs.clone());
+    for sp in staged_map.values() {
+        let pkg_dir = Db::pkg_dir(root, sp.meta.name(), sp.meta.version());
+        if let Some(par) = pkg_dir.parent() {
+            dirs.insert(par.to_path_buf());
+        }
+        dirs.insert(pkg_dir.clone());
+        for r in &sp.recs {
+            let p = pkg_dir.join(OsStr::from_bytes(&r.path));
+            if r.is_dir() {
+                dirs.insert(p);
+                continue;
+            }
+            if r.is_regular() {
+                if let Ok(f) = sys::open_regular_nofollow(&p) {
+                    f.sync_data()?;
+                }
+            }
+            let mut cur = p.parent();
+            while let Some(d) = cur {
+                if !dirs.insert(d.to_path_buf()) || d == pkg_dir {
+                    break;
+                }
+                cur = d.parent();
+            }
+        }
+    }
+    for d in &dirs {
+        if let Ok(df) = sys::open_dir_nofollow(d) {
+            df.sync_all()?;
+        }
+    }
+    Db::sync_state_dir(root)?;
+    Ok(())
 }
 
 /// Resolves `world` and carries out the changes.
@@ -476,6 +533,11 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         commit::run_commit_hooks(&root, "pre-commit")?;
     }
 
+    // Mark root dirty before writing into Programs/ so a crash before
+    // JournalFile::create still triggers gc() on the next open().
+    let dirty_file = Db::dirty_path(&root);
+    let _ = fs::write(&dirty_file, b"");
+
     // fetch and unpack
     let t1 = Instant::now();
     let ids = IdMap::load(&root);
@@ -483,6 +545,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         Ok(res) => res,
         Err(e) => {
             cleanup_new(&root, db, &ops);
+            let _ = fs::remove_file(&dirty_file);
             if run_hooks {
                 let _ = commit::run_commit_hooks(&root, "post-commit");
             }
@@ -540,6 +603,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     };
     if let Err(e) = check() {
         cleanup_new(&root, db, &ops);
+        let _ = fs::remove_file(&dirty_file);
         if run_hooks {
             let _ = commit::run_commit_hooks(&root, "post-commit");
         }
@@ -551,11 +615,13 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     // stage unpacked metadata durably into SQLite in one ACID transaction
     if let Err(e) = db.stage_packages(&staged) {
         cleanup_new(&root, db, &ops);
+        let _ = fs::remove_file(&dirty_file);
         if run_hooks {
             let _ = commit::run_commit_hooks(&root, "post-commit");
         }
         return Err(e);
     }
+    let staged_recs: usize = staged.iter().map(|sp| sp.recs.len()).sum();
     let staged_map: HashMap<(String, String), StagedPkg> = staged
         .into_iter()
         .map(|sp| ((sp.meta.name().to_string(), sp.meta.version().to_string()), sp))
@@ -563,13 +629,22 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
 
     // the switch
     let t2 = Instant::now();
-    sys::sync_fs(&fs::File::open(&root)?)?;
+    if staged_map.is_empty() {
+        // pure removal: nothing unpacked into Programs/
+    } else if staged_recs <= commit::SMALL_SYNC_LIMIT {
+        sync_unpacked_small(&root, &staged_map)?;
+    } else {
+        sys::sync_fs(&fs::File::open(&root)?)?;
+    }
     let jf = JournalFile::create(&root, Journal { ops: ops.clone(), world: new_world, done: Default::default() })?;
     if o.crash_at.as_deref() == Some("journal") {
         eprintln!("vpm: VPM_CRASH_AT=journal: killed (test hook)");
         sys::kill_self();
     }
     let switch_res = commit::switch(db, jf, &o.switch_opts(), Some(&staged_map));
+    if switch_res.is_ok() {
+        let _ = fs::remove_file(&dirty_file);
+    }
     if run_hooks {
         let _ = commit::run_commit_hooks(&root, "post-commit");
     }
