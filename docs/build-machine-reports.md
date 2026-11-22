@@ -10,6 +10,235 @@ How this works:
 
 ---
 
+## 2026-11-22: retest pass (vpm fixes, GTK 3 and Firefox, command-line tools)
+
+Tree: `testing` fc3ba9f, `recipes` (vpkg `main`) e7f3380. Line numbers below refer to these commits. The owner approved the pass ("start now"), and it ran from 07:50 to 10:00 UTC.
+
+### Summary
+
+- **Installs made by vpm pass the QEMU tests.**
+  - The vpm console ISO passes all 8 console tests and the wish test.
+  - The vpm desktop ISO passes all 3 desktop tests, including the installs on BIOS and UEFI.
+  - That meets phase 10's first "done when" on this tree.
+- **I-1 is fixed.** I checked it on a real FAT32 file system (below).
+  - Of all 20 findings, 16 are fixed in the code, 3 partly (V-2, V-5, V-9), and V-11 was not claimed.
+  - Those verdicts come from a code review. The QEMU suites and the reproductions below are what actually ran.
+- **Firefox r2 does not build (R-1, high).** The cause is one line in the compiler wrapper. There is a tested fix.
+- **Two new medium findings in vpm:**
+  - One unreadable package record now jams every later locked command (N-1, reproduced).
+  - The kernel copied to `/boot` is not on disk before the old modules are removed (N-2, from the code).
+- **The apk desktop install on BIOS failed once and then passed twice:** the login screen didn't come up in time. That is 1 failure in 4 BIOS desktop installs this pass (details below).
+- **The rest built at the first try:** 15 of the 16 changed recipes. The glib trigger (G2) works.
+
+### What ran
+
+| Step | Result |
+|---|---|
+| `fetch-sources.sh` | OK. libevent 2.1.13 and GTK 3.24.52 checked independently (see "Sources") |
+| `valence-build` (every recipe that changed) | built 15, failed 1: firefox (R-1); 448 up to date |
+| `cargo test --release` with `VPM_REPO` and `VPM_KEYS` | OK: 38 unit, 6 CLI and 8 real-data tests passed |
+| I-1 on a FAT32 `/boot` | OK (below) |
+| `mkiso.sh`, then `VALENCE_EDITION=desktop mkiso.sh` (apk) | OK |
+| `ALL=1 test-console.sh` (apk ISO) | all 8 PASS |
+| `qemu-test.py wish` (apk ISO) | OK |
+| `test-desktop.sh` (apk ISO) | desktop PASS, desktop-install-bios FAIL, desktop-install-uefi PASS; desktop-install-bios run again twice: PASS, PASS |
+| `VALENCE_PKG=vpm mkiso.sh`, the same for the desktop | OK: `valence-vpm-20261122-x86_64.iso` and `valence-vpm-desktop-20261122-x86_64.iso`, next to the apk ISOs (I-6) |
+| `ALL=1 test-console.sh` (vpm ISO) | all 8 PASS |
+| `qemu-test.py wish` (vpm ISO) | OK |
+| `test-desktop.sh` (vpm desktop ISO) | all 3 PASS |
+| `check-dev-deps.py` | 0 things named that the package does not bring |
+| G2: `vpm add busybox gtk3` into a fresh root, with scripts | `glib-2.88.0-r2.trigger` ran and made `gschemas.compiled` |
+| Firefox's host build tools, `readelf` | the 76 build scripts and 44 proc-macros the partial build left need at most GLIBC_2.39 and use the host's loader (F2 holds for host code) |
+| Firefox and firefox-data sizes | not measured: Firefox did not build |
+
+Note for the handoff: `qemu-test.py wish` takes the ISO **and** a disk image (`qemu-test.py wish ISO DISK`). The handoff's command gives only the ISO, so I used a fresh 12 GB raw image.
+
+**The apk desktop install on BIOS that failed:**
+- The install, the boot from disk and the serial login worked.
+- elogind started SDDM's session ("New session c1 of user sddm").
+- No `sddm-greeter` process appeared in 150 seconds of checking, so the typed password went nowhere and Plasma never started.
+- The UEFI install of the same ISO passed. The two reruns passed, with the greeter up about 350 s into the run.
+- The console shows no crash. The disk was reused by the next test, so SDDM's own log is gone.
+- It may be a race in starting the greeter, which only shows when QEMU's emulation is slow. I can't tell more from what is left.
+
+### I-1 on a real FAT32 /boot
+
+These ran in throwaway roots, with `vpm --no-scripts` and the repository built in this pass.
+
+1. **linux-valence installed on one file system, then `/boot` made FAT32:**
+   - After the install, the three `/boot` files have link count 1, so they are copies.
+   - `/boot` then became a FAT32 file system holding plain copies, the way valence-install makes it.
+   - `vpm fix linux-valence` gave `OK: checked 601 entries (601 ok, 0 repaired, 0 errors)`, twice.
+   - With `vmlinuz-valence` overwritten and `config-valence` deleted, it gave `2 repaired`. The restored kernel is byte-identical to the one in Programs.
+2. **`/boot` already FAT32 before `vpm add linux-valence`** (the switch's path, the same one an upgrade takes):
+   - `add` exits 0. All three files are in `/boot` and identical to the ones in Programs, and the modules are there.
+   - `vpm fix` is clean.
+   - `vpm del linux-valence` removes the files from `/boot` and the modules from `usr/lib/modules`.
+   - A second `add` puts them back.
+
+I couldn't try a real kernel upgrade, because the repository has only one linux-valence.
+
+### The 20 findings of the first report
+
+The verdicts come from reading the code at the commits above. "Ran" means the QEMU suites or the checks above exercised the fix.
+
+| Finding | Verdict | Still open |
+|---|---|---|
+| I-1 | fixed; ran (above) | N-2 |
+| I-2 | fixed (`main.rs:24,150`, `engine.rs:168-186`, valence-wish:103,113); ran: wish test on the vpm ISO | – |
+| I-3 | fixed (`engine.rs:209-222`; 60 s cache `repo.rs:361-367`) | `add` and `update` still download every time (not required) |
+| I-4 | fixed (valence-first-boot:62 and the `$PM` lines) | `valence-install:8` and the comment at :191 still say apk takes the snapshot |
+| I-5 | fixed; ran: all vpm suites pass | – |
+| I-6 | fixed; ran: the four ISOs sat side by side in `out/` | – |
+| V-1 | fixed (`commit.rs:373-444`; repair 1319-1324) | N-3 |
+| V-2 | partly: `fix` checks the Programs hashes and loads each package's state on its own (`engine.rs:921-948`); README corrected | `switch()` still loads every state with `?` (`commit.rs:847`, `862`), which is now N-1 |
+| V-3 | fixed (`engine.rs:951-964`) | – |
+| V-4 | fixed (`commit.rs:1162-1206`; post-commit after failures at `engine.rs:484, 520, 535`) | not on the `sync_fs`/`JournalFile::create` error path after pre-commit |
+| V-5 | partly: order, `APK_SCRIPT` and the lock fd fixed (`commit.rs:1100-1107, 1166, 1171`) | non-executable hooks are still skipped (`commit.rs:1135`; documented at README:184, unlike apk) |
+| V-6 | fixed (`engine.rs:674-694`) | – |
+| V-7 | fixed (`engine.rs:636-666`) | – |
+| V-8 | fixed (`engine.rs:796-830`) | a package whose record doesn't load is skipped silently (N-4) |
+| V-9 | partly: `--simulate` honoured, temporary names unique per process | `search` checks only `var/cache/vpm` for symlinks, not `var` and `var/cache` the way `Db::open` does |
+| V-10 | fixed (`commit.rs:1258`) | – |
+| V-11 | not changed (not claimed) | as reported |
+| V-12 | fixed for the last path component (`commit.rs:201`, `1360`) | – |
+| V-13 | fixed (`engine.rs:966-990`) | – |
+| V-14 | fixed (README) | – |
+
+**Tests:** there is one new CLI test, `fix_preserves_etc_symlink_copies_boot_and_detects_programs_corruption`. It covers:
+- the `fix` side of V-1
+- `fix` copying `boot/` on one file system
+- the Programs hashes (V-2)
+- V-13, the `cache clean --simulate` part of V-9, and V-8 for a directory
+
+There are no new unit tests. The cross-device switch path, `-X`, repository skipping, the 60 s cache, `.vpm-new` symlinks on an upgrade, V-3 to V-7, V-10, V-12 and the new findings below have no test.
+
+### New findings in vpm
+
+**N-1 (medium, reproduced): one unreadable `.vpm/files` now jams the root**
+- **Before:** transact refused with that error before writing a journal.
+- **Now:**
+  - `check()` only warns (`engine.rs:498-503`) and the journal is written.
+  - Then `switch()` fails at `commit.rs:847` (`PkgState::load(..)?`) and the journal stays.
+  - Every later locked command replays it in `open()` (`engine.rs:87-94`) and fails the same way.
+  - Removing or reinstalling the broken package, the README's remedy, gets stuck too (`commit.rs:862`).
+- **Reproduction:** a root with zstd-libs, its `Programs/zstd-libs/1.5.7-r2/.vpm/files` overwritten, then `vpm add xz-libs`:
+
+  ```
+  vpm: warning: zstd-libs-1.5.7-r2: malformed file: files line 1: malformed; skipped in conflict check
+  vpm: malformed file: files line 1: malformed                      (add exit 1, var/lib/vpm/journal left)
+  vpm del zstd-libs  ->  vpm: finishing an interrupted switch (1 package changes)
+                         vpm: malformed file: files line 1: malformed   (exit 1)
+  vpm add -u zstd-libs, vpm fix  ->  the same, exit 1
+  ```
+
+  Only `list` still works.
+- **Suggested fix:** load every state the switch needs before writing the journal, and refuse there. Or let the switch skip a package whose state does not load.
+
+**N-2 (medium, from the code): the copy to `/boot` is not on disk before the old version is removed**
+- **Where:** `copy_file_atomic` calls `sync_all` on the temporary file (`commit.rs:232`) but not after the rename (`commit.rs:234`).
+- **Why it matters:**
+  - `Switch::sync` is `syncfs` on the root file system only (`commit.rs:817-818`).
+  - `/boot` is vfat, mounted without `flush` or `dirsync` (valence-install:243).
+- **Scenario:** during a kernel upgrade, the old modules are removed and synced, then the journal is deleted (`commit.rs:1064`). If the power goes during vfat's writeback delay, `/boot` can still hold the old `vmlinuz-valence` next to a `.vpm.<hex>` temporary file. With no journal to finish the switch, the next boot gets the old kernel without its modules. That is I-1's second effect again, in a crash window.
+- **It also matters for phase 10's "an upgrade killed at any point leaves a system that boots".**
+- **Suggested fix:** fsync `/boot`'s directory after the rename, or `syncfs` a `/boot` file descriptor, before `remove_old` (at least before the journal is deleted).
+
+**N-3 (low-medium, from the code): an `etc/` file that becomes a symlink is never replaced**
+- **Where:** `commit.rs:395-398` marks any non-symlink at the path as changed locally, without comparing it with the old record's hash.
+- **Scenario:** v1 ships `etc/X` as a file the admin never touched, and v2 makes it a symlink (for example `os-release -> ../usr/lib/os-release`). The old file stays, `etc/X.vpm-new` appears, and the message says "changed locally".
+- **apk:** it replaces an unchanged file in this case.
+
+**N-4 (low, from the code): a package whose state does not load loses its files to another owner**
+- **Where:** `fix` (`engine.rs:933-947`) and `info -W` (`engine.rs:802`) leave such a package out before working out ownership.
+- **Scenario:** A `replaces=B`, both ship `/usr/bin/x`, and A's record is garbled. Then `vpm fix` gives the path to B and relinks B's copy over A's file, and `info -W` names B as the owner.
+
+**N-5 (low, from the code): mode changes go unnoticed on another device**
+- **Where:** "same content on another device counts as intact" (`commit.rs:338`, `1445`) compares the content only.
+- **Effect:** a copy whose mode or owner changed is reported as ok. Under hard links this couldn't happen.
+- **Today:** only `/boot` uses copies, so no Valence package hits this.
+
+### The recipe findings of the second report
+
+| Verdict | Findings |
+|---|---|
+| fixed | C1, C2, C3, C5, C7, C8, C10, C11, C13, C15, C16, C17, G2 (ran, above), G4, G5, G8, F1, F2 (host side ran, above), F3, F5, F6, F8, F9, F11, S1, S2, S3 |
+| fixed, with a nit | C14: vim still probes Wayland by itself; `--without-wayland` would make it explicit (rule 63). G3: `builtin_immodules=backend` as suggested; the other input-method modules are still installed without a cache, and `all` would avoid that (not checked on a running system) |
+| decided by the owner | C4 (pkgdesc note added), G1 (Wayland only), F7 (name `firefox`) |
+| partly | C9: `onig-config` moved and the license widened, but it still leaves out ICU (the vendored decNumber, jq COPYING:73-77), the Heimdal BSD-3-Clause and dtoa notices, and CC-BY-3.0 for the docs. C12: see R-3. F4: `firefox-data` is split, but there is no size guard (R-2) and no size could be measured |
+| not changed (not claimed) | G6 (no librsvg or adwaita-icon-theme recipe), F10 (`so:` provides) |
+| moot | G9: libxt was deleted and nothing uses it. Its old packages are still in the build machine's repository |
+
+S3 has one slip: the verification record names `tree-2.3.1.tar.gz`, but the recipe and MANIFEST use `unix-tree-2.3.2.tar.gz`. Rule 6 holds: every changed recipe bumps its pkgrel or pkgver.
+
+### New findings in the recipes
+
+**R-1 (high, reproduced): Firefox r2 doesn't build** (`firefox/VALENCEBUILD:66`, the target branch of `ff-cc/{cc,cxx}`)
+- **Error:**
+  - `logs/pkg-firefox.log`: the build scripts of `mozglue-static` and `swgl` fail with `fatal error: 'version' file not found` and `'cstdint' file not found`.
+  - Then `rust.mk:554` fails with Error 101, 6 minutes in.
+- **Cause:**
+  - cc-rs (vendored 1.2.30, `third_party/rust/cc/src/lib.rs:2265`) always adds `--target=x86_64-unknown-linux-gnu` for clang.
+  - The wrapper puts its own `--target=$TARGET` before `"$@"`, so cc-rs's comes last and wins.
+  - With that triple, clang finds no GCC under `--gcc-toolchain=/root/valence/tools` (only `lib/gcc/x86_64-valence-linux-gnu/15.2.0` is there), so it has no libstdc++ headers.
+  - Firefox's own compiles pass no `--target` and are not affected.
+- **Checked by hand** with a file that includes `<version>`:
+
+  ```
+  ff-cc/cxx -c t.cpp                                                  -> OK
+  ff-cc/cxx --target=x86_64-unknown-linux-gnu --sysroot ... -c t.cpp  -> 'version' file not found
+  clang++-19 <same arguments> --target=x86_64-valence-linux-gnu --sysroot=... --gcc-toolchain=... -> OK
+  ```
+
+- **Suggested fix:** in the target branch, put the wrapper's flags after the arguments: `exec "$real_bin" "$@" --target=$TARGET --sysroot=$SYSROOT --gcc-toolchain=$TOOLS`. Two alternatives also work:
+  - drop an incoming `--target`, as the host branch's filter does;
+  - add `--gcc-install-dir=$TOOLS/lib/gcc/$TARGET/15.2.0`.
+
+**R-2 (medium): no size guard for the 100 MB limit (F4)**
+- An apk over 100 MB would only show up at `publish-repo.sh:20-21`, which then refuses the whole repository.
+- A check in `package()` would catch it at build time.
+
+**R-3 (low): libevent-dev has no python3 dependency (C12)**
+- `libevent/VALENCEBUILD:11` sets `depends_dev`, but the builder reads `depends_<subpackage>` with the name's dashes as underscores: `depends_libevent_dev` (`valence-build-recipe:467`).
+- Setting that replaces the default dependency on libevent, so restate it: `depends_libevent_dev=("libevent=$pkgver-r$pkgrel" python3)`.
+- The script's shebang is `#!/usr/bin/env python`, which the python3 package provides.
+
+**R-4 (cosmetic): firefox-data's description is wrong**
+- `firefox/VALENCEBUILD:19` sets `pkgdesc_data`, but the builder reads `pkgdesc_firefox_data`.
+- So firefox-data's description becomes "Mozilla Firefox web browser (ESR, Wayland) (firefox-data)".
+
+**R-5 (low): the update channel says "release" on an ESR build**
+- `firefox/VALENCEBUILD:93` sets `--enable-update-channel=release`. Mozilla's ESR builds use `esr`; with `release`, `app.update.channel` and the About dialog say "release".
+- The `firefox` app id doesn't depend on it, because `MOZ_APP_REMOTINGNAME` is already set.
+
+### Sources
+
+- **libevent-2.1.13-stable.tar.gz is genuine.**
+  - Its sha256 is `f7e9383b…7a315c`, matching your record and MANIFEST.
+  - The `.asc` from the GitHub release verifies against the local tarball (good signature). The key was fetched from keyserver.ubuntu.com and keys.openpgp.org, which gave identical copies, into an empty keyring.
+  - Signing subkey `7A02B3521DC75C542BA015456AFEE6D49E92B601`, primary key `2133BC600AB133E1D826D173FE43009C4607B1FB` (Nick Mathewson), as your record says.
+  - 2.1.12 was signed by a different maintainer key. That's a change of releaser, not a mismatch.
+- **gtk-3.24.52.tar.xz is genuine.** GNOME's `gtk-3.24.52.sha256sum` from download.gnome.org lists `80931fa4…e7b9f`, the same as the local file. GNOME publishes no signature.
+
+### Phase 10's "done when", after this pass
+
+| Condition | State |
+|---|---|
+| A console install and a desktop install made by it pass the QEMU tests | **Met on this tree:** all vpm console, wish and desktop tests pass |
+| An upgrade killed at any point leaves a system that boots | Stage 1's engine survived 310 killed upgrades. Not yet tried on an installed system with a kernel upgrade; N-2 is a gap in it |
+| It installs the base system measurably faster than apk and xbps | 1.6 to 2.2 times faster than apk (stage 1). Not measured against xbps |
+
+### Next on the build machine
+
+- **Once R-1 is fixed on `vpkg` main:** rebuild firefox, measure the `firefox` and `firefox-data` packages, and check its host tools again.
+- **When the owner says so:**
+  - the kill test on an installed system, with a kernel upgrade over a FAT32 `/boot`;
+  - the benchmark against xbps;
+  - Calamares by hand on the vpm desktop ISO with UEFI (I-1's Calamares path has only been checked through the code);
+  - removing libxt's old packages from the build machine's repository.
+
+---
+
 ## 2026-11-21, night: the owner's defaults for the open questions
 
 The owner had no preference yet on the questions the reports left to them, and took the recommended defaults: "yeah sure put them on record". They are in `ROADMAP.md` under "Decided" and can still change.
