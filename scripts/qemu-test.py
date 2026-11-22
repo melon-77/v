@@ -469,10 +469,10 @@ if mode == 'rollback':
         threading.Thread(target=s.serve_forever, daemon=True).start()
         return f'http://10.0.2.2:{s.server_address[1]}'
     badurl, repourl = serve(T), serve(f'{M}/repo')
-    use_vpm = False
-    apkbad = lambda repo: (f'vpm --plain --repository {badurl}/{repo}/{arch}/Packages.adb' if use_vpm
+    use_oct = False
+    apkbad = lambda repo: (f'oct --plain --repository {badurl}/{repo}/{arch}/Packages.adb' if use_oct
                            else f'apk --repositories-file /dev/null --repository {badurl}/{repo}/{arch}/Packages.adb')
-    apkn = lambda: (f'vpm --plain --repository {repourl}/{arch}/Packages.adb' if use_vpm
+    apkn = lambda: (f'oct --plain --repository {repourl}/{arch}/Packages.adb' if use_oct
                     else f'apk --repositories-file /dev/null --repository {repourl}/{arch}/Packages.adb')
     failed = []
     def check(cond, what):
@@ -481,8 +481,8 @@ if mode == 'rollback':
         return cond
     def state():
         """what a rollback has to bring back, and what it has to leave alone"""
-        lpkg = 'vpm list 2>/dev/null | grep -E "^less-[0-9]" | cut -d" " -f1' if use_vpm else 'apk list --installed less 2>/dev/null | cut -d" " -f1'
-        rpkg = 'vpm list 2>/dev/null | grep -E "^runit-[0-9]" | cut -d" " -f1' if use_vpm else 'apk list --installed runit 2>/dev/null | cut -d" " -f1'
+        lpkg = 'oct list 2>/dev/null | grep -E "^less-[0-9]" | cut -d" " -f1' if use_oct else 'apk list --installed less 2>/dev/null | cut -d" " -f1'
+        rpkg = 'oct list 2>/dev/null | grep -E "^runit-[0-9]" | cut -d" " -f1' if use_oct else 'apk list --installed runit 2>/dev/null | cut -d" " -f1'
         out = sh(f'echo "LESS=$(less --version 2>&1 | head -n1 | cut -c1-8 | tr " " _)" "LESSPKG=$({lpkg})" '
                  f'"RUNIT=$({rpkg})" "KERNEL=$(sha256sum /boot/vmlinuz-valence | cut -c1-16)" '
                  '"ROOT=$(btrfs subvolume show / | head -n1)" "IDS=$(ls /.snapshots | grep -E "^[0-9]+$" | sort -n | xargs | tr " " ,)" '
@@ -504,8 +504,8 @@ if mode == 'rollback':
         step('rollback test: FAILED: ' + '; '.join(failed)); sys.exit(1)
 
     step('waiting for the installed system'); boot_installed(); step('logged in')
-    use_vpm = 'use-vpm' in sh('[ -e /var/lib/vpm/world ] && echo use-vpm || echo use-apk')
-    pm_name = 'vpm' if use_vpm else 'apk'
+    use_oct = 'use-oct' in sh('[ -e /var/lib/octet/world ] && echo use-oct || echo use-apk')
+    pm_name = 'oct' if use_oct else 'apk'
     step(f'package manager in guest: {pm_name}')
     print(sh('findmnt -n -o TARGET,FSTYPE,FSROOT,OPTIONS -t btrfs; swapon --show; valence-snapshot list; cat /boot/grub/snapshots.cfg | cut -c1-240'))
     sh('rm -f /etc/rollback-test /home/jcole/rollback-test /var/log/rollback-test')
@@ -611,7 +611,7 @@ if mode == 'rollback':
     check(mine > 0 and 'by the test' in out and v.get('left') == '0' and v.get('copies') == v.get('used') and v.get('entries') == v.get('snaps'),
           'create and delete work; /boot/snapshots holds exactly the kernel files the snapshots use, the menu one entry per snapshot')
     if not offline:
-        pm_del = 'vpm --plain del' if use_vpm else f'{apkn()} del'
+        pm_del = 'oct --plain del' if use_oct else f'{apkn()} del'
         out = sh(f'mkdir -p /etc/valence; echo KEEP=2 > /etc/valence/snapshot.conf; {apkn()} add less-doc >/dev/null; {pm_del} less-doc >/dev/null; '
                  'rm /etc/valence/snapshot.conf; echo "updates=$(grep -l "^type=update" /.snapshots/*/info | wc -l)" '
                  '"copies=$(ls /boot/snapshots | wc -l)" "used=$(cat /.snapshots/*/info | grep "^boot=" | sort -u | wc -l)"', timeout=900); print(out)
@@ -637,7 +637,7 @@ if mode == 'wish':
         step(what + ': ' + ('OK' if cond else 'FAILED'))
         return cond
     def state():
-        out = sh('pm=apk; [ -e /var/lib/vpm/world ] && pm=vpm; '
+        out = sh('pm=apk; [ -e /var/lib/octet/world ] && pm=oct; '
                  'y(){ "$@" >/dev/null 2>&1 && echo y || echo n; }; echo "NANO=$(y $pm info -e nano)" "RSYNC=$(y $pm info -e rsync)" '
                  '"TTY4=$(y test -L /var/service/getty-tty4)" "TTY5=$(y test -L /var/service/getty-tty5)" '
                  '"DIALOUT=$(y sh -c "id -nG jcole | grep -qw dialout")" "FLOPPY=$(y sh -c "id -nG jcole | grep -qw floppy")" '
@@ -764,8 +764,8 @@ else:
     step('logged in')
     sh('stty cols 160 rows 50; export TERM=vt100')
     for c in ['valencefetch', 'cat /etc/os-release', 'findmnt / /boot', 'valence-svc status',
-              'if [ -e /var/lib/vpm/world ]; then vpm list | wc -l; else apk list --installed | wc -l; fi',
-              'if [ -e /var/lib/vpm/world ]; then vpm search | wc -l; else apk update && apk search -q | wc -l; fi',
+              'if [ -e /var/lib/octet/world ]; then oct list | wc -l; else apk list --installed | wc -l; fi',
+              'if [ -e /var/lib/octet/world ]; then oct search | wc -l; else apk update && apk search -q | wc -l; fi',
               'ls /sys/firmware/efi >/dev/null 2>&1 && echo booted-UEFI || echo booted-BIOS',
               'id jcole', 'ip -4 addr show dev eth0 | grep inet; ping -c1 -W3 10.0.2.2 >/dev/null && echo net-ok',
               'ls /usr/libexec/valence', 'free -m; df -h / /boot', 'wc -l < /proc/modules; ls /usr/lib/modules',
@@ -820,12 +820,12 @@ else:
         import http.server, threading, functools
         srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=f'{M}/repo'))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-        use_vpm = 'use-vpm' in sh('[ -e /var/lib/vpm/world ] && echo use-vpm || echo use-apk')
-        pm_name = 'vpm' if use_vpm else 'apk'
+        use_oct = 'use-oct' in sh('[ -e /var/lib/octet/world ] && echo use-oct || echo use-apk')
+        pm_name = 'oct' if use_oct else 'apk'
         repo_url = f'http://10.0.2.2:{srv.server_address[1]}/{"x86" if i686 else "x86_64"}/Packages.adb'
-        apkn = f'vpm --plain --repository {repo_url}' if use_vpm else f'apk --repositories-file /dev/null --repository {repo_url}'
-        pm_list = 'vpm list' if use_vpm else 'apk list --installed'
-        pm_del = 'vpm --plain del' if use_vpm else 'apk del'
+        apkn = f'oct --plain --repository {repo_url}' if use_oct else f'apk --repositories-file /dev/null --repository {repo_url}'
+        pm_list = 'oct list' if use_oct else 'apk list --installed'
+        pm_del = 'oct --plain del' if use_oct else 'apk del'
         out = sh(f'{apkn} add less-doc; ls /usr/share/man/man1/less.1* && echo added-$((40+2)); '
                  'echo "manlines=$(man less 2>/dev/null | grep -c -i less)"; echo "apropos=$(apropos -s 1 less 2>/dev/null | grep -c "^less")"', timeout=600)
         print(out)

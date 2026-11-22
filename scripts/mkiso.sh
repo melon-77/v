@@ -33,17 +33,17 @@ fi
 step(){ printf '\033[1;35m== %s\033[0m\n' "$*"; }
 apkx(){ $APK --arch $APK_ARCH --keys-dir $M/keys/trusted --repositories-file /dev/null --repository $REPO/$APK_ARCH/Packages.adb --no-cache "$@"; }
 PKG_MGR=${VALENCE_PKG:-apk}
-if [ "$PKG_MGR" = vpm ]; then
-  VPM=${VPM:-$M/vpm/target/release/vpm}
-  [ -x "$VPM" ] || VPM=$M/hosttools/bin/vpm
-  [ -x "$VPM" ] || { echo "VALENCE_PKG=vpm needs host vpm (run: cd vpm && cargo build --release)" >&2; exit 1; }
-  case " $PKGS " in *" vpm "*) ;; *) PKGS="$PKGS vpm" ;; esac
+if [ "$PKG_MGR" = octet ]; then
+  OCT=${OCT:-$M/octet/target/release/oct}
+  [ -x "$OCT" ] || OCT=$M/hosttools/bin/oct
+  [ -x "$OCT" ] || { echo "VALENCE_PKG=octet needs a host oct (run: cd octet && cargo build --release)" >&2; exit 1; }
+  case " $PKGS " in *" octet "*) ;; *) PKGS="$PKGS octet" ;; esac
   if [ "$EDITION" = desktop ]; then
-    OUTISO=$M/out/valence-vpm-desktop-$DATE-$ISOARCH.iso
+    OUTISO=$M/out/valence-octet-desktop-$DATE-$ISOARCH.iso
   else
-    OUTISO=$M/out/valence-vpm-$DATE-$ISOARCH.iso
+    OUTISO=$M/out/valence-octet-$DATE-$ISOARCH.iso
   fi
-  pmx(){ "$VPM" --plain --arch $APK_ARCH --keys-dir $M/keys/trusted --repository $REPO/$APK_ARCH/Packages.adb --no-commit-hooks "$@"; }
+  pmx(){ "$OCT" --plain --arch $APK_ARCH --keys-dir $M/keys/trusted --repository $REPO/$APK_ARCH/Packages.adb --no-commit-hooks "$@"; }
 else
   pmx(){ apkx "$@"; }
 fi
@@ -55,7 +55,7 @@ if [ "$EDITION" = desktop ]; then
     if ls $M/repo/$APK_ARCH/$x-[0-9]*.apk >/dev/null 2>&1; then _p="$_p $x"; else echo "warning: $x is not built for $APK_ARCH, left out"; fi
   done; DESKTOP_PKGS=${_p# }
 fi
-if [ "$PKG_MGR" = vpm ]; then
+if [ "$PKG_MGR" = octet ]; then
   mkdir -p $ROOT/etc/apk
   echo "$APK_ARCH" > $ROOT/etc/apk/arch
 fi
@@ -65,7 +65,7 @@ fi
 pmx --root $ROOT --initdb add busybox
 pmx --root $ROOT add valence-base
 pmx --root $ROOT add $PKGS $DESKTOP_PKGS
-rm -rf $ROOT/var/cache/apk/* $ROOT/var/cache/vpm/*
+rm -rf $ROOT/var/cache/apk/* $ROOT/var/cache/octet/*
 mkdir -p $ROOT/usr/share/valence/profiles
 printf '%s\n' $PKGS > $ROOT/usr/share/valence/profiles/base
 [ -n "$LIVE_ONLY" ] && printf '%s\n' $LIVE_ONLY > $ROOT/usr/share/valence/profiles/live-only
@@ -141,7 +141,7 @@ mkdir -p $ISO/valence/repo/$APK_ARCH
 # a second copy cost about 460 MB on the ISO and on every installed system; anything else comes from the online repo)
 # always carry the small, commonly wanted extras so an offline install can still add them
 extras="valence-base bash busybox glibc apk-tools"
-[ "$PKG_MGR" = vpm ] && extras="$extras vpm"
+[ "$PKG_MGR" = octet ] && extras="$extras octet"
 # guest tools, which the installers add when they run inside a VM
 ls $M/repo/$APK_ARCH/valence-vm-guest-[0-9]*.apk >/dev/null 2>&1 && extras="$extras valence-vm-guest"
 apkx fetch --recursive --output $ISO/valence/repo/$APK_ARCH $extras >/dev/null
@@ -213,8 +213,8 @@ if [ -f $ROOT/usr/share/valence/grub/themes/valence/theme.txt ]; then
   sed -i "s|^insmod all_video\$|insmod all_video\nif loadfont unicode; then set gfxmode=auto; insmod gfxterm; insmod png; terminal_output gfxterm serial; ${fonts}set theme=/boot/grub/themes/valence/theme.txt; fi|" $ISO/boot/grub/grub.cfg
 fi
 mkdir -p $M/out
-if [ "$PKG_MGR" = vpm ]; then
-  if [ "$EDITION" = desktop ]; then rm -f $M/out/valence-vpm-desktop-2*-$ISOARCH.iso; else rm -f $M/out/valence-vpm-2*-$ISOARCH.iso; fi
+if [ "$PKG_MGR" = octet ]; then
+  if [ "$EDITION" = desktop ]; then rm -f $M/out/valence-octet-desktop-2*-$ISOARCH.iso; else rm -f $M/out/valence-octet-2*-$ISOARCH.iso; fi
 else
   if [ "$EDITION" = desktop ]; then rm -f $M/out/valence-desktop-2*-$ISOARCH.iso; else rm -f $M/out/valence-2*-$ISOARCH.iso; fi
 fi
