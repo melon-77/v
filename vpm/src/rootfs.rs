@@ -19,10 +19,14 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{fchown, PermissionsExt};
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::{db, sys};
 
 const MAX_SYMLINKS: usize = 40;
+/// Cap on cached open parent directory fds so large transactions stay well
+/// below `RLIMIT_NOFILE`.
+const MAX_DIRFD_CACHE: usize = 128;
 
 /// A resolved path: the host path, and the canonical root-relative path
 /// (no symlinks in its directory part, no `.`/`..`).
@@ -35,7 +39,7 @@ pub struct Resolved {
 /// A live-tree entry anchored to its `openat2(RESOLVE_IN_ROOT)`-opened parent
 /// directory descriptor plus validated single-component leaf name.
 pub struct EntryAt {
-    pub dirfd: OwnedFd,
+    pub dirfd: Rc<OwnedFd>,
     pub leaf: Vec<u8>,
     pub canon: Vec<u8>,
     pub host: PathBuf,
@@ -54,6 +58,9 @@ pub struct RootFs {
     /// Root-relative directory path as written by a package -> its
     /// canonical form, for directories known to exist as real directories.
     dir_cache: HashMap<Vec<u8>, Vec<u8>>,
+    /// Canonical directory path -> cached `openat2(RESOLVE_IN_ROOT)` fd,
+    /// cleared on [`RootFs::forget`] and bounded by `MAX_DIRFD_CACHE`.
+    dir_fds: HashMap<Vec<u8>, Rc<OwnedFd>>,
     /// Canonical directories created by this RootFs (for triggers).
     pub created_dirs: HashSet<Vec<u8>>,
 }
@@ -88,6 +95,7 @@ impl RootFs {
             root: root.to_path_buf(),
             root_fd,
             dir_cache: HashMap::new(),
+            dir_fds: HashMap::new(),
             created_dirs: HashSet::new(),
         }
     }
@@ -205,6 +213,28 @@ impl RootFs {
         }
     }
 
+    /// Opens (or reuses a cached) `openat2(RESOLVE_IN_ROOT)` descriptor for an
+    /// existing canonical directory inside `ROOT`.
+    fn cached_dir_fd(&mut self, canon_dir: &[u8]) -> io::Result<Rc<OwnedFd>> {
+        if let Some(fd) = self.dir_fds.get(canon_dir) {
+            return Ok(Rc::clone(fd));
+        }
+        let rfd = self.root_raw_fd()?;
+        let fd = match sys::open_dir_in_root(rfd, canon_dir) {
+            Ok(fd) => fd,
+            Err(e) if e.raw_os_error() == Some(libc::ENOSYS) => {
+                sys::open_dir_nofollow(&self.host(canon_dir))?.into()
+            }
+            Err(e) => return Err(e),
+        };
+        let rc = Rc::new(fd);
+        if self.dir_fds.len() >= MAX_DIRFD_CACHE {
+            self.dir_fds.clear();
+        }
+        self.dir_fds.insert(canon_dir.to_vec(), Rc::clone(&rc));
+        Ok(rc)
+    }
+
     /// Makes sure a directory exists. Missing ancestors are made 0755
     /// root:root (as apk does); the directory itself, if it has to be made,
     /// gets `mode` and the owner through `openat2(RESOLVE_IN_ROOT)` + `*at()`.
@@ -222,7 +252,7 @@ impl RootFs {
         refuse_reserved(rel_dir, &r.canon)?;
         let (canon_parent, leaf) = split_rel(&r.canon);
         if !leaf.is_empty() {
-            let pfd = self.open_dir_confined(canon_parent)?;
+            let pfd = self.cached_dir_fd(canon_parent)?;
             if make_dir_atomic_at(pfd.as_raw_fd(), leaf, mode, uid, gid)? {
                 self.created_dirs.insert(r.canon.clone());
             }
@@ -232,8 +262,8 @@ impl RootFs {
     }
 
     /// Resolves the directory part of `rel` and opens it strictly inside
-    /// `ROOT` via `openat2(RESOLVE_IN_ROOT)`, returning an [`EntryAt`] for
-    /// race-free `*at()` operations.
+    /// `ROOT` via `openat2(RESOLVE_IN_ROOT)` (reusing cached parent dir fds),
+    /// returning an [`EntryAt`] for race-free `*at()` operations.
     pub fn open_parent(&mut self, rel: &[u8]) -> io::Result<EntryAt> {
         let (dir, name) = split_rel(rel);
         let canon_dir = match self.dir_canon(dir)? {
@@ -247,14 +277,7 @@ impl RootFs {
         };
         let canon = join_rel(&canon_dir, name);
         refuse_reserved(rel, &canon)?;
-        let rfd = self.root_raw_fd()?;
-        let dirfd = match sys::open_dir_in_root(rfd, &canon_dir) {
-            Ok(fd) => fd,
-            Err(e) if e.raw_os_error() == Some(libc::ENOSYS) => {
-                sys::open_dir_nofollow(&self.host(&canon_dir))?.into()
-            }
-            Err(e) => return Err(e),
-        };
+        let dirfd = self.cached_dir_fd(&canon_dir)?;
         Ok(EntryAt {
             dirfd,
             leaf: name.to_vec(),
@@ -278,17 +301,11 @@ impl RootFs {
         if db::is_reserved(&canon) {
             return Ok(None);
         }
-        let rfd = self.root_raw_fd()?;
-        let dirfd = match sys::open_dir_in_root(rfd, &canon_dir) {
+        let dirfd = match self.cached_dir_fd(&canon_dir) {
             Ok(fd) => fd,
             Err(e) if e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR) => {
                 return Ok(None);
             }
-            Err(e) if e.raw_os_error() == Some(libc::ENOSYS) => match sys::open_dir_nofollow(&self.host(&canon_dir)) {
-                Ok(f) => f.into(),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(e),
-            },
             Err(e) => return Err(e),
         };
         Ok(Some(EntryAt {
@@ -342,6 +359,7 @@ impl RootFs {
     /// symlink).
     pub fn forget(&mut self) {
         self.dir_cache.clear();
+        self.dir_fds.clear();
     }
 
     /// Reads a small regular file of the root, opened directly through
