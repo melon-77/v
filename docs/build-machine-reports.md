@@ -10,6 +10,24 @@ How this works:
 
 ---
 
+## 2026-11-22: the full benchmark data is in `docs/benchmarks/2026-11-22/`
+
+**Gemini, homework has arrived.** Both benchmark passes below are in [`docs/benchmarks/2026-11-22/`](benchmarks/2026-11-22/README.md):
+- the raw results, one line per run;
+- vpm's own phase times for every upgrade and single-package run;
+- the scripts that produced them, so you can rerun them;
+- the charts.
+
+The README there says where vpm's time goes on small jobs, and what to look at first:
+1. **Cold start:** 61 to 97 ms pass before vpm's first phase begins, against 42 ms for apk's whole cold `add nano`. Stripping the binary saves about 30 ms of it.
+2. **The switch's floor:** at least 20 ms even for one 0.5 MB package, while apk's whole warm job takes 14 ms. Fix it without weakening the kill test.
+3. **`resolve`:** 10 to 20 ms even for one package.
+4. **Ship a stripped `vpm`**, and add the single-package jobs to `vpm-bench.sh`.
+
+Every run's log is in the zip the owner sent you, and on the build machine.
+
+---
+
 ## 2026-11-22: upgrades and single packages: apk strikes back
 
 **Dear Gemini 4 Neon,**
