@@ -42,7 +42,7 @@ There is no async runtime. Parallel work uses std threads.
 vpm [--root DIR] [--repository INDEX]... [-X|--add-repository INDEX]...
     [--keys-dir DIR] [--arch ARCH] [--print-arch] [--initdb] [--plain]
     [--simulate|-s] [--no-scripts] [--no-commit-hooks] [--jobs N]
-    [--allow-rollback] [--allow-untrusted] COMMAND
+    [--allow-rollback] [--max-index-age DAYS] [--allow-untrusted] COMMAND
 
   add [-u] NAME... add to the world and install. NAME may carry a constraint
                    ('foo>=1.2') or be a provided name ('so:libz.so.1').
@@ -275,24 +275,34 @@ What an untrusted file or a hostile mirror can make vpm do is bounded:
   - An `https://` repository is only fetched over https: no redirect to
     http is followed.
 - **Rollback:** for each repository, vpm remembers the newest build-time
-  and the newest version of every package name it offered.
+  (including the index's signed UTC timestamp from `NDX_DESCRIPTION`, e.g.
+  `Valence YYYYMMDDTHHMMSSZ`) and the newest version of every package name
+  it offered.
   - A validly signed index that is older is refused unless
-    `--allow-rollback` is given. Older means an older newest build-time,
+    `--allow-rollback` is given. Older means an older generation timestamp,
     or a name offered only in a lower version: a mirror replaying an old
     index to hold back fixes.
+  - With `--max-index-age DAYS`, remote indexes older than `DAYS` days are
+    refused even on a fresh root with no prior index state (unless
+    `--allow-rollback` is given).
   - A downloaded index replaces the cached one only after it was verified
     and found fresh.
   - vpm warns when an installed package is newer than anything the
     repositories offer.
-  - A root that never saw a repository has nothing to compare with. That
-    would need a signed timestamp in the index.
 - **Confinement:**
   - All paths are resolved inside the root (`..` and absolute symlinks are
     clamped at ROOT).
+  - Live-tree parent directories are opened with kernel-enforced
+    `openat2(RESOLVE_IN_ROOT)` (with userspace fallback on older kernels)
+    and mutated via `*at()` syscalls (`linkat`, `symlinkat`, `renameat`,
+    `unlinkat`, `mknodat`, `fstatat`, `openat(..., O_NOFOLLOW)`), closing
+    live-tree symlink-escape TOCTOU races.
   - No entry may be, or resolve into, `Programs`, `var/lib/vpm` or
     `var/cache/vpm`.
   - vpm's own directories are never followed through a symlink.
-  - Versions must be valid apk versions.
+  - Versions must be valid apk versions (same-version rebuilds store into
+    `<version>+<8 lowercase hex>` so the active copy stays intact until
+    `Current` flips).
   - Live files are hashed, and their owner and mode set, through
     `O_NOFOLLOW` descriptors.
   - Keys, the repository list, `etc/apk/arch`, `passwd` and `group` are
@@ -306,7 +316,8 @@ apk's `compare_providers`:
 2. The higher provided version of the requested name.
 3. The newer version of the same package.
 4. The higher `provider_priority` (16 bits).
-5. The installed package.
+5. The installed package (or, when upgrading, a rebuilt repository package
+   with a different package identity than the installed copy).
 6. The earlier repository.
 
 Candidates are refused when they would break what is already decided:
@@ -343,8 +354,6 @@ Repositories and packages:
 - Only v3 indexes. A keyword-less base URL is treated as v3, where apk
   would look for a v2 `APKINDEX.tar.gz`. Repository components and
   `set` variables are not supported.
-- Packages are told apart by name and version, not by identity, so a
-  rebuild with the same version is not picked up.
 - Packages with `installed-size` 0 still run their scripts (apk skips
   them; only hand-made packages have that).
 
@@ -359,9 +368,6 @@ Scripts:
 - They run as root in a plain chroot, which is not a security boundary.
 
 Live tree:
-- Operations on the live tree resolve paths in userspace and then use
-  them, so another process changing the tree at the same moment could
-  race them. `openat2(RESOLVE_IN_ROOT)` would close this.
 - File conflicts are detected by literal path, so a symlinked directory in
   one package can still route another package's file onto a third's
   without a conflict being reported. The switch refuses only paths that

@@ -93,11 +93,14 @@ impl IdMap {
 pub struct Job {
     pub name: String,
     pub version: String,
+    /// Directory name under `Programs/<name>/` (usually `version`, or
+    /// `<version>+<id8>` on a same-version rebuild).
+    pub dir_name: String,
     /// The package file.
     pub src: PathBuf,
     /// The index entry (its `hashes` is the identity to check).
     pub index_info: crate::adb::PkgInfo,
-    /// Where it came from (recorded in `.vpm/info`).
+    /// Where it came from (recorded in `state.db`).
     pub source: String,
 }
 
@@ -156,7 +159,7 @@ fn integrity(path: &[u8], e: io::Error) -> Error {
     }
 }
 
-/// Unpacks `job` into `ROOT/Programs/<name>/<version>` and returns its stats
+/// Unpacks `job` into `ROOT/Programs/<name>/<dir_name>` and returns its stats
 /// plus extracted metadata (`StagedPkg`) ready to stage into `state.db`.
 /// `progress` gets content bytes as they are written.
 pub fn unpack(
@@ -167,14 +170,15 @@ pub fn unpack(
     allow_untrusted: bool,
     progress: &mut dyn FnMut(u64),
 ) -> Result<(Stats, db::StagedPkg)> {
-    if !db::safe_component(&job.name) || !db::safe_version(&job.version) {
+    let dir_name = if job.dir_name.is_empty() { job.version.as_str() } else { job.dir_name.as_str() };
+    if !db::safe_component(&job.name) || !db::safe_version(&job.version) || !db::safe_dir_name(dir_name) {
         return Err(Error::Schema(format!("unsafe package name or version '{}-{}'", job.name, job.version)));
     }
     // Programs and Programs/<name> must be real directories: nothing is
     // created or deleted through a symlink
     let pdir = db::checked_pkg_parent(root, &job.name)?;
-    let fin = pdir.join(&job.version);
-    let partial = pdir.join(format!("{}{}", job.version, db::PARTIAL_SUFFIX));
+    let fin = pdir.join(dir_name);
+    let partial = pdir.join(format!("{}{}", dir_name, db::PARTIAL_SUFFIX));
     match fs::DirBuilder::new().mode(0o755).create(&pdir) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -335,7 +339,8 @@ fn unpack_into(
     };
     let recs = db::records(&pkg);
     let scripts: Vec<(String, Vec<u8>)> = pkg.scripts.iter().map(|(n, b)| (n.to_string(), b.to_vec())).collect();
-    let staged = db::StagedPkg { meta, recs, scripts };
+    let dir_name = if job.dir_name.is_empty() { job.version.clone() } else { job.dir_name.clone() };
+    let staged = db::StagedPkg { dir_name, meta, recs, scripts };
     Ok((st, staged))
 }
 

@@ -42,13 +42,14 @@ pub const STATE_DIR: &str = "var/lib/vpm";
 pub const STATE_DB: &str = "state.db";
 pub const CACHE_DIR: &str = "var/cache/vpm";
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS packages (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     name              TEXT NOT NULL,
     version           TEXT NOT NULL,
+    dir_name          TEXT NOT NULL,
     state             TEXT NOT NULL CHECK (state IN ('staged', 'installed', 'removing')),
     arch              TEXT NOT NULL DEFAULT '',
     description       TEXT NOT NULL DEFAULT '',
@@ -65,7 +66,7 @@ CREATE TABLE IF NOT EXISTS packages (
     replaces_priority INTEGER NOT NULL DEFAULT 0,
     layer             INTEGER NOT NULL DEFAULT 0,
     source            TEXT NOT NULL DEFAULT '',
-    UNIQUE(name, version)
+    UNIQUE(name, dir_name)
 );
 CREATE INDEX IF NOT EXISTS idx_packages_state ON packages(state, name);
 
@@ -161,9 +162,22 @@ impl FileRec {
 /// All extracted metadata for an unpacked package, ready to stage into SQLite.
 #[derive(Debug, Clone)]
 pub struct StagedPkg {
+    /// Directory name under `Programs/<name>/` (usually `meta.version()`, or
+    /// `<version>+<id8>` when upgrading a same-version rebuild).
+    pub dir_name: String,
     pub meta: PkgMeta,
     pub recs: Vec<FileRec>,
     pub scripts: Vec<(String, Vec<u8>)>,
+}
+
+impl StagedPkg {
+    pub fn effective_dir_name(&self) -> &str {
+        if self.dir_name.is_empty() {
+            self.meta.version()
+        } else {
+            &self.dir_name
+        }
+    }
 }
 
 /// The records of a package, in stored order (directories before their
@@ -591,6 +605,31 @@ pub fn safe_version(s: &str) -> bool {
     safe_component(s) && crate::version::validate(s)
 }
 
+/// Is `s` usable as a `Programs/<name>/<dir_name>` directory: either a valid
+/// apk version, or `<version>+<8 lowercase hex>` (for same-version rebuilds).
+pub fn safe_dir_name(s: &str) -> bool {
+    if safe_version(s) {
+        return true;
+    }
+    let Some((ver, tag)) = s.split_once('+') else { return false };
+    safe_version(ver) && tag.len() == 8 && tag.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Picks a `Programs/<name>/<dir_name>` directory name for `(version, identity)`
+/// that does not collide with an currently active `conflict_dir`.
+pub fn choose_dir_name(version: &str, identity: &[u8], conflict_dir: Option<&str>) -> String {
+    if conflict_dir == Some(version) {
+        let h = if identity.len() >= 4 {
+            digest::hex(&identity[..4])
+        } else {
+            digest::hex(&digest::sha256(identity)[..4])
+        };
+        format!("{version}+{h}")
+    } else {
+        version.to_string()
+    }
+}
+
 /// vpm's own directories in a root. No package entry may be, or lie
 /// below, one of them, by its literal path or by where it resolves to in
 /// the live tree: a package could otherwise plant a symlink there and make
@@ -633,6 +672,46 @@ pub fn checked_pkg_parent(root: &Path, name: &str) -> io::Result<PathBuf> {
 
 // ---------------------------------------------------------------- SQLite helpers
 
+const MIGRATE_V1_TO_V2: &str = "
+CREATE TABLE packages_v2 (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT NOT NULL,
+    version           TEXT NOT NULL,
+    dir_name          TEXT NOT NULL,
+    state             TEXT NOT NULL CHECK (state IN ('staged', 'installed', 'removing')),
+    arch              TEXT NOT NULL DEFAULT '',
+    description       TEXT NOT NULL DEFAULT '',
+    url               TEXT NOT NULL DEFAULT '',
+    license           TEXT NOT NULL DEFAULT '',
+    origin            TEXT NOT NULL DEFAULT '',
+    maintainer        TEXT NOT NULL DEFAULT '',
+    build_time        INTEGER NOT NULL DEFAULT 0,
+    installed_size    INTEGER NOT NULL DEFAULT 0,
+    file_size         INTEGER NOT NULL DEFAULT 0,
+    identity          BLOB NOT NULL DEFAULT X'',
+    repo_commit       BLOB NOT NULL DEFAULT X'',
+    provider_priority INTEGER NOT NULL DEFAULT 0,
+    replaces_priority INTEGER NOT NULL DEFAULT 0,
+    layer             INTEGER NOT NULL DEFAULT 0,
+    source            TEXT NOT NULL DEFAULT '',
+    UNIQUE(name, dir_name)
+);
+INSERT INTO packages_v2 (
+    id, name, version, dir_name, state, arch, description, url, license, origin, maintainer,
+    build_time, installed_size, file_size, identity, repo_commit, provider_priority,
+    replaces_priority, layer, source
+)
+SELECT
+    id, name, version, version, state, arch, description, url, license, origin, maintainer,
+    build_time, installed_size, file_size, identity, repo_commit, provider_priority,
+    replaces_priority, layer, source
+FROM packages;
+DROP TABLE packages;
+ALTER TABLE packages_v2 RENAME TO packages;
+CREATE INDEX IF NOT EXISTS idx_packages_state ON packages(state, name);
+PRAGMA user_version = 2;
+";
+
 fn init_schema(conn: &Connection) -> Result<()> {
     let ver = conn.pragma_i64("user_version")?;
     if ver > SCHEMA_VERSION {
@@ -646,32 +725,40 @@ fn init_schema(conn: &Connection) -> Result<()> {
             c.exec_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             Ok(())
         })?;
+    } else if ver == 1 {
+        // PRAGMA foreign_keys must be toggled outside a transaction in SQLite.
+        conn.exec_batch("PRAGMA foreign_keys = OFF;")?;
+        let r = conn.transaction(|c| c.exec_batch(MIGRATE_V1_TO_V2));
+        let _ = conn.exec_batch("PRAGMA foreign_keys = ON;");
+        r?;
     }
     Ok(())
 }
 
-fn read_pkg_row(st: &Statement<'_>) -> (i64, PkgMeta) {
+fn read_pkg_row(st: &Statement<'_>) -> (i64, String, PkgMeta) {
     let id = st.col_i64(0);
     let mut m = PkgMeta::default();
     let i = &mut m.info;
     i.name = st.col_text(1);
     i.version = st.col_text(2);
-    i.arch = st.col_text(3);
-    i.description = st.col_text(4);
-    i.url = st.col_text(5);
-    i.license = st.col_text(6);
-    i.origin = st.col_text(7);
-    i.maintainer = st.col_text(8);
-    i.build_time = st.col_i64(9) as u64;
-    i.installed_size = st.col_i64(10) as u64;
-    i.file_size = st.col_i64(11) as u64;
-    i.hashes = st.col_blob(12);
-    i.repo_commit = st.col_blob(13);
-    i.provider_priority = st.col_i64(14) as u64;
-    m.replaces_priority = st.col_i64(15) as u64;
-    i.layer = st.col_i64(16) as u64;
-    m.source = st.col_text(17);
-    (id, m)
+    let dir_name = st.col_text(3);
+    i.arch = st.col_text(4);
+    i.description = st.col_text(5);
+    i.url = st.col_text(6);
+    i.license = st.col_text(7);
+    i.origin = st.col_text(8);
+    i.maintainer = st.col_text(9);
+    i.build_time = st.col_i64(10) as u64;
+    i.installed_size = st.col_i64(11) as u64;
+    i.file_size = st.col_i64(12) as u64;
+    i.hashes = st.col_blob(13);
+    i.repo_commit = st.col_blob(14);
+    i.provider_priority = st.col_i64(15) as u64;
+    m.replaces_priority = st.col_i64(16) as u64;
+    i.layer = st.col_i64(17) as u64;
+    m.source = st.col_text(18);
+    let dir_name = if dir_name.is_empty() { i.version.clone() } else { dir_name };
+    (id, dir_name, m)
 }
 
 fn insert_pkg_in_tx(
@@ -687,29 +774,31 @@ fn insert_pkg_in_tx(
     st_file: &mut Statement<'_>,
 ) -> Result<i64> {
     let i = &sp.meta.info;
-    // Remove any existing row for (name, version) before inserting fresh data.
+    let dir_name = sp.effective_dir_name();
+    // Remove any existing row for (name, dir_name) before inserting fresh data.
     st_del.bind_text(1, &i.name)?;
-    st_del.bind_text(2, &i.version)?;
+    st_del.bind_text(2, dir_name)?;
     st_del.execute()?;
 
     st_pkg.bind_text(1, &i.name)?;
     st_pkg.bind_text(2, &i.version)?;
-    st_pkg.bind_text(3, state)?;
-    st_pkg.bind_text(4, &i.arch)?;
-    st_pkg.bind_text(5, &i.description)?;
-    st_pkg.bind_text(6, &i.url)?;
-    st_pkg.bind_text(7, &i.license)?;
-    st_pkg.bind_text(8, &i.origin)?;
-    st_pkg.bind_text(9, &i.maintainer)?;
-    st_pkg.bind_i64(10, i.build_time as i64)?;
-    st_pkg.bind_i64(11, i.installed_size as i64)?;
-    st_pkg.bind_i64(12, i.file_size as i64)?;
-    st_pkg.bind_blob(13, &i.hashes)?;
-    st_pkg.bind_blob(14, &i.repo_commit)?;
-    st_pkg.bind_i64(15, i.provider_priority as i64)?;
-    st_pkg.bind_i64(16, sp.meta.replaces_priority as i64)?;
-    st_pkg.bind_i64(17, i.layer as i64)?;
-    st_pkg.bind_text(18, &sp.meta.source)?;
+    st_pkg.bind_text(3, dir_name)?;
+    st_pkg.bind_text(4, state)?;
+    st_pkg.bind_text(5, &i.arch)?;
+    st_pkg.bind_text(6, &i.description)?;
+    st_pkg.bind_text(7, &i.url)?;
+    st_pkg.bind_text(8, &i.license)?;
+    st_pkg.bind_text(9, &i.origin)?;
+    st_pkg.bind_text(10, &i.maintainer)?;
+    st_pkg.bind_i64(11, i.build_time as i64)?;
+    st_pkg.bind_i64(12, i.installed_size as i64)?;
+    st_pkg.bind_i64(13, i.file_size as i64)?;
+    st_pkg.bind_blob(14, &i.hashes)?;
+    st_pkg.bind_blob(15, &i.repo_commit)?;
+    st_pkg.bind_i64(16, i.provider_priority as i64)?;
+    st_pkg.bind_i64(17, sp.meta.replaces_priority as i64)?;
+    st_pkg.bind_i64(18, i.layer as i64)?;
+    st_pkg.bind_text(19, &sp.meta.source)?;
     st_pkg.execute()?;
 
     let pkg_id = conn.last_insert_rowid();
@@ -849,7 +938,7 @@ fn migrate_legacy_root(root: &Path, conn: &Connection) -> Result<()> {
                     };
                     let scripts = read_legacy_scripts(&ip.dir);
                     let meta_dir = ip.dir.join(META_DIR);
-                    to_insert.push((StagedPkg { meta: ip.meta, recs, scripts }, "installed", meta_dir));
+                    to_insert.push((StagedPkg { dir_name: ip.dir_name, meta: ip.meta, recs, scripts }, "installed", meta_dir));
                 }
                 Ok(None) => {}
                 Err(why) => eprintln!("vpm: warning: migration: {}: {why}; ignored", pdir.display()),
@@ -860,21 +949,23 @@ fn migrate_legacy_root(root: &Path, conn: &Connection) -> Result<()> {
     // If a legacy root crashed mid-switch and left a journal, also import any
     // staged/old versions referenced in the journal so recovery can finish.
     if let Ok(Some(jf)) = JournalFile::open(root) {
-        let mut seen: std::collections::HashSet<(String, String)> =
-            to_insert.iter().map(|(s, _, _)| (s.meta.name().to_string(), s.meta.version().to_string())).collect();
+        let mut seen: std::collections::HashSet<(String, String)> = to_insert
+            .iter()
+            .map(|(s, _, _)| (s.meta.name().to_string(), s.effective_dir_name().to_string()))
+            .collect();
         for op in &jf.plan.ops {
-            for (ver_opt, st) in [(op.new_version(), "staged"), (op.old_version(), "removing")] {
-                let Some(v) = ver_opt else { continue };
-                if !seen.insert((op.name().to_string(), v.to_string())) {
+            for (dir_opt, st) in [(op.new_dir(), "staged"), (op.old_dir(), "removing")] {
+                let Some(dn) = dir_opt else { continue };
+                if !seen.insert((op.name().to_string(), dn.to_string())) {
                     continue;
                 }
-                let dir = Db::pkg_dir(root, op.name(), v);
+                let dir = Db::pkg_dir(root, op.name(), dn);
                 if !dir.join(META_DIR).exists() {
                     continue;
                 }
                 if let (Ok(meta), Ok(recs)) = (read_meta(&dir), read_files(&dir)) {
                     let scripts = read_legacy_scripts(&dir);
-                    to_insert.push((StagedPkg { meta, recs, scripts }, st, dir.join(META_DIR)));
+                    to_insert.push((StagedPkg { dir_name: dn.to_string(), meta, recs, scripts }, st, dir.join(META_DIR)));
                 }
             }
         }
@@ -884,11 +975,11 @@ fn migrate_legacy_root(root: &Path, conn: &Connection) -> Result<()> {
     let world_specs: Vec<String> = format_world(&world).lines().filter(|l| !l.is_empty()).map(String::from).collect();
 
     conn.transaction(|c| {
-        let mut st_del = c.prepare("DELETE FROM packages WHERE name = ?1 AND version = ?2")?;
+        let mut st_del = c.prepare("DELETE FROM packages WHERE name = ?1 AND dir_name = ?2")?;
         let mut st_pkg = c.prepare(
-            "INSERT INTO packages (name, version, state, arch, description, url, license, origin, maintainer, \
+            "INSERT INTO packages (name, version, dir_name, state, arch, description, url, license, origin, maintainer, \
              build_time, installed_size, file_size, identity, repo_commit, provider_priority, replaces_priority, \
-             layer, source) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+             layer, source) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         )?;
         let mut st_dep = c.prepare(
             "INSERT INTO pkg_deps (pkg_id, kind, ord, name, version, op) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -938,6 +1029,7 @@ fn migrate_legacy_root(root: &Path, conn: &Connection) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct Installed {
     pub meta: PkgMeta,
+    pub dir_name: String,
     pub dir: PathBuf,
 }
 
@@ -946,6 +1038,7 @@ pub struct Db {
     pub installed: BTreeMap<String, Installed>,
     pub world: Vec<Dependency>,
     conn: Option<Connection>,
+    schema_ver: i64,
     _lock: Option<File>,
 }
 
@@ -953,8 +1046,8 @@ impl Db {
     pub fn programs(root: &Path) -> PathBuf {
         root.join(PROGRAMS)
     }
-    pub fn pkg_dir(root: &Path, name: &str, version: &str) -> PathBuf {
-        root.join(PROGRAMS).join(name).join(version)
+    pub fn pkg_dir(root: &Path, name: &str, dir_name: &str) -> PathBuf {
+        root.join(PROGRAMS).join(name).join(dir_name)
     }
     pub fn state(root: &Path) -> PathBuf {
         root.join(STATE_DIR)
@@ -996,6 +1089,10 @@ impl Db {
             root.join(CACHE_DIR),
             root.join(PROGRAMS),
         ]
+    }
+
+    fn dir_col(&self) -> &'static str {
+        if self.schema_ver >= 2 { "dir_name" } else { "version" }
     }
 
     /// Opens (or with `initdb` creates) the SQLite database and takes the lock.
@@ -1057,6 +1154,7 @@ impl Db {
             installed: BTreeMap::new(),
             world: Vec::new(),
             conn: Some(conn),
+            schema_ver: SCHEMA_VERSION,
             _lock: Some(lock),
         };
         db.reload()?;
@@ -1089,6 +1187,7 @@ impl Db {
                 installed: BTreeMap::new(),
                 world: Vec::new(),
                 conn: Some(conn),
+                schema_ver: ver,
                 _lock: None,
             };
             db.reload()?;
@@ -1101,6 +1200,7 @@ impl Db {
                 installed: BTreeMap::new(),
                 world: Vec::new(),
                 conn: None,
+                schema_ver: 0,
                 _lock: None,
             };
             db.reload()?;
@@ -1113,6 +1213,7 @@ impl Db {
                 installed: BTreeMap::new(),
                 world: Vec::new(),
                 conn: None,
+                schema_ver: 0,
                 _lock: None,
             });
         }
@@ -1139,25 +1240,26 @@ impl Db {
         self.installed.clear();
         self.world.clear();
         let conn = self.conn.as_ref().unwrap();
+        let dcol = self.dir_col();
 
-        let mut by_id: HashMap<i64, PkgMeta> = HashMap::new();
+        let mut by_id: HashMap<i64, (String, PkgMeta)> = HashMap::new();
         {
-            let mut st = conn.prepare(
-                "SELECT id, name, version, arch, description, url, license, origin, maintainer, \
+            let mut st = conn.prepare(&format!(
+                "SELECT id, name, version, {dcol}, arch, description, url, license, origin, maintainer, \
                  build_time, installed_size, file_size, identity, repo_commit, provider_priority, \
                  replaces_priority, layer, source \
-                 FROM packages WHERE state = 'installed' ORDER BY name",
-            )?;
+                 FROM packages WHERE state = 'installed' ORDER BY name"
+            ))?;
             while st.step_row()? {
-                let (id, meta) = read_pkg_row(&st);
-                if !safe_component(&meta.info.name) || !safe_version(&meta.info.version) {
+                let (id, dir_name, meta) = read_pkg_row(&st);
+                if !safe_component(&meta.info.name) || !safe_version(&meta.info.version) || !safe_dir_name(&dir_name) {
                     eprintln!(
-                        "vpm: warning: state.db has unsafe package '{}-{}'; ignored",
+                        "vpm: warning: state.db has unsafe package '{}-{}' ({dir_name}); ignored",
                         meta.info.name, meta.info.version
                     );
                     continue;
                 }
-                by_id.insert(id, meta);
+                by_id.insert(id, (dir_name, meta));
             }
         }
 
@@ -1169,7 +1271,7 @@ impl Db {
             )?;
             while st.step_row()? {
                 let pid = st.col_i64(0);
-                let Some(m) = by_id.get_mut(&pid) else { continue };
+                let Some((_, m)) = by_id.get_mut(&pid) else { continue };
                 let kind = st.col_text(1);
                 let dep = Dependency {
                     name: st.col_text(2),
@@ -1191,7 +1293,7 @@ impl Db {
                  WHERE p.state = 'installed' ORDER BY t.pkg_id, t.ord",
             )?;
             while st.step_row()? {
-                if let Some(m) = by_id.get_mut(&st.col_i64(0)) {
+                if let Some((_, m)) = by_id.get_mut(&st.col_i64(0)) {
                     m.info.tags.push(st.col_text(1));
                 }
             }
@@ -1201,15 +1303,15 @@ impl Db {
                  WHERE p.state = 'installed' ORDER BY t.pkg_id, t.ord",
             )?;
             while st.step_row()? {
-                if let Some(m) = by_id.get_mut(&st.col_i64(0)) {
+                if let Some((_, m)) = by_id.get_mut(&st.col_i64(0)) {
                     m.triggers.push(st.col_text(1));
                 }
             }
         }
 
-        for (_, meta) in by_id {
-            let dir = Self::pkg_dir(&self.root, meta.name(), meta.version());
-            self.installed.insert(meta.info.name.clone(), Installed { meta, dir });
+        for (_, (dir_name, meta)) in by_id {
+            let dir = Self::pkg_dir(&self.root, meta.name(), &dir_name);
+            self.installed.insert(meta.info.name.clone(), Installed { meta, dir_name, dir });
         }
 
         let mut st = conn.prepare("SELECT spec FROM world ORDER BY spec")?;
@@ -1256,7 +1358,7 @@ impl Db {
         };
         let tb = target.as_os_str().as_bytes();
         let ts = std::str::from_utf8(tb).unwrap_or("");
-        if !safe_version(ts) {
+        if !safe_dir_name(ts) {
             return Err(format!("Current points at '{}', not a version", String::from_utf8_lossy(tb)));
         }
         let dir = pdir.join(&target);
@@ -1266,10 +1368,10 @@ impl Db {
         }
         let meta = read_meta(&dir).map_err(|e| e.to_string())?;
         let fname = pdir.file_name().map(|n| n.as_bytes()).unwrap_or(b"");
-        if meta.info.name.as_bytes() != fname || meta.info.version.as_bytes() != tb {
+        if meta.info.name.as_bytes() != fname || (meta.info.version != ts && !ts.starts_with(&format!("{}+", meta.info.version))) {
             return Err("metadata does not match its place".into());
         }
-        Ok(Some(Installed { meta, dir }))
+        Ok(Some(Installed { meta, dir_name: ts.to_string(), dir }))
     }
 
     // ---- SQLite package queries & mutations ----
@@ -1282,11 +1384,11 @@ impl Db {
         }
         let conn = self.conn.as_ref().ok_or_else(|| Error::Msg("database is read-only".into()))?;
         conn.transaction(|c| {
-            let mut st_del = c.prepare("DELETE FROM packages WHERE name = ?1 AND version = ?2")?;
+            let mut st_del = c.prepare("DELETE FROM packages WHERE name = ?1 AND dir_name = ?2")?;
             let mut st_pkg = c.prepare(
-                "INSERT INTO packages (name, version, state, arch, description, url, license, origin, maintainer, \
+                "INSERT INTO packages (name, version, dir_name, state, arch, description, url, license, origin, maintainer, \
                  build_time, installed_size, file_size, identity, repo_commit, provider_priority, replaces_priority, \
-                 layer, source) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                 layer, source) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
             )?;
             let mut st_dep = c.prepare(
                 "INSERT INTO pkg_deps (pkg_id, kind, ord, name, version, op) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -1317,35 +1419,37 @@ impl Db {
         })
     }
 
-    /// Returns whether `(name, version)` exists in the database (in any state).
-    pub fn has_pkg(&self, name: &str, version: &str) -> Result<bool> {
+    /// Returns whether `(name, dir_name)` exists in the database (in any state).
+    pub fn has_pkg(&self, name: &str, dir_name: &str) -> Result<bool> {
         if let Some(conn) = &self.conn {
-            let mut st = conn.prepare("SELECT 1 FROM packages WHERE name = ?1 AND version = ?2 LIMIT 1")?;
+            let dcol = self.dir_col();
+            let mut st = conn.prepare(&format!("SELECT 1 FROM packages WHERE name = ?1 AND {dcol} = ?2 LIMIT 1"))?;
             st.bind_text(1, name)?;
-            st.bind_text(2, version)?;
+            st.bind_text(2, dir_name)?;
             st.step_row()
         } else {
-            Ok(Self::pkg_dir(&self.root, name, version).join(META_DIR).exists())
+            Ok(Self::pkg_dir(&self.root, name, dir_name).join(META_DIR).exists())
         }
     }
 
-    /// Reads full metadata for `(name, version)` (any state: staged/installed/removing).
-    pub fn read_pkg_meta(&self, name: &str, version: &str) -> Result<PkgMeta> {
+    /// Reads full metadata for `(name, dir_name)` (any state: staged/installed/removing).
+    pub fn read_pkg_meta(&self, name: &str, dir_name: &str) -> Result<PkgMeta> {
         let Some(conn) = &self.conn else {
-            return read_meta(&Self::pkg_dir(&self.root, name, version));
+            return read_meta(&Self::pkg_dir(&self.root, name, dir_name));
         };
-        let mut st = conn.prepare(
-            "SELECT id, name, version, arch, description, url, license, origin, maintainer, \
+        let dcol = self.dir_col();
+        let mut st = conn.prepare(&format!(
+            "SELECT id, name, version, {dcol}, arch, description, url, license, origin, maintainer, \
              build_time, installed_size, file_size, identity, repo_commit, provider_priority, \
              replaces_priority, layer, source \
-             FROM packages WHERE name = ?1 AND version = ?2 LIMIT 1",
-        )?;
+             FROM packages WHERE name = ?1 AND {dcol} = ?2 LIMIT 1"
+        ))?;
         st.bind_text(1, name)?;
-        st.bind_text(2, version)?;
+        st.bind_text(2, dir_name)?;
         if !st.step_row()? {
-            return Err(Error::Msg(format!("state.db: {name}-{version}: metadata not found")));
+            return Err(Error::Msg(format!("state.db: {name}-{dir_name}: metadata not found")));
         }
-        let (pkg_id, mut meta) = read_pkg_row(&st);
+        let (pkg_id, _, mut meta) = read_pkg_row(&st);
         drop(st);
 
         let mut st = conn.prepare(
@@ -1383,18 +1487,19 @@ impl Db {
         Ok(meta)
     }
 
-    /// Reads all file records for `(name, version)` in stored order.
-    pub fn read_pkg_files(&self, name: &str, version: &str) -> Result<Vec<FileRec>> {
+    /// Reads all file records for `(name, dir_name)` in stored order.
+    pub fn read_pkg_files(&self, name: &str, dir_name: &str) -> Result<Vec<FileRec>> {
         let Some(conn) = &self.conn else {
-            return read_files(&Self::pkg_dir(&self.root, name, version));
+            return read_files(&Self::pkg_dir(&self.root, name, dir_name));
         };
-        let mut st = conn.prepare(
+        let dcol = self.dir_col();
+        let mut st = conn.prepare(&format!(
             "SELECT f.kind, f.mode, f.user, f.grp, f.size, f.mtime, f.hash, f.extra, f.dev, f.xattrs, f.path \
              FROM pkg_files f JOIN packages p ON p.id = f.pkg_id \
-             WHERE p.name = ?1 AND p.version = ?2 ORDER BY f.ord",
-        )?;
+             WHERE p.name = ?1 AND p.{dcol} = ?2 ORDER BY f.ord"
+        ))?;
         st.bind_text(1, name)?;
-        st.bind_text(2, version)?;
+        st.bind_text(2, dir_name)?;
         let mut out = Vec::new();
         while st.step_row()? {
             out.push(read_file_rec_row(&st)?);
@@ -1402,19 +1507,20 @@ impl Db {
         Ok(out)
     }
 
-    /// Reads a script body (`pre-install`, `post-install`, `trigger`, ...) for `(name, version)`.
-    pub fn read_pkg_script(&self, name: &str, version: &str, kind: &str) -> Option<Vec<u8>> {
+    /// Reads a script body (`pre-install`, `post-install`, `trigger`, ...) for `(name, dir_name)`.
+    pub fn read_pkg_script(&self, name: &str, dir_name: &str, kind: &str) -> Option<Vec<u8>> {
         let Some(conn) = &self.conn else {
-            return read_script(&Self::pkg_dir(&self.root, name, version), kind);
+            return read_script(&Self::pkg_dir(&self.root, name, dir_name), kind);
         };
+        let dcol = self.dir_col();
         let mut st = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT s.body FROM pkg_scripts s JOIN packages p ON p.id = s.pkg_id \
-                 WHERE p.name = ?1 AND p.version = ?2 AND s.kind = ?3 LIMIT 1",
-            )
+                 WHERE p.name = ?1 AND p.{dcol} = ?2 AND s.kind = ?3 LIMIT 1"
+            ))
             .ok()?;
         st.bind_text(1, name).ok()?;
-        st.bind_text(2, version).ok()?;
+        st.bind_text(2, dir_name).ok()?;
         st.bind_text(3, kind).ok()?;
         if st.step_row().ok()? {
             Some(st.col_blob(0))
@@ -1424,17 +1530,18 @@ impl Db {
     }
 
     /// Fast existence check for a package script without reading its body.
-    pub fn has_pkg_script(&self, name: &str, version: &str, kind: &str) -> bool {
+    pub fn has_pkg_script(&self, name: &str, dir_name: &str, kind: &str) -> bool {
         let Some(conn) = &self.conn else {
-            return Self::pkg_dir(&self.root, name, version).join(META_DIR).join("scripts").join(kind).exists();
+            return Self::pkg_dir(&self.root, name, dir_name).join(META_DIR).join("scripts").join(kind).exists();
         };
-        let Ok(mut st) = conn.prepare(
+        let dcol = self.dir_col();
+        let Ok(mut st) = conn.prepare(&format!(
             "SELECT 1 FROM pkg_scripts s JOIN packages p ON p.id = s.pkg_id \
-             WHERE p.name = ?1 AND p.version = ?2 AND s.kind = ?3 LIMIT 1",
-        ) else {
+             WHERE p.name = ?1 AND p.{dcol} = ?2 AND s.kind = ?3 LIMIT 1"
+        )) else {
             return false;
         };
-        if st.bind_text(1, name).is_err() || st.bind_text(2, version).is_err() || st.bind_text(3, kind).is_err() {
+        if st.bind_text(1, name).is_err() || st.bind_text(2, dir_name).is_err() || st.bind_text(3, kind).is_err() {
             return false;
         }
         st.step_row().unwrap_or(false)
@@ -1691,26 +1798,26 @@ impl Db {
         let specs: Vec<&str> = formatted.lines().filter(|l| !l.is_empty()).collect();
         if let Some(conn) = &self.conn {
             conn.transaction(|c| {
-                let mut st_rem = c.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND version = ?2")?;
-                let mut st_ins = c.prepare("UPDATE packages SET state = 'installed' WHERE name = ?1 AND version = ?2")?;
+                let mut st_rem = c.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND dir_name = ?2")?;
+                let mut st_ins = c.prepare("UPDATE packages SET state = 'installed' WHERE name = ?1 AND dir_name = ?2")?;
                 for op in ops {
                     match op {
-                        Op::Install { name, new } => {
+                        Op::Install { name, new_dir, .. } => {
                             st_ins.bind_text(1, name)?;
-                            st_ins.bind_text(2, new)?;
+                            st_ins.bind_text(2, new_dir)?;
                             st_ins.execute()?;
                         }
-                        Op::Upgrade { name, old, new } => {
+                        Op::Upgrade { name, old_dir, new_dir, .. } => {
                             st_rem.bind_text(1, name)?;
-                            st_rem.bind_text(2, old)?;
+                            st_rem.bind_text(2, old_dir)?;
                             st_rem.execute()?;
                             st_ins.bind_text(1, name)?;
-                            st_ins.bind_text(2, new)?;
+                            st_ins.bind_text(2, new_dir)?;
                             st_ins.execute()?;
                         }
-                        Op::Remove { name, old } => {
+                        Op::Remove { name, old_dir, .. } => {
                             st_rem.bind_text(1, name)?;
-                            st_rem.bind_text(2, old)?;
+                            st_rem.bind_text(2, old_dir)?;
                             st_rem.execute()?;
                         }
                     }
@@ -1729,31 +1836,31 @@ impl Db {
         Ok(())
     }
 
-    /// Marks `(name, new_ver)` as `'installed'` and (if upgrading) `(name, old_ver)`
+    /// Marks `(name, new_dir)` as `'installed'` and (if upgrading) `(name, old_dir)`
     /// as `'removing'` atomically in `state.db`.
-    pub fn mark_installed(&self, name: &str, new_ver: &str, old_ver: Option<&str>) -> Result<()> {
+    pub fn mark_installed(&self, name: &str, new_dir: &str, old_dir: Option<&str>) -> Result<()> {
         let conn = self.conn.as_ref().ok_or_else(|| Error::Msg("database is read-only".into()))?;
         conn.transaction(|c| {
-            if let Some(old) = old_ver {
-                let mut st = c.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND version = ?2")?;
+            if let Some(old) = old_dir {
+                let mut st = c.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND dir_name = ?2")?;
                 st.bind_text(1, name)?;
                 st.bind_text(2, old)?;
                 st.execute()?;
             }
-            let mut st = c.prepare("UPDATE packages SET state = 'installed' WHERE name = ?1 AND version = ?2")?;
+            let mut st = c.prepare("UPDATE packages SET state = 'installed' WHERE name = ?1 AND dir_name = ?2")?;
             st.bind_text(1, name)?;
-            st.bind_text(2, new_ver)?;
+            st.bind_text(2, new_dir)?;
             st.execute()?;
             Ok(())
         })
     }
 
-    /// Marks `(name, old_ver)` as `'removing'` in `state.db`.
-    pub fn mark_removed(&self, name: &str, old_ver: &str) -> Result<()> {
+    /// Marks `(name, old_dir)` as `'removing'` in `state.db`.
+    pub fn mark_removed(&self, name: &str, old_dir: &str) -> Result<()> {
         let conn = self.conn.as_ref().ok_or_else(|| Error::Msg("database is read-only".into()))?;
-        let mut st = conn.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND version = ?2")?;
+        let mut st = conn.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND dir_name = ?2")?;
         st.bind_text(1, name)?;
-        st.bind_text(2, old_ver)?;
+        st.bind_text(2, old_dir)?;
         st.execute()
     }
 
@@ -1791,11 +1898,11 @@ impl Db {
     pub fn delete_staged(&self, ops: &[Op]) -> Result<()> {
         let Some(conn) = &self.conn else { return Ok(()) };
         conn.transaction(|c| {
-            let mut st = c.prepare("DELETE FROM packages WHERE name = ?1 AND version = ?2 AND state = 'staged'")?;
+            let mut st = c.prepare("DELETE FROM packages WHERE name = ?1 AND dir_name = ?2 AND state = 'staged'")?;
             for op in ops {
-                if let Some(v) = op.new_version() {
+                if let Some(dn) = op.new_dir() {
                     st.bind_text(1, op.name())?;
-                    st.bind_text(2, v)?;
+                    st.bind_text(2, dn)?;
                     st.execute()?;
                 }
             }
@@ -1855,12 +1962,14 @@ pub fn set_current(root: &Path, name: &str, version: &str) -> io::Result<()> {
 
 // ---------------------------------------------------------------- journal
 
-/// One package change of a transaction.
+/// One package change of a transaction. `new_dir`/`old_dir` name the
+/// directories under `Programs/<name>/` (usually equal to `new`/`old`, or
+/// `<version>+<id8>` on a same-version rebuild).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
-    Install { name: String, new: String },
-    Upgrade { name: String, old: String, new: String },
-    Remove { name: String, old: String },
+    Install { name: String, new: String, new_dir: String },
+    Upgrade { name: String, old: String, old_dir: String, new: String, new_dir: String },
+    Remove { name: String, old: String, old_dir: String },
 }
 
 impl Op {
@@ -1881,6 +1990,33 @@ impl Op {
             Op::Install { .. } => None,
         }
     }
+    pub fn new_dir(&self) -> Option<&str> {
+        match self {
+            Op::Install { new_dir, .. } | Op::Upgrade { new_dir, .. } => Some(new_dir),
+            Op::Remove { .. } => None,
+        }
+    }
+    pub fn old_dir(&self) -> Option<&str> {
+        match self {
+            Op::Upgrade { old_dir, .. } | Op::Remove { old_dir, .. } => Some(old_dir),
+            Op::Install { .. } => None,
+        }
+    }
+}
+
+fn fmt_ver_dir(ver: &str, dir: &str) -> String {
+    if dir == ver || dir.is_empty() {
+        ver.to_string()
+    } else {
+        format!("{ver}@{dir}")
+    }
+}
+
+fn parse_ver_dir(tok: &str) -> (String, String) {
+    match tok.split_once('@') {
+        Some((v, d)) => (v.to_string(), d.to_string()),
+        None => (tok.to_string(), tok.to_string()),
+    }
 }
 
 /// The plan of a switch, as written to the journal before the live tree
@@ -1899,9 +2035,15 @@ impl Journal {
         let mut s = String::from("vpm-journal 1\n");
         for op in &self.ops {
             match op {
-                Op::Install { name, new } => s.push_str(&format!("install {name} {new}\n")),
-                Op::Upgrade { name, old, new } => s.push_str(&format!("upgrade {name} {old} {new}\n")),
-                Op::Remove { name, old } => s.push_str(&format!("remove {name} {old}\n")),
+                Op::Install { name, new, new_dir } => {
+                    s.push_str(&format!("install {name} {}\n", fmt_ver_dir(new, new_dir)))
+                }
+                Op::Upgrade { name, old, old_dir, new, new_dir } => {
+                    s.push_str(&format!("upgrade {name} {} {}\n", fmt_ver_dir(old, old_dir), fmt_ver_dir(new, new_dir)))
+                }
+                Op::Remove { name, old, old_dir } => {
+                    s.push_str(&format!("remove {name} {}\n", fmt_ver_dir(old, old_dir)))
+                }
             }
         }
         for w in &self.world {
@@ -1922,11 +2064,19 @@ impl Journal {
             let f: Vec<&str> = l.split(' ').collect();
             let bad = || Error::Format(format!("journal: bad line '{l}'"));
             match (f[0], f.len()) {
-                ("install", 3) if !ended => j.ops.push(Op::Install { name: f[1].into(), new: f[2].into() }),
-                ("upgrade", 4) if !ended => {
-                    j.ops.push(Op::Upgrade { name: f[1].into(), old: f[2].into(), new: f[3].into() })
+                ("install", 3) if !ended => {
+                    let (new, new_dir) = parse_ver_dir(f[2]);
+                    j.ops.push(Op::Install { name: f[1].into(), new, new_dir });
                 }
-                ("remove", 3) if !ended => j.ops.push(Op::Remove { name: f[1].into(), old: f[2].into() }),
+                ("upgrade", 4) if !ended => {
+                    let (old, old_dir) = parse_ver_dir(f[2]);
+                    let (new, new_dir) = parse_ver_dir(f[3]);
+                    j.ops.push(Op::Upgrade { name: f[1].into(), old, old_dir, new, new_dir });
+                }
+                ("remove", 3) if !ended => {
+                    let (old, old_dir) = parse_ver_dir(f[2]);
+                    j.ops.push(Op::Remove { name: f[1].into(), old, old_dir });
+                }
                 ("world", 2) if !ended => j.world.push(f[1].into()),
                 ("end", 1) => ended = true,
                 ("done", 2) if ended => {
@@ -1943,7 +2093,9 @@ impl Journal {
         for op in &j.ops {
             let ok = safe_component(op.name())
                 && op.new_version().map_or(true, safe_version)
-                && op.old_version().map_or(true, safe_version);
+                && op.old_version().map_or(true, safe_version)
+                && op.new_dir().map_or(true, safe_dir_name)
+                && op.old_dir().map_or(true, safe_dir_name);
             if !ok {
                 return Err(Error::Format("journal: unsafe name".into()));
             }
@@ -2085,17 +2237,51 @@ mod tests {
     }
 
     #[test]
+    fn dir_name_helpers() {
+        assert!(safe_dir_name("1.0-r0"));
+        assert!(safe_dir_name("1.0-r0+0123abcd"));
+        assert!(!safe_dir_name("1.0-r0+0123ABCD")); // uppercase rejected
+        assert!(!safe_dir_name("1.0-r0+0123")); // wrong length
+        assert!(!safe_dir_name("../1.0-r0+0123abcd"));
+
+        let id_a = vec![0xaa; 32];
+        let id_b = vec![0xbb; 32];
+        assert_eq!(choose_dir_name("1.0-r0", &id_a, None), "1.0-r0");
+        assert_eq!(choose_dir_name("1.0-r0", &id_a, Some("0.9-r0")), "1.0-r0");
+        assert_eq!(choose_dir_name("1.0-r0", &id_b, Some("1.0-r0")), "1.0-r0+bbbbbbbb");
+        // Upgrading back from a +id8 dir to a fresh rebuild of the same version uses bare version
+        assert_eq!(choose_dir_name("1.0-r0", &id_a, Some("1.0-r0+bbbbbbbb")), "1.0-r0");
+    }
+
+    #[test]
     fn journal_roundtrip() {
         let j = Journal {
             ops: vec![
-                Op::Install { name: "a".into(), new: "1".into() },
-                Op::Upgrade { name: "b".into(), old: "1".into(), new: "2".into() },
-                Op::Remove { name: "c".into(), old: "3".into() },
+                Op::Install { name: "a".into(), new: "1".into(), new_dir: "1".into() },
+                Op::Upgrade {
+                    name: "b".into(),
+                    old: "1".into(),
+                    old_dir: "1".into(),
+                    new: "2".into(),
+                    new_dir: "2".into(),
+                },
+                Op::Upgrade {
+                    name: "d".into(),
+                    old: "1.0-r0".into(),
+                    old_dir: "1.0-r0".into(),
+                    new: "1.0-r0".into(),
+                    new_dir: "1.0-r0+deadbeef".into(),
+                },
+                Op::Remove { name: "c".into(), old: "3".into(), old_dir: "3".into() },
             ],
             world: vec!["a".into(), "b>=2".into()],
             done: Default::default(),
         };
         let mut t = j.format();
+        // Plain versions stay clean without '@', while distinct dir_name uses ver@dir
+        assert!(t.contains("install a 1\n"));
+        assert!(t.contains("upgrade b 1 2\n"));
+        assert!(t.contains("upgrade d 1.0-r0 1.0-r0@1.0-r0+deadbeef\n"));
         t.push_str("done pre:a\ndon");
         let p = Journal::parse(&t).unwrap();
         assert_eq!(p.ops, j.ops);
@@ -2103,6 +2289,7 @@ mod tests {
         assert!(p.done.contains("pre:a"));
         assert!(Journal::parse("vpm-journal 1\ninstall a 1\n").is_err());
         assert!(Journal::parse("vpm-journal 1\ninstall ../a 1\nend\n").is_err());
+        assert!(Journal::parse("vpm-journal 1\ninstall a 1@../bad\nend\n").is_err());
     }
 
     #[test]
@@ -2164,6 +2351,7 @@ mod tests {
         ];
 
         let sp = StagedPkg {
+            dir_name: "1.0-r0".into(),
             meta: meta.clone(),
             recs: recs.clone(),
             scripts: vec![("post-install".into(), b"#!/bin/sh\nexit 0\n".to_vec())],
@@ -2176,6 +2364,7 @@ mod tests {
 
         assert_eq!(db.installed.len(), 1);
         let ip = &db.installed["demo"];
+        assert_eq!(ip.dir_name, "1.0-r0");
         assert_eq!(ip.meta.info, meta.info);
         assert_eq!(ip.meta.triggers, meta.triggers);
         assert_eq!(ip.meta.replaces_priority, 5);
@@ -2189,11 +2378,32 @@ mod tests {
         assert_eq!(db.find_path_owners(b"usr/bin").unwrap(), Some(vec![]));
         assert_eq!(fs::read_to_string(Db::state(&root).join("world")).unwrap(), "demo\n");
 
+        // Stage a same-version rebuild alongside the installed copy with dir_name 1.0-r0+99999999
+        let mut rebuilt_meta = meta.clone();
+        rebuilt_meta.info.hashes = vec![0x99; 32];
+        let rebuilt_sp = StagedPkg {
+            dir_name: "1.0-r0+99999999".into(),
+            meta: rebuilt_meta,
+            recs: recs.clone(),
+            scripts: vec![],
+        };
+        db.stage_packages(&[rebuilt_sp]).unwrap();
+        assert!(db.has_pkg("demo", "1.0-r0").unwrap());
+        assert!(db.has_pkg("demo", "1.0-r0+99999999").unwrap());
+        db.mark_installed("demo", "1.0-r0+99999999", Some("1.0-r0")).unwrap();
+        db.purge_non_installed().unwrap();
+        db.reload().unwrap();
+        assert!(!db.has_pkg("demo", "1.0-r0").unwrap());
+        assert!(db.has_pkg("demo", "1.0-r0+99999999").unwrap());
+        assert_eq!(db.installed["demo"].dir_name, "1.0-r0+99999999");
+        assert_eq!(db.installed["demo"].meta.info.hashes, vec![0x99; 32]);
+
         // Indexed conflict lookup finds colliding unchanged package and ignores excluded/non-colliding ones
         let mut other_meta = PkgMeta::default();
         other_meta.info.name = "other".into();
         other_meta.info.version = "1.0-r0".into();
         let colliding_sp = StagedPkg {
+            dir_name: "1.0-r0".into(),
             meta: other_meta.clone(),
             recs: vec![FileRec {
                 kind: RecKind::File(FileKind::Regular),
@@ -2209,6 +2419,7 @@ mod tests {
             scripts: vec![],
         };
         let clean_sp = StagedPkg {
+            dir_name: "1.0-r0".into(),
             meta: other_meta,
             recs: vec![FileRec {
                 kind: RecKind::File(FileKind::Regular),
@@ -2244,8 +2455,91 @@ mod tests {
         let ro = Db::open_readonly(&root, false).unwrap();
         assert!(ro.is_sqlite());
         assert_eq!(ro.installed.len(), 1);
+        assert_eq!(ro.installed["demo"].dir_name, "1.0-r0+99999999");
         assert_eq!(ro.world.len(), 1);
         assert_eq!(ro.find_path_owners(b"usr/bin/demo").unwrap(), Some(vec!["demo".into()]));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sqlite_v1_readonly_and_online_migration_to_v2() {
+        let root = std::env::temp_dir().join(format!("vpm-db-v1v2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(Db::programs(&root)).unwrap();
+        fs::create_dir_all(Db::state(&root)).unwrap();
+
+        // Hand-craft a schema v1 state.db (without dir_name column)
+        {
+            let conn = Connection::open_rw(&Db::db_path(&root)).unwrap();
+            conn.exec_batch(
+                "CREATE TABLE packages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('staged', 'installed', 'removing')),
+                    arch TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    url TEXT NOT NULL DEFAULT '',
+                    license TEXT NOT NULL DEFAULT '',
+                    origin TEXT NOT NULL DEFAULT '',
+                    maintainer TEXT NOT NULL DEFAULT '',
+                    build_time INTEGER NOT NULL DEFAULT 0,
+                    installed_size INTEGER NOT NULL DEFAULT 0,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    identity BLOB NOT NULL DEFAULT X'',
+                    repo_commit BLOB NOT NULL DEFAULT X'',
+                    provider_priority INTEGER NOT NULL DEFAULT 0,
+                    replaces_priority INTEGER NOT NULL DEFAULT 0,
+                    layer INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT '',
+                    UNIQUE(name, version)
+                );
+                CREATE INDEX idx_packages_state ON packages(state, name);
+                CREATE TABLE pkg_deps (pkg_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE, kind TEXT NOT NULL, ord INTEGER NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL, op INTEGER NOT NULL);
+                CREATE TABLE pkg_tags (pkg_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE, ord INTEGER NOT NULL, tag TEXT NOT NULL);
+                CREATE TABLE pkg_triggers (pkg_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE, ord INTEGER NOT NULL, pattern TEXT NOT NULL);
+                CREATE TABLE pkg_scripts (pkg_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE, kind TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY (pkg_id, kind));
+                CREATE TABLE pkg_files (pkg_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE, ord INTEGER NOT NULL, kind TEXT NOT NULL, mode INTEGER NOT NULL, user TEXT, grp TEXT, size INTEGER NOT NULL, mtime INTEGER NOT NULL, hash BLOB NOT NULL DEFAULT X'', extra BLOB, dev INTEGER, xattrs BLOB, path BLOB NOT NULL);
+                CREATE TABLE world (spec TEXT PRIMARY KEY);
+                INSERT INTO packages (name, version, state, arch) VALUES ('foo', '1.0-r0', 'installed', 'x86_64');
+                INSERT INTO pkg_files (pkg_id, ord, kind, mode, size, mtime, path) VALUES (1, 0, 'f', 493, 5, 0, X'7573722F62696E2F666F6F');
+                INSERT INTO world (spec) VALUES ('foo');
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+
+        // Read-only open works on v1 DB without migrating it
+        {
+            let ro = Db::open_readonly(&root, false).unwrap();
+            assert_eq!(ro.schema_ver, 1);
+            assert_eq!(ro.installed["foo"].dir_name, "1.0-r0");
+            assert_eq!(ro.read_pkg_files("foo", "1.0-r0").unwrap().len(), 1);
+        }
+
+        // Writable open upgrades v1 -> v2 in place while preserving all rows and FK children
+        {
+            let db = Db::open(&root, false).unwrap();
+            assert_eq!(db.schema_ver, 2);
+            assert_eq!(db.installed["foo"].dir_name, "1.0-r0");
+            assert_eq!(db.read_pkg_files("foo", "1.0-r0").unwrap().len(), 1);
+            assert_eq!(db.world.len(), 1);
+            // Can now stage a same-version rebuild alongside 1.0-r0
+            let mut m = PkgMeta::default();
+            m.info.name = "foo".into();
+            m.info.version = "1.0-r0".into();
+            m.info.hashes = vec![0xab; 32];
+            db.stage_packages(&[StagedPkg {
+                dir_name: "1.0-r0+abababab".into(),
+                meta: m,
+                recs: vec![],
+                scripts: vec![],
+            }])
+            .unwrap();
+            assert!(db.has_pkg("foo", "1.0-r0").unwrap());
+            assert!(db.has_pkg("foo", "1.0-r0+abababab").unwrap());
+        }
 
         let _ = fs::remove_dir_all(&root);
     }

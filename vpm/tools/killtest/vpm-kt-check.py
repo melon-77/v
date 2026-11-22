@@ -158,10 +158,16 @@ def open_state_db(root):
     return sqlite3.connect(f'file:{p}?mode=ro', uri=True)
 
 
+def state_dir_col(conn):
+    ver = conn.execute("PRAGMA user_version").fetchone()[0]
+    return 'dir_name' if ver >= 2 else 'version'
+
+
 def programs(root):
     """Programs/<name>: its entries, Current, and the metadata of Current."""
     progs = os.path.join(root, 'Programs')
     conn = open_state_db(root)
+    dcol = state_dir_col(conn) if conn is not None else 'version'
     res = {}
     try:
         for name in sorted(os.listdir(progs)):
@@ -176,7 +182,7 @@ def programs(root):
                         "SELECT id, arch, description, url, license, origin, maintainer, "
                         "build_time, installed_size, file_size, identity, repo_commit, "
                         "provider_priority, replaces_priority, layer, source "
-                        "FROM packages WHERE name=? AND version=?",
+                        f"FROM packages WHERE name=? AND {dcol}=?",
                         (name, ver),
                     ).fetchone()
                     if row is not None:
@@ -207,14 +213,15 @@ def programs(root):
 
 
 def owned(root):
-    """canonical path -> [name, version, path as recorded, kind] for every
+    """canonical path -> [name, dir_name, path as recorded, kind] for every
     entry of every installed package."""
     res = {}
     conn = open_state_db(root)
     if conn is not None:
         try:
+            dcol = state_dir_col(conn)
             for name, ver, path_b, kind in conn.execute(
-                "SELECT p.name, p.version, f.path, f.kind "
+                f"SELECT p.name, p.{dcol}, f.path, f.kind "
                 "FROM pkg_files f JOIN packages p ON p.id = f.pkg_id "
                 "WHERE p.state = 'installed' ORDER BY p.name, f.ord"
             ):
@@ -391,6 +398,7 @@ def crash(root, pre, ref):
     # every Current names a complete version (in state.db, or legacy .vpm)
     progs = os.path.join(root, 'Programs')
     conn = open_state_db(root)
+    dcol = state_dir_col(conn) if conn is not None else 'version'
     try:
         for name in sorted(os.listdir(progs)):
             c = os.path.join(progs, name, 'Current')
@@ -398,7 +406,7 @@ def crash(root, pre, ref):
                 ver = os.readlink(c)
                 if conn is not None:
                     ok = conn.execute(
-                        "SELECT 1 FROM packages WHERE name=? AND version=? LIMIT 1", (name, ver)
+                        f"SELECT 1 FROM packages WHERE name=? AND {dcol}=? LIMIT 1", (name, ver)
                     ).fetchone() is not None
                 else:
                     d = os.path.join(progs, name, ver, '.vpm')

@@ -95,9 +95,15 @@ impl Universe {
         for (name, ip) in installed {
             let key = (name.clone(), ip.meta.info.version.clone());
             match by_nv.get(&key) {
-                Some(&i) => cands[i].installed = true,
-                None => {
-                    by_nv.insert(key, cands.len());
+                Some(&i)
+                    if ip.meta.info.hashes.is_empty()
+                        || cands[i].info.hashes == ip.meta.info.hashes =>
+                {
+                    cands[i].installed = true;
+                }
+                _ => {
+                    // Installed copy is either absent from repos or a different
+                    // build identity at the same version (same-version rebuild).
                     cands.push(Candidate { info: ip.meta.info.clone(), repo: None, installed: true });
                 }
             }
@@ -280,6 +286,20 @@ impl<'u> Solver<'u> {
         }
         if prio(ca) != prio(cb) {
             return prio(ca) > prio(cb);
+        }
+        // Same package at the same version with different build identities:
+        // when upgrading (or `add -u`), prefer the newer rebuild from a repo.
+        if !keep
+            && ca.info.name == cb.info.name
+            && ca.info.version == cb.info.version
+            && ca.info.hashes != cb.info.hashes
+        {
+            if ca.info.build_time != cb.info.build_time {
+                return ca.info.build_time > cb.info.build_time;
+            }
+            if ca.repo.is_some() != cb.repo.is_some() {
+                return ca.repo.is_some();
+            }
         }
         if ca.installed != cb.installed {
             return ca.installed;
@@ -614,7 +634,7 @@ mod tests {
             .iter()
             .map(|i| {
                 let meta = crate::db::PkgMeta { info: i.clone(), ..Default::default() };
-                (i.name.clone(), Installed { meta, dir: std::path::PathBuf::new() })
+                (i.name.clone(), Installed { meta, dir_name: i.version.clone(), dir: std::path::PathBuf::new() })
             })
             .collect();
         Universe::new(&[repo], &inst, "x86_64")
@@ -633,6 +653,32 @@ mod tests {
         let mut v = solve(u, &w(world), Mode::Keep, &none).map(|s| names(u, &s)).map_err(|e| e.to_string())?;
         v.sort();
         Ok(v)
+    }
+
+    #[test]
+    fn upgrade_same_version_rebuild_by_identity() {
+        let mut old = pkg("foo", "1.0-r0", &[], &[], &[]);
+        old.hashes = vec![0x11; 32];
+        old.build_time = 100;
+        let mut rebuilt = pkg("foo", "1.0-r0", &[], &[], &[]);
+        rebuilt.hashes = vec![0x22; 32];
+        rebuilt.build_time = 200;
+
+        let u = universe_with(vec![rebuilt.clone()], &[old.clone()]);
+        let none = HashSet::new();
+        let fresh_foo: HashSet<String> = ["foo".to_string()].into_iter().collect();
+
+        // Keep mode preserves the installed identity
+        let s_keep = solve(&u, &w(&["foo"]), Mode::Keep, &none).unwrap();
+        assert_eq!(u.cands[s_keep.order[0]].info.hashes, old.hashes);
+
+        // Upgrade mode picks up the rebuilt identity
+        let s_up = solve(&u, &w(&["foo"]), Mode::Upgrade, &none).unwrap();
+        assert_eq!(u.cands[s_up.order[0]].info.hashes, rebuilt.hashes);
+
+        // `add -u foo` (fresh) also picks up the rebuilt identity
+        let s_fresh = solve(&u, &w(&["foo"]), Mode::Keep, &fresh_foo).unwrap();
+        assert_eq!(u.cands[s_fresh.order[0]].info.hashes, rebuilt.hashes);
     }
 
     #[test]

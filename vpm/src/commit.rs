@@ -83,6 +83,7 @@ pub struct Report {
 /// A package of the final set (or an old version), with its records.
 pub struct PkgState {
     pub meta: PkgMeta,
+    pub dir_name: String,
     pub dir: PathBuf,
     pub recs: Vec<FileRec>,
     pub changed: bool,
@@ -90,23 +91,25 @@ pub struct PkgState {
 
 impl PkgState {
     pub fn load(dir: &Path, changed: bool) -> Result<PkgState> {
-        Ok(PkgState { meta: db::read_meta(dir)?, recs: db::read_files(dir)?, dir: dir.to_path_buf(), changed })
+        let dir_name = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok(PkgState { meta: db::read_meta(dir)?, dir_name, recs: db::read_files(dir)?, dir: dir.to_path_buf(), changed })
     }
 
     /// Loads a package's metadata and file manifest from `Db` (SQLite, or
     /// legacy `.vpm/` fallback for read-only unmigrated roots).
-    pub fn load_from_db(db: &Db, name: &str, version: &str, changed: bool) -> Result<PkgState> {
-        let meta = db.read_pkg_meta(name, version)?;
-        let recs = db.read_pkg_files(name, version)?;
-        let dir = Db::pkg_dir(&db.root, name, version);
-        Ok(PkgState { meta, dir, recs, changed })
+    pub fn load_from_db(db: &Db, name: &str, dir_name: &str, changed: bool) -> Result<PkgState> {
+        let meta = db.read_pkg_meta(name, dir_name)?;
+        let recs = db.read_pkg_files(name, dir_name)?;
+        let dir = Db::pkg_dir(&db.root, name, dir_name);
+        Ok(PkgState { meta, dir_name: dir_name.to_string(), dir, recs, changed })
     }
 
     /// Constructs a `PkgState` from an in-memory `StagedPkg` (avoiding any
     /// round-trip read back from disk/SQLite).
     pub fn from_staged(root: &Path, sp: &StagedPkg, changed: bool) -> PkgState {
-        let dir = Db::pkg_dir(root, sp.meta.name(), sp.meta.version());
-        PkgState { meta: sp.meta.clone(), dir, recs: sp.recs.clone(), changed }
+        let dir_name = sp.effective_dir_name().to_string();
+        let dir = Db::pkg_dir(root, sp.meta.name(), &dir_name);
+        PkgState { meta: sp.meta.clone(), dir_name, dir, recs: sp.recs.clone(), changed }
     }
 }
 
@@ -375,7 +378,7 @@ struct Deferred {
     key: String,
     name: String,
     version: String,
-    dir: PathBuf,
+    dir_name: String,
     typ: String,
     args: Vec<String>,
 }
@@ -692,7 +695,7 @@ impl<'a> Switch<'a> {
     }
 
     fn script(&mut self, key: &str, p: &PkgState, typ: &str, args: &[String]) {
-        self.script_at(key, p.meta.name(), p.meta.version(), &p.dir, typ, args, false)
+        self.script_at(key, p.meta.name(), p.meta.version(), &p.dir_name, typ, args, false)
     }
 
     /// Like [`Switch::script`], but a script whose `#!` interpreter is not
@@ -700,15 +703,15 @@ impl<'a> Switch<'a> {
     /// until all packages are placed, instead of failing as it would with
     /// apk.
     fn script_deferrable(&mut self, key: &str, p: &PkgState, typ: &str, args: &[String]) {
-        self.script_at(key, p.meta.name(), p.meta.version(), &p.dir, typ, args, true)
+        self.script_at(key, p.meta.name(), p.meta.version(), &p.dir_name, typ, args, true)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn script_at(&mut self, key: &str, name: &str, version: &str, dir: &Path, typ: &str, args: &[String], defer_ok: bool) {
+    fn script_at(&mut self, key: &str, name: &str, version: &str, dir_name: &str, typ: &str, args: &[String], defer_ok: bool) {
         if self.j.is_done(key) {
             return;
         }
-        let Some(body) = self.db.read_pkg_script(name, version, typ) else { return };
+        let Some(body) = self.db.read_pkg_script(name, dir_name, typ) else { return };
         if !self.opts.no_scripts {
             if defer_ok {
                 if let Some(interp) = interpreter(&body) {
@@ -725,7 +728,7 @@ impl<'a> Switch<'a> {
                             key: key.to_string(),
                             name: name.to_string(),
                             version: version.to_string(),
-                            dir: dir.to_path_buf(),
+                            dir_name: dir_name.to_string(),
                             typ: typ.to_string(),
                             args: args.to_vec(),
                         });
@@ -761,7 +764,7 @@ impl<'a> Switch<'a> {
 
     fn run_deferred(&mut self) {
         for d in std::mem::take(&mut self.deferred) {
-            self.script_at(&d.key, &d.name, &d.version, &d.dir, &d.typ, &d.args, false);
+            self.script_at(&d.key, &d.name, &d.version, &d.dir_name, &d.typ, &d.args, false);
         }
     }
 }
@@ -1049,20 +1052,20 @@ pub fn switch(
     // and old versions (absent if already deleted).
     let mut new_pkgs: Vec<PkgState> = Vec::new();
     for op in &plan.ops {
-        if let Some(v) = op.new_version() {
-            let st = if let Some(sp) = preloaded.and_then(|m| m.get(&(op.name().to_string(), v.to_string()))) {
+        if let Some(d) = op.new_dir() {
+            let st = if let Some(sp) = preloaded.and_then(|m| m.get(&(op.name().to_string(), d.to_string()))) {
                 PkgState::from_staged(root, sp, true)
             } else {
-                PkgState::load_from_db(db, op.name(), v, true)?
+                PkgState::load_from_db(db, op.name(), d, true)?
             };
             new_pkgs.push(st);
         }
     }
     let mut olds: HashMap<String, PkgState> = HashMap::new();
     for op in &plan.ops {
-        if let Some(v) = op.old_version() {
-            if db.has_pkg(op.name(), v)? {
-                olds.insert(op.name().to_string(), PkgState::load_from_db(db, op.name(), v, true)?);
+        if let Some(d) = op.old_dir() {
+            if db.has_pkg(op.name(), d)? {
+                olds.insert(op.name().to_string(), PkgState::load_from_db(db, op.name(), d, true)?);
             }
         }
     }
@@ -1082,14 +1085,14 @@ pub fn switch(
         if let Some(colliding) = db.find_colliding_paths(&non_dir_paths, &changed_names)? {
             for name in colliding {
                 if let Some(ip) = db.installed.get(&name) {
-                    pkgs.push(PkgState::load_from_db(db, &name, ip.meta.version(), false)?);
+                    pkgs.push(PkgState::load_from_db(db, &name, &ip.dir_name, false)?);
                 }
             }
         }
     } else {
         for (name, ip) in &db.installed {
             if !changed.contains_key(name.as_str()) {
-                pkgs.push(PkgState::load_from_db(db, name, ip.meta.version(), false)?);
+                pkgs.push(PkgState::load_from_db(db, name, &ip.dir_name, false)?);
             }
         }
     }
@@ -1177,11 +1180,11 @@ pub fn switch(
                 }
                 s.remove_old(o, &own, keep.as_ref().unwrap(), &changed_names, &mut modified);
             }
-            db::set_current(root, &name, p.meta.version())?;
+            db::set_current(root, &name, &p.dir_name)?;
             if s.small_tx {
                 s.touched_dirs.insert(programs.join(&name));
             }
-            let runs_post = !opts.no_scripts && !s.j.is_done(&post_key) && db.has_pkg_script(&name, p.meta.version(), post);
+            let runs_post = !opts.no_scripts && !s.j.is_done(&post_key) && db.has_pkg_script(&name, &p.dir_name, post);
             if runs_post {
                 s.sync()?;
             }
@@ -1200,7 +1203,7 @@ pub fn switch(
 
     // 2. removed packages
     for op in &plan.ops {
-        let Op::Remove { name, old } = op else { continue };
+        let Op::Remove { name, old, old_dir } = op else { continue };
         let key = format!("removed:{name}");
         let o = olds.get(name);
         if !s.j.is_done(&key) {
@@ -1220,7 +1223,7 @@ pub fn switch(
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            if o.map_or(false, |_| db.has_pkg_script(name, old, "post-deinstall")) && !opts.no_scripts {
+            if o.map_or(false, |_| db.has_pkg_script(name, old_dir, "post-deinstall")) && !opts.no_scripts {
                 s.sync()?;
             }
             s.j.mark_with(&key, false)?;
@@ -1271,7 +1274,7 @@ pub fn switch(
     let changed_has_triggers = pkgs
         .iter()
         .skip(first_new)
-        .any(|p| !p.meta.triggers.is_empty() && db.has_pkg_script(p.meta.name(), p.meta.version(), "trigger"));
+        .any(|p| !p.meta.triggers.is_empty() && db.has_pkg_script(p.meta.name(), &p.dir_name, "trigger"));
     let mut installed_dirs: BTreeSet<Vec<u8>> = if db.is_sqlite() && changed_has_triggers {
         db.list_all_installed_dirs()?.unwrap_or_default()
     } else {
@@ -1297,8 +1300,8 @@ pub fn switch(
     };
     installed_dirs.insert(Vec::new());
 
-    let match_triggers = |meta: &PkgMeta, pkg_changed: bool| -> Option<Vec<String>> {
-        if meta.triggers.is_empty() || !db.has_pkg_script(meta.name(), meta.version(), "trigger") {
+    let match_triggers = |meta: &PkgMeta, dir_name: &str, pkg_changed: bool| -> Option<Vec<String>> {
+        if meta.triggers.is_empty() || !db.has_pkg_script(meta.name(), dir_name, "trigger") {
             return None;
         }
         let mut pending = false;
@@ -1331,14 +1334,13 @@ pub fn switch(
         if changed.contains_key(name.as_str()) {
             continue;
         }
-        if let Some(args) = match_triggers(&ip.meta, false) {
+        if let Some(args) = match_triggers(&ip.meta, &ip.dir_name, false) {
             let key = format!("trigger:{name}");
-            let dir = Db::pkg_dir(root, name, ip.meta.version());
-            s.script_at(&key, name, ip.meta.version(), &dir, "trigger", &args, false);
+            s.script_at(&key, name, ip.meta.version(), &ip.dir_name, "trigger", &args, false);
         }
     }
     for p in pkgs.iter().skip(first_new) {
-        if let Some(args) = match_triggers(&p.meta, true) {
+        if let Some(args) = match_triggers(&p.meta, &p.dir_name, true) {
             let key = format!("trigger:{}", p.meta.name());
             s.script(&key, p, "trigger", &args);
         }
@@ -1357,8 +1359,8 @@ pub fn switch(
         // only through real directories (Programs/<name> a symlink is
         // corruption, never followed)
         match op {
-            Op::Upgrade { name, old, .. } => {
-                let d = db::checked_pkg_parent(root, name)?.join(old);
+            Op::Upgrade { name, old_dir, .. } => {
+                let d = db::checked_pkg_parent(root, name)?.join(old_dir);
                 match fs::symlink_metadata(&d) {
                     Ok(m) if m.is_dir() => fs::remove_dir_all(&d)?,
                     Ok(_) => fs::remove_file(&d)?,

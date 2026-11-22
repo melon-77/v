@@ -423,69 +423,76 @@ fn sqlite_crash_recovery_rolls_forward() {
     use vpm::adb::{Dependency, FileKind};
     use vpm::db::{Db, FileRec, Journal, JournalFile, Op, PkgMeta, RecKind, StagedPkg};
 
-    let make_pkg = |ver: &str, hello_body: &[u8], extra_file: Option<(&[u8], &[u8])>| -> StagedPkg {
-        let mut meta = PkgMeta::default();
-        meta.info.name = "hello".into();
-        meta.info.version = ver.into();
-        meta.info.arch = "x86_64".into();
-        meta.info.origin = "hello".into();
-        meta.info.license = "MIT".into();
-        meta.info.description = format!("hello {ver}");
-        meta.info.provides = vec![Dependency::parse(&format!("cmd:hello={ver}")).unwrap()];
-        let mut recs = vec![
-            FileRec {
-                kind: RecKind::Dir,
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: 0,
-                mtime: 0,
-                hash: vec![],
-                xattrs: vec![],
-                path: b"usr".to_vec(),
-            },
-            FileRec {
-                kind: RecKind::Dir,
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: 0,
-                mtime: 0,
-                hash: vec![],
-                xattrs: vec![],
-                path: b"usr/bin".to_vec(),
-            },
-            FileRec {
-                kind: RecKind::File(FileKind::Regular),
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: hello_body.len() as u64,
-                mtime: 100,
-                hash: vpm::digest::sha256(hello_body).to_vec(),
-                xattrs: vec![],
-                path: b"usr/bin/hello".to_vec(),
-            },
-        ];
-        if let Some((path, body)) = extra_file {
-            recs.push(FileRec {
-                kind: RecKind::File(FileKind::Regular),
-                mode: 0o755,
-                user: None,
-                group: None,
-                size: body.len() as u64,
-                mtime: 100,
-                hash: vpm::digest::sha256(body).to_vec(),
-                xattrs: vec![],
-                path: path.to_vec(),
-            });
-        }
-        StagedPkg { meta, recs, scripts: vec![] }
-    };
+    let make_pkg =
+        |ver: &str, dir_name: &str, identity: Vec<u8>, hello_body: &[u8], extra_file: Option<(&[u8], &[u8])>| -> StagedPkg {
+            let mut meta = PkgMeta::default();
+            meta.info.name = "hello".into();
+            meta.info.version = ver.into();
+            meta.info.arch = "x86_64".into();
+            meta.info.origin = "hello".into();
+            meta.info.license = "MIT".into();
+            meta.info.hashes = identity;
+            meta.info.description = format!("hello {ver}");
+            meta.info.provides = vec![Dependency::parse(&format!("cmd:hello={ver}")).unwrap()];
+            let mut recs = vec![
+                FileRec {
+                    kind: RecKind::Dir,
+                    mode: 0o755,
+                    user: None,
+                    group: None,
+                    size: 0,
+                    mtime: 0,
+                    hash: vec![],
+                    xattrs: vec![],
+                    path: b"usr".to_vec(),
+                },
+                FileRec {
+                    kind: RecKind::Dir,
+                    mode: 0o755,
+                    user: None,
+                    group: None,
+                    size: 0,
+                    mtime: 0,
+                    hash: vec![],
+                    xattrs: vec![],
+                    path: b"usr/bin".to_vec(),
+                },
+                FileRec {
+                    kind: RecKind::File(FileKind::Regular),
+                    mode: 0o755,
+                    user: None,
+                    group: None,
+                    size: hello_body.len() as u64,
+                    mtime: 100,
+                    hash: vpm::digest::sha256(hello_body).to_vec(),
+                    xattrs: vec![],
+                    path: b"usr/bin/hello".to_vec(),
+                },
+            ];
+            if let Some((path, body)) = extra_file {
+                recs.push(FileRec {
+                    kind: RecKind::File(FileKind::Regular),
+                    mode: 0o755,
+                    user: None,
+                    group: None,
+                    size: body.len() as u64,
+                    mtime: 100,
+                    hash: vpm::digest::sha256(body).to_vec(),
+                    xattrs: vec![],
+                    path: path.to_vec(),
+                });
+            }
+            StagedPkg { dir_name: dir_name.into(), meta, recs, scripts: vec![] }
+        };
 
     // Case 1: killed right after journal creation (before placed:hello)
     // Case 2: killed right after placed:hello (Current + state.db already switched, old dir & journal remain)
-    for (tag, already_placed) in [("before-place", false), ("after-place", true)] {
+    // Case 3: same-version rebuild (1.0-r0 -> 1.0-r0+22222222) killed before placed:hello
+    for (tag, already_placed, new_ver, new_dir) in [
+        ("before-place", false, "2.0-r0", "2.0-r0"),
+        ("after-place", true, "2.0-r0", "2.0-r0"),
+        ("same-ver-rebuild", false, "1.0-r0", "1.0-r0+22222222"),
+    ] {
         let root = temp_root(&format!("sqlite-recover-{tag}"));
         let r = root.to_str().unwrap();
 
@@ -494,12 +501,12 @@ fn sqlite_crash_recovery_rolls_forward() {
         let v2_body = b"#!/bin/sh\necho v2\n";
         let v2_new = b"new-only-tool\n";
 
-        let sp1 = make_pkg("1.0-r0", v1_body, Some((b"usr/bin/old-only", v1_old)));
-        let sp2 = make_pkg("2.0-r0", v2_body, Some((b"usr/bin/new-only", v2_new)));
+        let sp1 = make_pkg("1.0-r0", "1.0-r0", vec![0x11; 32], v1_body, Some((b"usr/bin/old-only", v1_old)));
+        let sp2 = make_pkg(new_ver, new_dir, vec![0x22; 32], v2_body, Some((b"usr/bin/new-only", v2_new)));
 
         let db = Db::open(&root, true).unwrap();
         let p1 = Db::pkg_dir(&root, "hello", "1.0-r0");
-        let p2 = Db::pkg_dir(&root, "hello", "2.0-r0");
+        let p2 = Db::pkg_dir(&root, "hello", new_dir);
         fs::create_dir_all(p1.join("usr/bin")).unwrap();
         fs::write(p1.join("usr/bin/hello"), v1_body).unwrap();
         fs::write(p1.join("usr/bin/old-only"), v1_old).unwrap();
@@ -511,7 +518,7 @@ fn sqlite_crash_recovery_rolls_forward() {
         if already_placed {
             fs::hard_link(p2.join("usr/bin/hello"), root.join("usr/bin/hello")).unwrap();
             fs::hard_link(p2.join("usr/bin/new-only"), root.join("usr/bin/new-only")).unwrap();
-            vpm::db::set_current(&root, "hello", "2.0-r0").unwrap();
+            vpm::db::set_current(&root, "hello", new_dir).unwrap();
         } else {
             fs::hard_link(p1.join("usr/bin/hello"), root.join("usr/bin/hello")).unwrap();
             fs::hard_link(p1.join("usr/bin/old-only"), root.join("usr/bin/old-only")).unwrap();
@@ -521,14 +528,20 @@ fn sqlite_crash_recovery_rolls_forward() {
         db.stage_packages(&[sp1, sp2]).unwrap();
         db.mark_installed("hello", "1.0-r0", None).unwrap();
         if already_placed {
-            db.mark_installed("hello", "2.0-r0", Some("1.0-r0")).unwrap();
+            db.mark_installed("hello", new_dir, Some("1.0-r0")).unwrap();
         }
         db.save_world(&[Dependency::parse_world("hello").unwrap()]).unwrap();
 
         let mut jf = JournalFile::create(
             &root,
             Journal {
-                ops: vec![Op::Upgrade { name: "hello".into(), old: "1.0-r0".into(), new: "2.0-r0".into() }],
+                ops: vec![Op::Upgrade {
+                    name: "hello".into(),
+                    old: "1.0-r0".into(),
+                    old_dir: "1.0-r0".into(),
+                    new: new_ver.into(),
+                    new_dir: new_dir.into(),
+                }],
                 world: vec!["hello".into()],
                 done: Default::default(),
             },
@@ -552,12 +565,12 @@ fn sqlite_crash_recovery_rolls_forward() {
             String::from_utf8_lossy(&out.stdout)
         );
 
-        // Journal & old version cleaned up; Current -> 2.0-r0
+        // Journal & old version cleaned up; Current -> new_dir
         assert!(!root.join("var/lib/vpm/journal").exists(), "{tag}: journal still present");
         assert!(!p1.exists(), "{tag}: old version dir 1.0-r0 still present");
-        assert_eq!(fs::read_link(root.join("Programs/hello/Current")).unwrap(), PathBuf::from("2.0-r0"));
+        assert_eq!(fs::read_link(root.join("Programs/hello/Current")).unwrap(), PathBuf::from(new_dir));
 
-        // Live tree matches 2.0-r0 (hard-linked) and old-only file is gone
+        // Live tree matches new build (hard-linked) and old-only file is gone
         assert_eq!(fs::read(root.join("usr/bin/hello")).unwrap(), v2_body);
         assert_eq!(fs::read(root.join("usr/bin/new-only")).unwrap(), v2_new);
         assert!(!root.join("usr/bin/old-only").exists(), "{tag}: old-only file was not removed");
@@ -565,10 +578,13 @@ fn sqlite_crash_recovery_rolls_forward() {
         let dst_md = fs::symlink_metadata(root.join("usr/bin/hello")).unwrap();
         assert_eq!((src_md.dev(), src_md.ino()), (dst_md.dev(), dst_md.ino()));
 
-        // SQLite state matches 2.0-r0 only (1.0-r0 rows purged)
+        // SQLite state matches new_dir only (1.0-r0 rows purged)
         let ro = Db::open_readonly(&root, false).unwrap();
         assert!(!ro.has_pkg("hello", "1.0-r0").unwrap(), "{tag}: 1.0-r0 row was not purged from state.db");
-        assert!(ro.has_pkg("hello", "2.0-r0").unwrap());
+        assert!(ro.has_pkg("hello", new_dir).unwrap());
+        assert_eq!(ro.installed["hello"].meta.version(), new_ver);
+        assert_eq!(ro.installed["hello"].dir_name, new_dir);
+        assert_eq!(ro.installed["hello"].meta.info.hashes, vec![0x22; 32]);
         assert_eq!(ro.find_path_owners(b"usr/bin/hello").unwrap(), Some(vec!["hello".into()]));
         assert_eq!(ro.find_path_owners(b"usr/bin/old-only").unwrap(), Some(vec![]));
         assert_eq!(ro.find_path_owners(b"usr/bin/new-only").unwrap(), Some(vec!["hello".into()]));

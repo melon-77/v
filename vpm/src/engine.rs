@@ -128,7 +128,7 @@ fn gc(root: &Path, db: &Db) -> Result<()> {
         }
         let name = e.file_name().to_string_lossy().into_owned();
         let current = match db.installed.get(&name) {
-            Some(i) => Some(i.meta.info.version.clone()),
+            Some(i) => Some(i.dir_name.clone()),
             // a Current link that is there but was not accepted: keep all
             None if fs::symlink_metadata(e.path().join(db::CURRENT)).is_ok() => continue,
             None => None,
@@ -357,13 +357,13 @@ fn run_jobs(
 fn cleanup_new(root: &Path, db: &Db, ops: &[Op]) {
     let _ = db.delete_staged(ops);
     for op in ops {
-        if let Some(v) = op.new_version() {
-            if db.installed.get(op.name()).map(|i| i.meta.info.version.as_str()) == Some(v) {
+        if let Some(d_name) = op.new_dir() {
+            if db.installed.get(op.name()).map(|i| i.dir_name.as_str()) == Some(d_name) {
                 continue;
             }
             // only through real directories
             let Ok(pdir) = db::checked_pkg_parent(root, op.name()) else { continue };
-            let d = pdir.join(v);
+            let d = pdir.join(d_name);
             if fs::symlink_metadata(&d).map_or(false, |m| m.is_dir()) {
                 let _ = fs::remove_dir_all(&d);
             }
@@ -406,7 +406,7 @@ fn sync_unpacked_small(root: &Path, staged_map: &HashMap<(String, String), Stage
     let programs = Db::programs(root);
     dirs.insert(programs.clone());
     for sp in staged_map.values() {
-        let pkg_dir = Db::pkg_dir(root, sp.meta.name(), sp.meta.version());
+        let pkg_dir = Db::pkg_dir(root, sp.meta.name(), &sp.dir_name);
         if let Some(par) = pkg_dir.parent() {
             dirs.insert(par.to_path_buf());
         }
@@ -464,12 +464,31 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         let name = cand.info.name.as_str();
         chosen.insert(name);
         let new = cand.info.version.clone();
-        let op = match db.installed.get(name) {
-            Some(ip) if ip.meta.info.version == new => continue,
-            Some(ip) => Op::Upgrade { name: name.into(), old: ip.meta.info.version.clone(), new: new.clone() },
-            None => Op::Install { name: name.into(), new: new.clone() },
+        let (op, new_dir) = match db.installed.get(name) {
+            Some(ip)
+                if ip.meta.info.version == new
+                    && (ip.meta.info.hashes.is_empty() || ip.meta.info.hashes == cand.info.hashes) =>
+            {
+                continue
+            }
+            Some(ip) => {
+                let new_dir = db::choose_dir_name(&new, &cand.info.hashes, Some(&ip.dir_name));
+                let op = Op::Upgrade {
+                    name: name.into(),
+                    old: ip.meta.info.version.clone(),
+                    old_dir: ip.dir_name.clone(),
+                    new: new.clone(),
+                    new_dir: new_dir.clone(),
+                };
+                (op, new_dir)
+            }
+            None => {
+                let new_dir = db::choose_dir_name(&new, &cand.info.hashes, None);
+                let op = Op::Install { name: name.into(), new: new.clone(), new_dir: new_dir.clone() };
+                (op, new_dir)
+            }
         };
-        if !db::safe_component(name) || !db::safe_version(&new) {
+        if !db::safe_component(name) || !db::safe_version(&new) || !db::safe_dir_name(&new_dir) {
             return Err(Error::Schema(format!("unsafe package name or version '{}'", cand.info.nv())));
         }
         let Some(ri) = cand.repo else {
@@ -482,6 +501,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
             job: unpack::Job {
                 name: name.into(),
                 version: new,
+                dir_name: new_dir,
                 src,
                 index_info: cand.info.clone(),
                 source: r.package_url(&cand.info)?,
@@ -493,7 +513,11 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     }
     for (name, ip) in &db.installed {
         if !chosen.contains(name.as_str()) {
-            ops.push(Op::Remove { name: name.clone(), old: ip.meta.info.version.clone() });
+            ops.push(Op::Remove {
+                name: name.clone(),
+                old: ip.meta.info.version.clone(),
+                old_dir: ip.dir_name.clone(),
+            });
         }
     }
     let new_world = world_strings(&world);
@@ -508,15 +532,19 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let (mut ni, mut nu, mut nr) = (0, 0, 0);
     for op in &ops {
         match op {
-            Op::Install { name, new } => {
+            Op::Install { name, new, .. } => {
                 ni += 1;
                 println!("  install  {name} {new}");
             }
-            Op::Upgrade { name, old, new } => {
+            Op::Upgrade { name, old, new, .. } => {
                 nu += 1;
-                println!("  upgrade  {name} {old} -> {new}");
+                if old == new {
+                    println!("  upgrade  {name} {old} -> {new} (rebuilt)");
+                } else {
+                    println!("  upgrade  {name} {old} -> {new}");
+                }
             }
-            Op::Remove { name, old } => {
+            Op::Remove { name, old, .. } => {
                 nr += 1;
                 println!("  remove   {name} {old}");
             }
@@ -564,7 +592,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let staged_idx: HashMap<(&str, &str), usize> = staged
         .iter()
         .enumerate()
-        .map(|(i, sp)| ((sp.meta.name(), sp.meta.version()), i))
+        .map(|(i, sp)| ((sp.meta.name(), sp.effective_dir_name()), i))
         .collect();
 
     // file ownership of the final set (using SQLite index + in-memory staged records)
@@ -574,7 +602,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         if let Some(colliding) = db.find_colliding_installed_pkgs(&staged, &changed)? {
             for name in colliding {
                 if let Some(ip) = db.installed.get(&name) {
-                    match PkgState::load_from_db(db, &name, ip.meta.version(), false) {
+                    match PkgState::load_from_db(db, &name, &ip.dir_name, false) {
                         Ok(st) => finals.push(st),
                         Err(e) => eprintln!("vpm: warning: {}: {e}; skipped in conflict check", ip.meta.nv()),
                     }
@@ -583,7 +611,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         } else {
             for (name, ip) in &db.installed {
                 if !changed.contains(name.as_str()) {
-                    match PkgState::load_from_db(db, name, ip.meta.version(), false) {
+                    match PkgState::load_from_db(db, name, &ip.dir_name, false) {
                         Ok(st) => finals.push(st),
                         Err(e) => eprintln!("vpm: warning: {}: {e}; skipped in conflict check", ip.meta.nv()),
                     }
@@ -591,11 +619,11 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
             }
         }
         for op in &ops {
-            if let Some(v) = op.new_version() {
-                if let Some(&i) = staged_idx.get(&(op.name(), v)) {
+            if let Some(d) = op.new_dir() {
+                if let Some(&i) = staged_idx.get(&(op.name(), d)) {
                     finals.push(PkgState::from_staged(&root, &staged[i], true));
                 } else {
-                    finals.push(PkgState::load_from_db(db, op.name(), v, true)?);
+                    finals.push(PkgState::load_from_db(db, op.name(), d, true)?);
                 }
             }
         }
@@ -628,7 +656,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let staged_recs: usize = staged.iter().map(|sp| sp.recs.len()).sum();
     let staged_map: HashMap<(String, String), StagedPkg> = staged
         .into_iter()
-        .map(|sp| ((sp.meta.name().to_string(), sp.meta.version().to_string()), sp))
+        .map(|sp| ((sp.meta.name().to_string(), sp.effective_dir_name().to_string()), sp))
         .collect();
 
     // the switch
@@ -859,7 +887,7 @@ impl InfoOpts {
 fn print_pkg_info(
     db: &Db,
     info: &crate::adb::PkgInfo,
-    installed: bool,
+    installed_dir: Option<&str>,
     io: &InfoOpts,
 ) -> Result<()> {
     let nv = info.nv();
@@ -897,9 +925,9 @@ fn print_pkg_info(
         }
     }
     if io.all || io.contents {
-        if installed {
+        if let Some(dir_name) = installed_dir {
             println!("{nv} contains:");
-            for r in db.read_pkg_files(&info.name, &info.version)? {
+            for r in db.read_pkg_files(&info.name, dir_name)? {
                 println!("{}", r.path_lossy());
             }
         }
@@ -948,7 +976,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
         // Legacy read-only fallback for unmigrated `.vpm/` roots
         let mut pkgs: Vec<PkgState> = Vec::with_capacity(db.installed.len());
         for (name, ip) in &db.installed {
-            if let Ok(st) = PkgState::load_from_db(&db, name, ip.meta.version(), false) {
+            if let Ok(st) = PkgState::load_from_db(&db, name, &ip.dir_name, false) {
                 pkgs.push(st);
             }
         }
@@ -999,7 +1027,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             println!();
         }
         if let Some(ip) = db.installed.get(name) {
-            print_pkg_info(&db, &ip.meta.info, true, io)?;
+            print_pkg_info(&db, &ip.meta.info, Some(&ip.dir_name), io)?;
             continue;
         }
         // Fallback to repositories if not installed
@@ -1020,7 +1048,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             .filter(|p| p.name == *name)
             .max_by(|a, b| crate::version::cmp(&a.version, &b.version));
         if let Some(p) = best {
-            print_pkg_info(&db, p, false, io)?;
+            print_pkg_info(&db, p, None, io)?;
         } else {
             eprintln!("vpm: {name}: package not found");
             all_ok = false;
@@ -1059,7 +1087,7 @@ pub fn cache_clean(o: &Options) -> Result<bool> {
 }
 
 /// Verifies (and unless `o.simulate`, repairs) live-tree files of installed
-/// packages against their copies in `Programs/<name>/<version>/`.
+/// packages against their copies in `Programs/<name>/<dir_name>/`.
 /// If `names` is empty, checks all installed packages.
 pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
     let db = if o.simulate { open_readonly(o)? } else { open(o)? };
@@ -1074,7 +1102,7 @@ pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
     }
     for (name, ip) in &db.installed {
         let wanted = filter.is_empty() || filter.contains(name.as_str());
-        match PkgState::load_from_db(&db, name, ip.meta.version(), false) {
+        match PkgState::load_from_db(&db, name, &ip.dir_name, false) {
             Ok(st) => {
                 let idx = pkgs.len();
                 pkgs.push(st);
