@@ -499,15 +499,26 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         .map(|sp| ((sp.meta.name().to_string(), sp.meta.version().to_string()), sp.clone()))
         .collect();
 
-    // file ownership of the final set (using in-memory staged records)
+    // file ownership of the final set (using SQLite index + in-memory staged records)
     let changed: HashSet<&str> = ops.iter().map(|o| o.name()).collect();
     let mut finals: Vec<PkgState> = Vec::new();
     let mut check = || -> Result<()> {
-        for (name, ip) in &db.installed {
-            if !changed.contains(name.as_str()) {
-                match PkgState::load_from_db(db, name, ip.meta.version(), false) {
-                    Ok(st) => finals.push(st),
-                    Err(e) => eprintln!("vpm: warning: {}: {e}; skipped in conflict check", ip.meta.nv()),
+        if let Some(colliding) = db.find_colliding_installed_pkgs(&staged, &changed)? {
+            for name in colliding {
+                if let Some(ip) = db.installed.get(&name) {
+                    match PkgState::load_from_db(db, &name, ip.meta.version(), false) {
+                        Ok(st) => finals.push(st),
+                        Err(e) => eprintln!("vpm: warning: {}: {e}; skipped in conflict check", ip.meta.nv()),
+                    }
+                }
+            }
+        } else {
+            for (name, ip) in &db.installed {
+                if !changed.contains(name.as_str()) {
+                    match PkgState::load_from_db(db, name, ip.meta.version(), false) {
+                        Ok(st) => finals.push(st),
+                        Err(e) => eprintln!("vpm: warning: {}: {e}; skipped in conflict check", ip.meta.nv()),
+                    }
                 }
             }
         }
