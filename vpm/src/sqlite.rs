@@ -111,13 +111,17 @@ impl Connection {
             path,
             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOFOLLOW,
         )?;
-        // DELETE journal + FULL sync: leaves no -wal/-shm sidecar files so
-        // read-only mounts (live squashfs ISOs) can always open state.db
-        // cleanly, while keeping full crash durability inside transactions.
+        // DELETE journal leaves no -wal/-shm sidecar files so read-only mounts
+        // (live squashfs ISOs) can always open state.db cleanly.
+        // synchronous = NORMAL keeps full rollback-journal atomicity against
+        // power loss while skipping redundant per-commit dir fsyncs that vpm's
+        // own syncfs barriers already provide.
         c.exec_batch(
             "PRAGMA foreign_keys = ON;\
              PRAGMA journal_mode = DELETE;\
-             PRAGMA synchronous = FULL;",
+             PRAGMA synchronous = NORMAL;\
+             PRAGMA cache_size = -16384;\
+             PRAGMA temp_store = MEMORY;",
         )?;
         Ok(c)
     }

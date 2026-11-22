@@ -110,12 +110,14 @@ ROOT/var/lib/vpm/indexes/                  what each repository offered last
 ROOT/var/cache/vpm/                        downloaded packages and indexes
 ```
 
-`state.db` uses `PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL;` so
+`state.db` uses `PRAGMA journal_mode = DELETE; PRAGMA synchronous = NORMAL;` so
 read-only mounts (such as live squashfs ISOs) can open `state.db` cleanly with
-no `-wal`/`-shm` sidecars, while keeping full ACID durability inside
-transactions. Legacy roots with per-package `.vpm/{info,files,scripts}`
-directories are migrated automatically into `state.db` on the first writable
-open and remain readable by read-only commands beforehand.
+no `-wal`/`-shm` sidecars, while keeping full rollback-journal atomicity paired
+with vpm's `syncfs` barriers (two SQLite commits per transaction: one to stage
+unpacked metadata and one batched commit at the end of the switch). Legacy roots
+with per-package `.vpm/{info,files,scripts}` directories are migrated
+automatically into `state.db` on the first writable open and remain readable by
+read-only commands beforehand.
 
 The usual tree is made from those folders:
 - A regular file outside `etc/` and `boot/` is a **hard link** to its copy

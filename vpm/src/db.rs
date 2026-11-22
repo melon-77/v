@@ -1450,6 +1450,9 @@ impl Db {
         let Some(conn) = &self.conn else {
             return Ok(None);
         };
+        if self.installed.is_empty() || self.installed.keys().all(|k| exclude.contains(k.as_str())) {
+            return Ok(Some(std::collections::BTreeSet::new()));
+        }
         let mut st = conn.prepare(
             "SELECT DISTINCT p.name FROM pkg_files f \
              JOIN packages p ON p.id = f.pkg_id \
@@ -1492,6 +1495,55 @@ impl Db {
             }
         }
         self.installed.values().any(|ip| ip.meta.info.provides.iter().any(|p| p.name == name))
+    }
+
+    /// Commits all state transitions of a switch (`Install`, `Upgrade`, `Remove`),
+    /// updates `world`, and purges non-installed rows in a single atomic SQLite
+    /// transaction, then updates the plain-text `world` mirror.
+    ///
+    /// Idempotent so crash recovery can re-run it safely. Replaces per-package
+    /// SQLite commits during the switch (cutting ~40-250 commits down to 1).
+    pub fn commit_switch(&self, ops: &[Op], world: &[Dependency]) -> Result<()> {
+        let formatted = format_world(world);
+        let specs: Vec<&str> = formatted.lines().filter(|l| !l.is_empty()).collect();
+        if let Some(conn) = &self.conn {
+            conn.transaction(|c| {
+                let mut st_rem = c.prepare("UPDATE packages SET state = 'removing' WHERE name = ?1 AND version = ?2")?;
+                let mut st_ins = c.prepare("UPDATE packages SET state = 'installed' WHERE name = ?1 AND version = ?2")?;
+                for op in ops {
+                    match op {
+                        Op::Install { name, new } => {
+                            st_ins.bind_text(1, name)?;
+                            st_ins.bind_text(2, new)?;
+                            st_ins.execute()?;
+                        }
+                        Op::Upgrade { name, old, new } => {
+                            st_rem.bind_text(1, name)?;
+                            st_rem.bind_text(2, old)?;
+                            st_rem.execute()?;
+                            st_ins.bind_text(1, name)?;
+                            st_ins.bind_text(2, new)?;
+                            st_ins.execute()?;
+                        }
+                        Op::Remove { name, old } => {
+                            st_rem.bind_text(1, name)?;
+                            st_rem.bind_text(2, old)?;
+                            st_rem.execute()?;
+                        }
+                    }
+                }
+                c.exec_batch("DELETE FROM packages WHERE state != 'installed';")?;
+                c.exec_batch("DELETE FROM world;")?;
+                let mut st_w = c.prepare("INSERT OR IGNORE INTO world (spec) VALUES (?1)")?;
+                for s in &specs {
+                    st_w.bind_text(1, s)?;
+                    st_w.execute()?;
+                }
+                Ok(())
+            })?;
+        }
+        write_atomic(&Self::state(&self.root).join("world"), formatted.as_bytes())?;
+        Ok(())
     }
 
     /// Marks `(name, new_ver)` as `'installed'` and (if upgrading) `(name, old_ver)`
