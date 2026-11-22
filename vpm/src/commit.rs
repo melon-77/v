@@ -266,7 +266,15 @@ fn copy_file_atomic(
         if sync_file {
             o.sync_all()?;
         }
-        fs::rename(&tmp, dst)
+        fs::rename(&tmp, dst)?;
+        if sync_file {
+            if let Some(par) = dst.parent() {
+                if let Ok(d) = sys::open_dir_nofollow(par) {
+                    let _ = d.sync_all();
+                }
+            }
+        }
+        Ok(())
     })();
     if res.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -428,9 +436,19 @@ impl<'a> Switch<'a> {
             Ok(m) if m.is_dir() => {
                 return Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))))
             }
-            Ok(_) if is_etc(&r.path) => {
-                // Admin replaced an etc/ symlink with a regular file or other node: keep it.
-                write_new = true;
+            Ok(m) if is_etc(&r.path) => {
+                // If v1 shipped a regular file that the admin never edited and
+                // v2 replaces it with a symlink, replace it cleanly; otherwise
+                // keep the admin's file and write .vpm-new (N-3).
+                let pristine = m.is_file()
+                    && old.map_or(false, |o| {
+                        o.is_regular()
+                            && Alg::from_len(o.hash.len())
+                                .map_or(false, |a| hash_file(&dst.host, a).map_or(false, |h| h == o.hash))
+                    });
+                if !pristine {
+                    write_new = true;
+                }
             }
             // a new name: made directly when it needs no owner change (a
             // symlink appears atomically with its target; an lchown after it
@@ -943,9 +961,9 @@ pub fn switch(
     // 1. installed and upgraded packages, dependencies first
     for (i, p) in pkgs.iter().enumerate().skip(first_new) {
         let name = p.meta.name().to_string();
-        let (pre, post, args, old_ver) = match changed[name.as_str()] {
-            Op::Upgrade { old, new, .. } => ("pre-upgrade", "post-upgrade", vec![new.clone(), old.clone()], Some(old.as_str())),
-            _ => ("pre-install", "post-install", vec![p.meta.version().to_string()], None),
+        let (pre, post, args) = match changed[name.as_str()] {
+            Op::Upgrade { old, new, .. } => ("pre-upgrade", "post-upgrade", vec![new.clone(), old.clone()]),
+            _ => ("pre-install", "post-install", vec![p.meta.version().to_string()]),
         };
         let placed = format!("placed:{name}");
         let post_key = format!("{post}:{name}");
@@ -973,7 +991,6 @@ pub fn switch(
                 s.remove_old(o, &own, keep.as_ref().unwrap(), &mut modified);
             }
             db::set_current(root, &name, p.meta.version())?;
-            db.mark_installed(&name, p.meta.version(), old_ver)?;
             let runs_post = !opts.no_scripts && !s.j.is_done(&post_key) && db.has_pkg_script(&name, p.meta.version(), post);
             if runs_post {
                 s.sync()?;
@@ -1009,7 +1026,6 @@ pub fn switch(
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            db.mark_removed(name, old)?;
             if o.map_or(false, |_| db.has_pkg_script(name, old, "post-deinstall")) && !opts.no_scripts {
                 s.sync()?;
             }
@@ -1024,10 +1040,11 @@ pub fn switch(
     }
     s.crash("removed");
 
-    // 3. the world (SQLite + plain-text mirror)
+    // 3. commit all package state flips, world, and old-row purge in one
+    //    atomic SQLite transaction (+ plain-text world mirror)
     let world: Vec<crate::adb::Dependency> =
         plan.world.iter().filter_map(|w| crate::adb::Dependency::parse(w).ok()).collect();
-    db.save_world(&world)?;
+    db.commit_switch(&plan.ops, &world)?;
     s.crash("world");
 
     // 4. owners once more, now that all files (etc/passwd too) are in place
@@ -1102,11 +1119,10 @@ pub fn switch(
     }
     s.crash("triggers");
 
-    // 6. durable, then forget the journal, non-installed DB rows, and old version dirs
+    // 6. durable, then forget the journal and old version dirs
     s.sync()?;
     let Switch { j, rep, .. } = s;
     j.remove(root)?;
-    db.purge_non_installed()?;
     for op in &plan.ops {
         // only through real directories (Programs/<name> a symlink is
         // corruption, never followed)

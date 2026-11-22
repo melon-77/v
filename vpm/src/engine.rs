@@ -494,9 +494,10 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     }
     let t_unpack = t1.elapsed();
 
-    let staged_map: HashMap<(String, String), StagedPkg> = staged
+    let staged_idx: HashMap<(&str, &str), usize> = staged
         .iter()
-        .map(|sp| ((sp.meta.name().to_string(), sp.meta.version().to_string()), sp.clone()))
+        .enumerate()
+        .map(|(i, sp)| ((sp.meta.name(), sp.meta.version()), i))
         .collect();
 
     // file ownership of the final set (using SQLite index + in-memory staged records)
@@ -524,8 +525,8 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         }
         for op in &ops {
             if let Some(v) = op.new_version() {
-                if let Some(sp) = staged_map.get(&(op.name().to_string(), v.to_string())) {
-                    finals.push(PkgState::from_staged(&root, sp, true));
+                if let Some(&i) = staged_idx.get(&(op.name(), v)) {
+                    finals.push(PkgState::from_staged(&root, &staged[i], true));
                 } else {
                     finals.push(PkgState::load_from_db(db, op.name(), v, true)?);
                 }
@@ -545,6 +546,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         return Err(e);
     }
     drop(finals);
+    drop(staged_idx);
 
     // stage unpacked metadata durably into SQLite in one ACID transaction
     if let Err(e) = db.stage_packages(&staged) {
@@ -554,7 +556,10 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         }
         return Err(e);
     }
-    drop(staged);
+    let staged_map: HashMap<(String, String), StagedPkg> = staged
+        .into_iter()
+        .map(|sp| ((sp.meta.name().to_string(), sp.meta.version().to_string()), sp))
+        .collect();
 
     // the switch
     let t2 = Instant::now();
