@@ -164,11 +164,13 @@ queries (`vpm info -W`) resolve in O(log N) via `idx_pkg_files_path`.
      of the package's own symlinks, hard links to anything but an earlier
      file of the package, and any entry in vpm's own directories.
    - Meanwhile, a helper thread keeps flushing the file system.
-5. **Check and stage.** Refuse if two packages claim the same file (using the
-   in-memory records from unpack, with no double read). The ownership rules
-   follow apk: `replaces`, the same origin, or identical content. Then stage
-   all unpacked metadata, file manifests, and scripts into `state.db`
-   (`state = 'staged'`) in a single SQLite transaction.
+5. **Check and stage.** Probe `state.db` via `idx_pkg_files_path` for only
+   the paths introduced by new packages (loading unchanged packages only when
+   a path actually collides, and reusing the in-memory records from unpack
+   with no double read). Refuse if two packages claim the same file under
+   apk's ownership rules (`replaces`, same origin, or identical content).
+   Then stage all unpacked metadata, file manifests, and scripts into
+   `state.db` (`state = 'staged'`) in a single SQLite transaction.
 6. **Switch.** This is the only step that touches the live tree, and it
    comes last.
    1. `syncfs`, so everything unpacked is on disk. Then write the journal

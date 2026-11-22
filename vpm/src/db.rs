@@ -1439,6 +1439,41 @@ impl Db {
         Ok(Some(names))
     }
 
+    /// Indexed O(M log N) lookup returning the names of installed packages
+    /// (excluding `exclude`) that own any non-directory path present in
+    /// `staged`. Returns `Ok(None)` for legacy non-SQLite roots.
+    pub fn find_colliding_installed_pkgs(
+        &self,
+        staged: &[StagedPkg],
+        exclude: &std::collections::HashSet<&str>,
+    ) -> Result<Option<std::collections::BTreeSet<String>>> {
+        let Some(conn) = &self.conn else {
+            return Ok(None);
+        };
+        let mut st = conn.prepare(
+            "SELECT DISTINCT p.name FROM pkg_files f \
+             JOIN packages p ON p.id = f.pkg_id \
+             WHERE f.path = ?1 AND p.state = 'installed' AND f.kind != 'd'",
+        )?;
+        let mut out = std::collections::BTreeSet::new();
+        for sp in staged {
+            for r in &sp.recs {
+                if r.is_dir() {
+                    continue;
+                }
+                st.bind_blob(1, &r.path)?;
+                while st.step_row()? {
+                    let name = st.col_text(0);
+                    if !exclude.contains(name.as_str()) {
+                        out.insert(name);
+                    }
+                }
+                st.reset();
+            }
+        }
+        Ok(Some(out))
+    }
+
     /// Checks whether `name` is installed or provided by an installed package.
     pub fn is_installed_or_provided(&self, name: &str) -> bool {
         if self.installed.contains_key(name) {
@@ -1918,6 +1953,55 @@ mod tests {
         assert_eq!(db.find_path_owners(b"usr/bin/demo").unwrap(), Some(vec!["demo".into()]));
         assert_eq!(db.find_path_owners(b"usr/bin").unwrap(), Some(vec![]));
         assert_eq!(fs::read_to_string(Db::state(&root).join("world")).unwrap(), "demo\n");
+
+        // Indexed conflict lookup finds colliding unchanged package and ignores excluded/non-colliding ones
+        let mut other_meta = PkgMeta::default();
+        other_meta.info.name = "other".into();
+        other_meta.info.version = "1.0-r0".into();
+        let colliding_sp = StagedPkg {
+            meta: other_meta.clone(),
+            recs: vec![FileRec {
+                kind: RecKind::File(FileKind::Regular),
+                mode: 0o755,
+                user: None,
+                group: None,
+                size: 1,
+                mtime: 0,
+                hash: vec![9],
+                xattrs: vec![],
+                path: b"usr/bin/demo".to_vec(),
+            }],
+            scripts: vec![],
+        };
+        let clean_sp = StagedPkg {
+            meta: other_meta,
+            recs: vec![FileRec {
+                kind: RecKind::File(FileKind::Regular),
+                mode: 0o755,
+                user: None,
+                group: None,
+                size: 1,
+                mtime: 0,
+                hash: vec![9],
+                xattrs: vec![],
+                path: b"usr/bin/unique".to_vec(),
+            }],
+            scripts: vec![],
+        };
+        let empty_excl = std::collections::HashSet::new();
+        let demo_excl: std::collections::HashSet<&str> = ["demo"].into_iter().collect();
+        assert_eq!(
+            db.find_colliding_installed_pkgs(&[colliding_sp.clone()], &empty_excl).unwrap(),
+            Some(["demo".to_string()].into_iter().collect())
+        );
+        assert_eq!(
+            db.find_colliding_installed_pkgs(&[colliding_sp], &demo_excl).unwrap(),
+            Some(std::collections::BTreeSet::new())
+        );
+        assert_eq!(
+            db.find_colliding_installed_pkgs(&[clean_sp], &empty_excl).unwrap(),
+            Some(std::collections::BTreeSet::new())
+        );
 
         drop(db);
 
