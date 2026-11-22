@@ -219,13 +219,15 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   A new package manager for the installed system, in Rust, reading the same signed `.apk` packages and
   repositories that the builder makes today.
   *A folder per program*, as in GoboLinux: each package is unpacked into a directory of its own,
-  `/Programs/<name>/<version>`, and those directories are the record of what is installed. Removing a program
-  is removing its folder. The usual tree (`/usr/bin`, `/usr/lib`, ...) is made from the folders with hard links:
+  `/Programs/<name>/<version>`, with `Current` pointing at the active version; package metadata, file manifests,
+  scripts and the world live in a SQLite database at `/var/lib/vpm/state.db` (indexed by file path for fast
+  ownership and conflict lookups, using Valence's system `libsqlite3`). Removing a program is removing its folder
+  and its rows in `state.db`. The usual tree (`/usr/bin`, `/usr/lib`, ...) is made from the folders with hard links:
   each file is the same file under a second name, so every program sees ordinary files where it expects them,
   software that was not built for Valence included, and nothing needs patching. (GoboLinux uses symbolic links;
   programs that look for their files next to themselves, such as Qt and Python, then need fixes.) Hard links do
-  not cross file systems or Btrfs subvolumes, so `/Programs` and `/usr` share one. Files under `/etc` are copies,
-  because they are edited.
+  not cross file systems or Btrfs subvolumes, so `/Programs` and `/usr` share one. Files under `/etc` and `/boot`
+  are copies, because `/etc` is edited and `/boot` is a separate FAT32 partition.
   *Speed*: packages download and unpack in parallel, each into its own folder, where nothing can collide. An
   upgrade touches the running system in one short step at the end, when the usual tree is pointed at the new
   folders; the old folders stay until they are cleaned up, so going back is the same step in reverse.
