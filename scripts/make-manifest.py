@@ -50,11 +50,10 @@ GIT = {  # tarball name prefix -> repo, tag pattern
     'labwc': ('https://github.com/labwc/labwc', '{v}')}
 URL = {  # upstream downloads (Ubuntu 26.04 has Rust 1.93 and its make-dfsg drops make's doc/; host-rust.sh wants 1.98.1)
     'at-spi2-core-2.62.1.tar.xz': 'https://download.gnome.org/sources/at-spi2-core/2.62/at-spi2-core-2.62.1.tar.xz',
-    'libXt-1.3.1.tar.xz': 'https://www.x.org/releases/individual/lib/libXt-1.3.1.tar.xz',
-    'gtk+-3.24.43.tar.xz': 'https://download.gnome.org/sources/gtk+/3.24/gtk+-3.24.43.tar.xz',
+    'gtk-3.24.52.tar.xz': 'https://download.gnome.org/sources/gtk/3.24/gtk-3.24.52.tar.xz',
     'firefox-153.7.0esr.source.tar.xz': 'https://archive.mozilla.org/pub/firefox/releases/153.7.0esr/source/firefox-153.7.0esr.source.tar.xz',
     'openssh-10.6p2.tar.gz': 'https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz',
-    'libevent-2.1.12-stable.tar.gz': 'https://github.com/libevent/libevent/releases/download/release-2.1.12-stable/libevent-2.1.12-stable.tar.gz',
+    'libevent-2.1.13-stable.tar.gz': 'https://github.com/libevent/libevent/releases/download/release-2.1.13-stable/libevent-2.1.13-stable.tar.gz',
     'tmux-3.8.tar.gz': 'https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz',
     'htop-3.5.3.tar.xz': 'https://github.com/htop-dev/htop/releases/download/3.5.3/htop-3.5.3.tar.xz',
     'jq-1.8.2.tar.gz': 'https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-1.8.2.tar.gz',

@@ -82,8 +82,8 @@ Not converted yet, or not checked:
   (ROADMAP.md, "Not decided yet").
 - **Account tools in other recipes.** Both installers use shadow's `useradd`, `usermod` and `chpasswd` (Calamares
   through its users job; the BusyBox-backed `shadow-shim` it needed on Melon is gone). The install scripts of dbus,
-  polkit, cups, avahi and valence-desktop still call BusyBox's `adduser` and `addgroup` (BusyBox stays installed,
-  so they work).
+  polkit, cups, avahi, openssh and valence-desktop still call BusyBox's `adduser` and `addgroup` (BusyBox stays
+  installed, so they work).
 - **Extended attributes.** `valence-install` copies the system with `tar --xattrs --xattrs-include='*'` (valence-base
   44), so file capabilities would survive the copy. No package on either ISO has any (`getcap -r` on the desktop's
   system image finds none), so nothing tests that yet.

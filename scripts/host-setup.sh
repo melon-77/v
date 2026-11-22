@@ -31,7 +31,7 @@ ubuntu_deps(){
     libssl-dev zlib1g-dev libzstd-dev libelf-dev dwarves kmod scdoc \
     tcl hwdata publicsuffix rpcsvc-proto device-tree-compiler glslang-tools spirv-tools xsltproc \
     llvm-19-dev libclang-19-dev libclang-cpp19-dev libclc-19-dev libllvmspirvlib-19-dev \
-    clang-19 lld-19 nodejs cbindgen zip \
+    clang-19 lld-19 nodejs zip \
     libexpat1-dev libffi-dev libsqlite3-dev libncurses-dev libreadline-dev libbz2-dev liblzma-dev uuid-dev \
     libgl-dev libegl-dev libxkbcommon-dev libwayland-dev wayland-protocols libfontconfig-dev libfreetype-dev \
     libdbus-1-dev libglib2.0-dev libpng-dev libdrm-dev libx11-dev libxext-dev libxcb1-dev libxrender-dev \

@@ -811,11 +811,10 @@ labwc-0.20.2.tar.gz	-	git	https://github.com/labwc/labwc 0.20.2
 libXScrnSaver-1.2.3.tar.gz	4f74e7e412144591d8e0616db27f433cfc9f45aae6669c6c4bb03e6bf9be809a	url	https://www.x.org/releases/individual/lib/libXScrnSaver-1.2.3.tar.gz
 procps-ng-4.0.7.tar.xz	9d2021f47a4501c667862c9942a92d1953694b21d11bcd1702e83eb594e3d67d	url	https://downloads.sourceforge.net/project/procps-ng/Production/procps-ng-4.0.7.tar.xz
 at-spi2-core-2.62.1.tar.xz	cca6b6a86e4389d89b370288761ce2385ddeceb10c4412da78689bc30c88af2d	url	https://download.gnome.org/sources/at-spi2-core/2.62/at-spi2-core-2.62.1.tar.xz
-libXt-1.3.1.tar.xz	e0a774b33324f4d4c05b199ea45050f87206586d81655f8bef4dba434d931288	url	https://www.x.org/releases/individual/lib/libXt-1.3.1.tar.xz
-gtk+-3.24.43.tar.xz	7e04f0648515034b806b74ae5d774d87cffb1a2a96c468cb5be476d51bf2f3c7	url	https://download.gnome.org/sources/gtk+/3.24/gtk+-3.24.43.tar.xz
+gtk-3.24.52.tar.xz	80931fa472a77b9a164f6740e3c0b444fac6770054632d35a7ff9d679e5e7b9f	url	https://download.gnome.org/sources/gtk/3.24/gtk-3.24.52.tar.xz
 firefox-153.7.0esr.source.tar.xz	7f8715ee7de2cf36a156216a9b1c7f26d1653010e65793bb2fce66e12edb6ea0	url	https://archive.mozilla.org/pub/firefox/releases/153.7.0esr/source/firefox-153.7.0esr.source.tar.xz
 openssh-10.6p2.tar.gz	9ae44872090cf2f06b3cf9ff147e7f16f309671340763ed2f99248398ae29d5b	url	https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz
-libevent-2.1.12-stable.tar.gz	92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb	url	https://github.com/libevent/libevent/releases/download/release-2.1.12-stable/libevent-2.1.12-stable.tar.gz
+libevent-2.1.13-stable.tar.gz	f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c	url	https://github.com/libevent/libevent/releases/download/release-2.1.13-stable/libevent-2.1.13-stable.tar.gz
 tmux-3.8.tar.gz	e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e	url	https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz
 htop-3.5.3.tar.xz	a8b164386494cb85bb255a415a3f5f80afe7a0c4491da5d113b3a0f951087e65	url	https://github.com/htop-dev/htop/releases/download/3.5.3/htop-3.5.3.tar.xz
 jq-1.8.2.tar.gz	71b8d6e8f5fe81f6c6d0d110e3892251f6ce76ed095abd315e26e6e1193af3af	url	https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-1.8.2.tar.gz

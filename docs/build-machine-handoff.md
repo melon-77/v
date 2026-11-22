@@ -1,14 +1,12 @@
-# Build-machine handoff: first test pass (vpm, CDDA tiles, Firefox, ISOs)
+# Build-machine handoff: retest pass (vpm Phase 10, GTK 3 + Firefox, CLI essentials)
 
-This note is for the Gemini agent running on the **build machine** (Ubuntu 24.04 / WSL2 with KVM, signing key, and disk space). It explains what was just added on `testing` (`melon-77/v`) and `main` (`melon-77/vpkg`), how to build and test each piece in order, and what to watch out for.
+This note is for the build machine (Claude Code on the WSL2 host with KVM and the signing key). It lists what has been fixed on `testing` (`melon-77/v`) and `main` (`melon-77/vpkg`) in response to the reports in `docs/build-machine-reports.md`, and what to run next.
 
-Read `AGENTS.md` before changing recipes or build scripts.
+Cataclysm: DDA and the four SDL2 recipes were deleted per the owner's decision; Pass B is gone.
 
 ---
 
 ## 0. Sync the tree and submodule
-
-Package recipes now live in the `recipes/` git submodule (`https://github.com/melon-77/vpkg`, branch `main`).
 
 ```sh
 git checkout testing
@@ -16,130 +14,85 @@ git pull --ff-only
 git submodule update --init --recursive
 ```
 
-Verify `VALENCE_SIGN_KEY` (or `keys/valence-signing.rsa`) is in place before building.
-
 ---
 
-## 1. Refresh host setup & fetch new sources
+## 1. Fetch updated sources
 
-`scripts/host-setup.sh` was updated to add `clang-19 lld-19 nodejs cbindgen zip` for Firefox. Re-run it (idempotent) and fetch the new upstream tarballs (SDL2 stack, GTK 3 stack, Firefox 153.7.0esr):
+`libevent` moved to `2.1.13-stable` (S1) and `gtk3` moved to `3.24.52` (S2/G8); `libXt` was removed. `cbindgen` was dropped from `scripts/host-setup.sh` (F8: `firefox` uses `$M/hosttools/rust/bin/cbindgen`).
 
 ```sh
-sudo "$PWD/scripts/host-setup.sh"
 "$PWD/scripts/fetch-sources.sh"
 ```
 
-If this is a fresh checkout without a cross toolchain yet:
+---
 
+## 2. Pass A — Phase 10 (`vpm`): engine fixes, installers, ISOs, and QEMU suites
+
+Fixes applied from the first report:
+- **I-1 (high):** `vpm` now places `/boot` files as synced atomic copies (never hard-linked, so `mksquashfs` + Calamares `unsquashfs` on FAT32 `/boot` and kernel upgrades work), and falls back to synced atomic copy on any `EXDEV`, tolerating FAT32 `EPERM`/`EINVAL` on chown/chmod/utimens. `place_link`, `remove_old`, and `vpm fix` treat "same content hash, other device" as intact.
+- **I-2:** added `-X` / `--add-repository` (appends to `ROOT/etc/apk/repositories`, matching `apk -X`) and switched `valence-wish` under `vpm` to use it.
+- **I-3 & V-7:** unreachable repositories warn and are skipped (staying fatal on `Untrusted`/`Integrity` and when 0 repositories load). `vpm update` exits 1 when any repository failed or fell back to cache; `vpm search` reuses cached remote indexes up to 60s old.
+- **I-4:** `valence-first-boot` now auto-detects `vpm` vs `apk` (`valence-desktop` r21); user messages in `valence-wish` and `valence-snapshot` no longer hardcode `apk` (`valence-base` r49).
+- **I-5:** `scripts/qemu-test.py` auto-detects `vpm` (`[ -e /var/lib/vpm/world ]`) in `disk`, `rollback`, and `wish` modes.
+- **I-6:** `VALENCE_PKG=vpm scripts/mkiso.sh` now writes `out/valence-vpm-<date>-x86_64.iso` and `out/valence-vpm-desktop-<date>-x86_64.iso` and never deletes normal `apk` ISOs.
+- **V-1 to V-14:** preserved admin-modified symlinks under `/etc` (with `.vpm-new` on upgrade, kept on `fix`), verified `Programs/` hashes in `vpm fix`, added commit hooks around `vpm fix` when repairs are needed, fixed hook precedence/env/lock/post-commit behavior, added provides matching in `vpm search`, fixed `vpm info -W`, honoured `--simulate` in `update`/`cache clean`, made temp download names PID-unique, and updated `vpm/README.md`.
+
+**Commands to run:**
 ```sh
-"$PWD/scripts/toolchain.sh"
-```
+# 1. Rebuild updated packages (includes glib r2 with GSettings trigger G2)
+"$PWD/scripts/valence-build" glib vpm valence-base valence-desktop
 
----
+# 2. Rebuild host vpm and run its full test suite against repo/x86_64
+( cd vpm && VPM_REPO="$PWD/../repo/x86_64" VPM_KEYS="$PWD/../keys/trusted" cargo test --release )
 
-## 2. Test pass A — `vpm` (Phase 10, Stage 2 engine additions)
+# 3. Verify I-1 directly (re-run the FAT32 /boot add + fix reproduction if desired)
 
-Commit `bea0118` added commit hooks (`pre-commit`/`post-commit`, `--no-commit-hooks`), `Db::open_readonly`, `--simulate` (`-s`), `add -u`, `--arch`, `--print-arch`, `update`, `search`, `info`, and `cache clean`, and bumped `recipes/vpm` to `pkgrel=1`.
-
-1. **Rebuild the `vpm` package:**
-   ```sh
-   "$PWD/scripts/valence-build" vpm
-   ```
-2. **Run the full Rust test suite against the real signed repository:**
-   ```sh
-   cd vpm
-   VPM_REPO="$PWD/../repo/x86_64" VPM_KEYS="$PWD/../keys/trusted" cargo test --release
-   ```
-   All 38 unit tests, 4 CLI integration tests (`tests/engine_cmds.rs`), and 8 real-data tests (`tests/real_data.rs`) must pass.
-3. **Smoke-test the new CLI commands against `repo/x86_64`:**
-   ```sh
-   vpm/target/release/vpm --keys-dir keys/trusted --repository repo/x86_64/Packages.adb search -x cataclysm-dda
-   vpm/target/release/vpm --root /tmp/vpm-smoke --initdb --simulate --keys-dir keys/trusted --repository repo/x86_64/Packages.adb add valence-base
-   ```
-4. **Optional:** run the kill test (`vpm/tools/killtest/vpm-killtest.sh`) and benchmark (`vpm/tools/bench/vpm-bench.sh`) if you want fresh numbers after the commit-hook changes.
-
----
-
-## 3. Test pass B — Cataclysm: DDA graphical tiles + sound (`SDL2` stack)
-
-Commit `f9a17dd` in `vpkg` added `sdl2-compat`, `sdl2-image`, `sdl2-ttf`, `sdl2-mixer` and updated `cataclysm-dda` (`pkgrel=4`) to build both `cataclysm` (curses) and `cataclysm-dda-tiles` (graphical tiles + sound).
-
-```sh
-"$PWD/scripts/valence-build" cataclysm-dda
-```
-
-This builds `sdl3` (if not built yet) → `sdl2-compat` → `sdl2-image`, `sdl2-ttf`, `sdl2-mixer` → `cataclysm-dda` + `cataclysm-dda-tiles`.
-
-**Verify:**
-- Check `repo/x86_64/` contains `cataclysm-dda-0.9.1-r4.apk` and `cataclysm-dda-tiles-0.9.1-r4.apk` (and neither exceeds GitHub's 100 MB file limit).
-- Run `"$PWD/scripts/check-dev-deps.py"` to confirm `sdl2-compat-dev`, `sdl2-image-dev`, `sdl2-ttf-dev`, and `sdl2-mixer-dev` declare all CMake/link dependencies cleanly.
-- If `sdl2-compat` or `cataclysm-dda-tiles` hits a CMake/Makefile quirk during cross-compile, fix it in `recipes/<pkg>/VALENCEBUILD` (bump `pkgrel` if already built).
-
----
-
-## 4. Test pass C — Firefox 153.7.0esr (`GTK 3` stack)
-
-Added `at-spi2-core` (2.62.1), `libxt` (1.3.1), `gtk3` (3.24.43), and `firefox` (153.7.0esr). This is the **first real cross-compile attempt** of Firefox on Valence — expect at least one iteration!
-
-1. **Build the GTK 3 stack first** so any meson/cross issues are isolated from Firefox:
-   ```sh
-   "$PWD/scripts/valence-build" at-spi2-core libxt gtk3
-   ```
-   - Watch for `gtk3` running host/target helpers (`gtk-update-icon-cache`, `glib-compile-resources`) during cross-build; `meson_setup` routes target binaries through `scripts/valence-run`, and `glib-compile-resources` comes from the host `libglib2.0-dev`.
-2. **Build Firefox:**
-   ```sh
-   "$PWD/scripts/valence-build" firefox
-   ```
-   **Common things to watch for & fix in `recipes/firefox/VALENCEBUILD`:**
-   - **Host tool versions:** Firefox 153.7.0esr may ask for a newer `cbindgen` or `nodejs` than Ubuntu 24.04's apt packages. If configure complains about `cbindgen` version, install a newer one into `$M/hosttools/bin` via `cargo install cbindgen` (using `$M/hosttools/rust/bin/cargo`); if `nodejs` is too old, note the required version and update `host-setup.sh`.
-   - **Clang + GCC 15 headers/libgcc:** the recipe passes `--target=$TARGET --sysroot=$SYSROOT --gcc-toolchain=$TOOLS` to `clang-19`. If clang cannot find Valence's `x86_64-valence-linux-gnu` GCC 15 C++ headers, pass `-isystem $TOOLS/$TARGET/include/c++/15.2.0` (and its target subdir) or check `clang-19 -v` search paths.
-   - **Rust target triple:** `host-rust.sh` ships `x86_64-unknown-linux-gnu`, while `$TARGET` is `x86_64-valence-linux-gnu`. If `./mach` passes `--target x86_64-valence-linux-gnu` to `rustc`, either set `ac_add_options --target=x86_64-unknown-linux-gnu` (matching `recipes/rust`) or set `CARGO_BUILD_TARGET=$RUST_TARGET`.
-   - **Python virtualenv in `./mach`:** `MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE=system` is set; if `./mach` wants a missing Python package, install it in `host-setup.sh` or unset that env var if network is allowed during `prepare()`.
-   - **Package size:** verify `firefox-153.7.0-r0.apk` stays under 100 MB (GitHub's limit).
-   - **Missing library check:** verify no `LEAK:` lines and no missing `so:` deps (`scripts/check-dev-deps.py`).
-
----
-
-## 5. Test pass D — CLI & sysadmin essentials
-
-Added `openssh` (with `/etc/sv/sshd` runit service + `sshd` user), `libevent`, `tmux`, `htop`, `jq`, `vim`, `tree`, `strace`, `wireguard-tools`, and `fd`:
-
-```sh
-"$PWD/scripts/valence-build" openssh tmux htop jq vim tree strace wireguard-tools fd
-```
-
-Verify each builds cleanly and `scripts/check-dev-deps.py` passes on `libevent-dev` and `jq-dev`.
-
----
-
-## 6. Full repository build, ISOs, and QEMU test suites
-
-Once the new packages build cleanly (or if you want to validate the whole distro end-to-end):
-
-```sh
-# 1. Build everything that changed (or everything from empty)
-"$PWD/scripts/valence-build"
-"$PWD/scripts/check-dev-deps.py"
-
-# 2. Build both ISOs
+# 4. Build and QEMU-test BOTH normal (apk) ISOs (needed since glib r2 is in the base)
 "$PWD/scripts/mkiso.sh"
 VALENCE_EDITION=desktop "$PWD/scripts/mkiso.sh"
+ALL=1 "$PWD/scripts/test-console.sh" out/valence-2*-x86_64.iso
+"$PWD/scripts/qemu-test.py" wish out/valence-2*-x86_64.iso
+"$PWD/scripts/test-desktop.sh" out/valence-desktop-2*-x86_64.iso
 
-# 3. Run the automated QEMU tests (8 console + 3 desktop)
-"$PWD/scripts/test-console.sh" out/valence-*-x86_64.iso
-"$PWD/scripts/test-desktop.sh" out/valence-desktop-*-x86_64.iso
-
-# 4. Phase 10 (vpm): build and QEMU-test a vpm-managed console ISO
-( cd vpm && cargo build --release )
+# 5. Build and QEMU-test BOTH vpm ISOs (console + desktop)
 VALENCE_PKG=vpm "$PWD/scripts/mkiso.sh"
-"$PWD/scripts/test-console.sh" out/valence-*-x86_64.iso
+VALENCE_PKG=vpm VALENCE_EDITION=desktop "$PWD/scripts/mkiso.sh"
+ALL=1 "$PWD/scripts/test-console.sh" out/valence-vpm-2*-x86_64.iso
+"$PWD/scripts/qemu-test.py" wish out/valence-vpm-2*-x86_64.iso
+"$PWD/scripts/test-desktop.sh" out/valence-vpm-desktop-2*-x86_64.iso
 ```
 
 ---
 
-## 6. Committing fixes
+## 3. Pass C — GTK 3 (`3.24.52`) + Firefox (`153.7.0esr`, official branding, Wayland-only)
 
-- Recipe fixes go into `recipes/` (`melon-77/vpkg`, branch `main`), pushed first, then bump the `recipes` submodule pointer in `melon-77/v` (`testing`).
-- Script/engine/doc fixes go into `melon-77/v` (`testing`).
-- Never push directly to `main` of `melon-77/v`.
-- Include the trailer: `Co-Authored-By: Gemini 4 Neon <noreply@google.com>`.
+Fixes applied:
+- **G2:** `glib` r2 trigger on `/usr/share/glib-2.0/schemas` running `glib-compile-schemas`.
+- **S2/G8, G3, G5:** `gtk3` updated to `3.24.52`, `-Dbuiltin_immodules=backend -Dwrap_mode=nofallback -Dxinerama=no`, `harfbuzz-dev` added.
+- **G4:** `at-spi2-core` r2 removes host-compiled `usr/lib/python*`.
+- **F1–F6, F8, F9, F11:** `--target=$RUST_TARGET`, host-build stripping in `ff-cc/{cc,cxx}`, `unset AS`, `firefox-data` subpackage split (for GitHub's 100 MB limit), `--enable-official-branding` + `MOZ_APP_REMOTINGNAME=firefox` + `StartupWMClass=firefox` + icons 16..256, `depends=(firefox-data ffmpeg-libs mesa pipewire libpulse)`, `CBINDGEN=$M/hosttools/rust/bin/cbindgen`, cleaned `makedepends`, `arch=(x86_64)`.
+- **libxt:** deleted (unused after Wayland-only decision).
+
+```sh
+"$PWD/scripts/valence-build" glib at-spi2-core gtk3 firefox
+"$PWD/scripts/check-dev-deps.py"
+```
+
+Verify `firefox` and `firefox-data` `.apk` sizes are each under 100 MB, and check with `readelf -V` that no build-host tool linked against Valence's glibc 2.44.
+
+---
+
+## 4. Pass D — CLI & sysadmin essentials
+
+Fixes applied:
+- **C1, C14:** `vim` r1 (`srcdir=.` before `./configure`, disabled auto-detected optional features).
+- **C2, C4, C13:** `wireguard-tools` r1 (no `CFLAGS=` override on make CLI, `RUNSTATEDIR=/run`, `options=(keepdirs)` + `/etc/wireguard` 0700, split-tunnel note in `pkgdesc`).
+- **C3, C7, C17:** `openssh` r1 (added `/etc/sv/sshd/log/run` with `svlogd`, `license=SSH-OpenSSH`, removed empty `/usr/share`).
+- **S1, C12:** `libevent` updated to `2.1.13-stable`, moved `event_rpcgen.py` to `libevent-dev` with `python3`.
+- **C5, C8:** `htop` r1 (`GPL-2.0-or-later`, enabled sensors/capabilities/delayacct with `lm-sensors-dev libcap-dev libnl3-dev` and runtime `depends=(libsensors libnl3)`).
+- **C9, C10, C11, C15:** `jq` r1 (`MIT AND BSD-2-Clause`, `onig-config` in `jq-dev`), `strace` r1 (`elfutils-dev` + `--with-libdw`), `tmux` r1 (`--with-TERM=tmux-256color`), `fd` r1 (`--no-default-features --features completions` + bash completion).
+
+```sh
+"$PWD/scripts/valence-build" openssh libevent tmux htop jq vim tree strace wireguard-tools fd
+"$PWD/scripts/check-dev-deps.py"
+```

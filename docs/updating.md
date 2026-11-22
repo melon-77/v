@@ -41,7 +41,7 @@ Instead of installing things one by one, you can write what you want into a file
 
 ```
 # my-wishes.txt
-packages = nano, htop, firefox, steam
+packages = nano, htop, openssh, firefox, steam
 services = sshd
 hostname = workbench
 user.jcole.groups = dialout, kvm
