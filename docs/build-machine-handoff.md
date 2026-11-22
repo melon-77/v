@@ -2,8 +2,6 @@
 
 This note is for the build machine (Claude Code on the WSL2 host with KVM and the signing key). It lists what has been fixed on `testing`, `vpm-sqlite-db` (PR #1), and `vpm-hardening` (`melon-77/v`) in response to `docs/build-machine-reports.md`, and what to run next.
 
-Cataclysm: DDA and the four SDL2 recipes were deleted per the owner's decision; Pass B is gone.
-
 ---
 
 ## 0. Priority pass — `vpm` speed benchmark (`fc3ba9f` vs `vpm-sqlite-db` vs `vpm-hardening` vs `apk` vs `xbps`)
@@ -117,5 +115,19 @@ Fixes applied:
 
 ```sh
 "$PWD/scripts/valence-build" openssh libevent tmux htop jq vim tree strace wireguard-tools fd
+"$PWD/scripts/check-dev-deps.py"
+```
+
+---
+
+## 5. Pass B — Cataclysm: DDA (`0.9.1-r4`, terminal + graphical tiles/sound) and SDL2 stack
+
+Re-ported with subpackage variable bugs fixed (`pkgdesc_cataclysm_dda_tiles`, `depends_cataclysm_dda_tiles`, and `provides_sdl2_compat_dev` so `cataclysm-dda-tiles` depends on `cataclysm-dda=$pkgver-r$pkgrel` and `sdl2-compat-dev` provides `sdl2-dev`):
+- `sdl2-compat` 2.32.74 (runs SDL2 over Valence's `sdl3`), `sdl2-image` 2.8.12, `sdl2-ttf` 2.24.0, `sdl2-mixer` 2.8.2
+- `cataclysm-dda` 0.9.1-r4 (`cataclysm` terminal + `cataclysm-dda-tiles` graphical tiles & sound)
+
+```sh
+"$PWD/scripts/fetch-sources.sh"
+"$PWD/scripts/valence-build" sdl2-compat sdl2-image sdl2-ttf sdl2-mixer cataclysm-dda
 "$PWD/scripts/check-dev-deps.py"
 ```
