@@ -32,7 +32,7 @@ The dependencies are pinned in `Cargo.lock`:
 - zstd;
 - openssl, for SHA-1/256/512 and RSA. It links the system's libcrypto and libssl.
 - ureq with native-tls, for http and https;
-- libc.
+- libc (also used to link the system's `libsqlite3` directly via `build.rs` with no extra crate).
 
 There is no async runtime. Parallel work uses std threads.
 
@@ -96,19 +96,26 @@ errors. In the second case the last line starts with `ERRORS:` instead of
 ## Layout of a root
 
 ```
-ROOT/Programs/<name>/<version>/...         the package's files at their paths
-ROOT/Programs/<name>/<version>/.vpm/info   name, version, arch, origin, depends,
-                                           provides, install-if, identity, ...
-ROOT/Programs/<name>/<version>/.vpm/files  one line per entry: kind, mode,
-                                           owner, size, mtime, hash, target, path
-ROOT/Programs/<name>/<version>/.vpm/scripts/<type>
+ROOT/Programs/<name>/<version>/...         the package's unpacked files only
 ROOT/Programs/<name>/Current -> <version>  the version in use
-ROOT/var/lib/vpm/world                     what was asked for
+ROOT/var/lib/vpm/state.db                  SQLite primary metadata database
+                                           (packages, deps/provides, tags,
+                                           triggers, scripts, indexed files,
+                                           and world)
+ROOT/var/lib/vpm/world                     plain-text mirror of world (kept
+                                           in sync for installers & scripts)
 ROOT/var/lib/vpm/journal                   the switch in progress
 ROOT/var/lib/vpm/lock                      held while vpm (or a script it runs) runs
 ROOT/var/lib/vpm/indexes/                  what each repository offered last
 ROOT/var/cache/vpm/                        downloaded packages and indexes
 ```
+
+`state.db` uses `PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL;` so
+read-only mounts (such as live squashfs ISOs) can open `state.db` cleanly with
+no `-wal`/`-shm` sidecars, while keeping full ACID durability inside
+transactions. Legacy roots with per-package `.vpm/{info,files,scripts}`
+directories are migrated automatically into `state.db` on the first writable
+open and remain readable by read-only commands beforehand.
 
 The usual tree is made from those folders:
 - A regular file outside `etc/` and `boot/` is a **hard link** to its copy
@@ -126,13 +133,16 @@ The usual tree is made from those folders:
   that the admin did not change is replaced; a changed one is kept, and the
   new one is written as `<file>.vpm-new`.
 
-A package is installed if and only if `Programs/<name>/Current` exists.
+Installed package metadata lives in `state.db` (`packages.state = 'installed'`),
+paired with `Programs/<name>/Current -> <version>` on disk. File ownership
+queries (`vpm info -W`) resolve in O(log N) via `idx_pkg_files_path`.
 
 ## The transaction
 
-1. **Open.** Take the lock. Finish a leftover journal (see Recovery).
-   Delete `.partial` directories, version directories that are not current,
-   and interrupted downloads.
+1. **Open.** Take the lock. Migrate a legacy `.vpm/` root into `state.db` if
+   needed. Finish a leftover journal (see Recovery). Delete `.partial`
+   directories, stale non-installed DB rows, version directories that are not
+   current, and interrupted downloads.
 2. **Resolve.** Work out, from the indexes and what is installed, the
    packages the world needs (see Resolution). If nothing changes, stop
    without running commit hooks.
@@ -148,13 +158,17 @@ A package is installed if and only if `Programs/<name>/Current` exists.
    - **Unpack:** each package is streamed into
      `Programs/<name>/<version>.partial/`, and every file is checked
      against its hash as it is written. When complete, the directory is
-     renamed to `<version>`.
+     renamed to `<version>`, and the worker returns its extracted metadata
+     and file records in memory.
    - Unsafe content is refused: absolute paths, `..`, anything below one
      of the package's own symlinks, hard links to anything but an earlier
      file of the package, and any entry in vpm's own directories.
    - Meanwhile, a helper thread keeps flushing the file system.
-5. **Check.** Refuse if two packages claim the same file. The ownership
-   rules follow apk: `replaces`, the same origin, or identical content.
+5. **Check and stage.** Refuse if two packages claim the same file (using the
+   in-memory records from unpack, with no double read). The ownership rules
+   follow apk: `replaces`, the same origin, or identical content. Then stage
+   all unpacked metadata, file manifests, and scripts into `state.db`
+   (`state = 'staged'`) in a single SQLite transaction.
 6. **Switch.** This is the only step that touches the live tree, and it
    comes last.
    1. `syncfs`, so everything unpacked is on disk. Then write the journal
@@ -316,7 +330,7 @@ Database and commands:
 - vpm manages its own roots only: no import of an apk-managed system, no
   `apk` database, no `/` without `--initdb` history.
 - `vpm fix` checks hashes of regular files in `Programs/` and repairs the
-  live tree; corrupt `Programs/` files or `.vpm/files` are reported as
+  live tree; corrupt `Programs/` files or `state.db` metadata are reported as
   errors and need a reinstall.
 - No dot-files (`.list`, `.trigger`...).
 - No `--latest` or pinning to a tagged repository (`name@tag` is refused).
@@ -414,7 +428,6 @@ The next speedups are measured but not done:
 - zstd-compressed packages: the repository is deflate today. This helps
   apk even more, which is single-threaded and decompression-bound.
 - Placing packages without scripts on several threads.
-- Keeping the file records in memory instead of reading `.vpm/files` twice.
 
 ## Tests
 

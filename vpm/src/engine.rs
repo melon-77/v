@@ -11,7 +11,7 @@
 //! 4. check that no two packages claim the same file;
 //! 5. `syncfs`, write the journal, run the switch ([`crate::commit`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use crate::adb::Dependency;
 use crate::commit::{self, PkgState, SwitchOptions};
-use crate::db::{self, Db, Journal, JournalFile, Op};
+use crate::db::{self, Db, Journal, JournalFile, Op, StagedPkg};
 use crate::error::{Error, Result};
 use crate::fetch::{self, Http};
 use crate::progress::{human, Phase, Progress};
@@ -86,7 +86,7 @@ pub fn open(o: &Options) -> Result<Db> {
     let mut db = Db::open(&root, o.initdb)?;
     if let Some(j) = JournalFile::open(&root)? {
         println!("vpm: finishing an interrupted switch ({} package changes)", j.plan.ops.len());
-        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts())?;
+        let rep = commit::switch(&db, j, &o.switch_opts(), None)?;
         println!(
             "vpm: switch finished: {} files placed, {} already in place, {} removed",
             rep.placed, rep.unchanged, rep.removed
@@ -103,12 +103,12 @@ pub fn open_readonly(o: &Options) -> Result<Db> {
     Db::open_readonly(&root, o.initdb)
 }
 
-/// Deletes `.partial` directories and version directories that are not
-/// current (left by an interrupted run before its journal was written, or
-/// after it was deleted), and interrupted downloads in the cache. Entries
-/// of `Programs` that are not real directories, or whose `Current` is not
-/// valid, are left alone (and reported by [`Db::reload`]).
+/// Deletes `.partial` directories, stale non-installed DB rows, version
+/// directories that are not current (left by an interrupted run before its
+/// journal was written, or after it was deleted), and interrupted downloads
+/// in the cache.
 fn gc(root: &Path, db: &Db) -> Result<()> {
+    db.purge_non_installed()?;
     let programs = Db::programs(root);
     for e in fs::read_dir(&programs)? {
         let e = e?;
@@ -233,7 +233,7 @@ struct JobSpec {
     work: u64,
 }
 
-/// Fetches and unpacks all jobs on worker threads.
+/// Fetches and unpacks all jobs on worker threads, returning `(warnings, staged)`.
 fn run_jobs(
     o: &Options,
     root: &Path,
@@ -241,7 +241,7 @@ fn run_jobs(
     keys: &TrustedKeys,
     http: Option<&Http>,
     ids: &IdMap,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Vec<StagedPkg>)> {
     let n = jobs.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(jobs[i].work));
@@ -258,6 +258,7 @@ fn run_jobs(
     let failed = AtomicBool::new(false);
     let errors: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let warnings: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let staged: Mutex<Vec<StagedPkg>> = Mutex::new(Vec::with_capacity(n));
     let workers_done = AtomicUsize::new(0);
     let worker = || loop {
         if failed.load(Ordering::Relaxed) {
@@ -297,8 +298,9 @@ fn run_jobs(
         }
         progress.set_phase(i, Phase::Unpacking, None);
         match unpack::unpack(root, &js.job, keys, ids, o.allow_untrusted, &mut |b| progress.advance(i, b)) {
-            Ok(st) => {
+            Ok((st, sp)) => {
                 warnings.lock().unwrap().extend(st.warnings.iter().map(|w| format!("{nv}: {w}")));
+                staged.lock().unwrap().push(sp);
                 progress.finish_item(i, true, format!("{} entries, {}", st.entries, human(st.bytes)));
             }
             Err(e) => fail(e),
@@ -329,11 +331,12 @@ fn run_jobs(
     if !errors.is_empty() {
         return Err(Error::Msg(errors.join("\n")));
     }
-    Ok(warnings.into_inner().unwrap())
+    Ok((warnings.into_inner().unwrap(), staged.into_inner().unwrap()))
 }
 
-/// Removes the version directories a failed transaction unpacked.
+/// Removes the version directories and any staged DB rows a failed transaction unpacked.
 fn cleanup_new(root: &Path, db: &Db, ops: &[Op]) {
+    let _ = db.delete_staged(ops);
     for op in ops {
         if let Some(v) = op.new_version() {
             if db.installed.get(op.name()).map(|i| i.meta.info.version.as_str()) == Some(v) {
@@ -435,7 +438,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let new_world = world_strings(&world);
     if ops.is_empty() {
         if !o.simulate && new_world != world_strings(&db.world) {
-            db::write_atomic(&Db::state(&root).join("world"), db::format_world(&world).as_bytes())?;
+            db.save_world(&world)?;
         }
         println!("OK: nothing to do; {} packages installed", db.installed.len());
         return Ok(true);
@@ -476,8 +479,8 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     // fetch and unpack
     let t1 = Instant::now();
     let ids = IdMap::load(&root);
-    let warnings = match run_jobs(o, &root, &jobs, &keys, http.as_ref(), &ids) {
-        Ok(w) => w,
+    let (warnings, staged) = match run_jobs(o, &root, &jobs, &keys, http.as_ref(), &ids) {
+        Ok(res) => res,
         Err(e) => {
             cleanup_new(&root, db, &ops);
             if run_hooks {
@@ -491,13 +494,18 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     }
     let t_unpack = t1.elapsed();
 
-    // file ownership of the final set
+    let staged_map: HashMap<(String, String), StagedPkg> = staged
+        .iter()
+        .map(|sp| ((sp.meta.name().to_string(), sp.meta.version().to_string()), sp.clone()))
+        .collect();
+
+    // file ownership of the final set (using in-memory staged records)
     let changed: HashSet<&str> = ops.iter().map(|o| o.name()).collect();
     let mut finals: Vec<PkgState> = Vec::new();
     let mut check = || -> Result<()> {
         for (name, ip) in &db.installed {
             if !changed.contains(name.as_str()) {
-                match PkgState::load(&ip.dir, false) {
+                match PkgState::load_from_db(db, name, ip.meta.version(), false) {
                     Ok(st) => finals.push(st),
                     Err(e) => eprintln!("vpm: warning: {}: {e}; skipped in conflict check", ip.meta.nv()),
                 }
@@ -505,7 +513,11 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         }
         for op in &ops {
             if let Some(v) = op.new_version() {
-                finals.push(PkgState::load(&Db::pkg_dir(&root, op.name(), v), true)?);
+                if let Some(sp) = staged_map.get(&(op.name().to_string(), v.to_string())) {
+                    finals.push(PkgState::from_staged(&root, sp, true));
+                } else {
+                    finals.push(PkgState::load_from_db(db, op.name(), v, true)?);
+                }
             }
         }
         let (_, conflicts) = commit::ownership(&finals);
@@ -523,6 +535,16 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     }
     drop(finals);
 
+    // stage unpacked metadata durably into SQLite in one ACID transaction
+    if let Err(e) = db.stage_packages(&staged) {
+        cleanup_new(&root, db, &ops);
+        if run_hooks {
+            let _ = commit::run_commit_hooks(&root, "post-commit");
+        }
+        return Err(e);
+    }
+    drop(staged);
+
     // the switch
     let t2 = Instant::now();
     sys::sync_fs(&fs::File::open(&root)?)?;
@@ -531,7 +553,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         eprintln!("vpm: VPM_CRASH_AT=journal: killed (test hook)");
         sys::kill_self();
     }
-    let switch_res = commit::switch(&root, &db.installed, jf, &o.switch_opts());
+    let switch_res = commit::switch(db, jf, &o.switch_opts(), Some(&staged_map));
     if run_hooks {
         let _ = commit::run_commit_hooks(&root, "post-commit");
     }
@@ -740,8 +762,9 @@ impl InfoOpts {
 }
 
 fn print_pkg_info(
+    db: &Db,
     info: &crate::adb::PkgInfo,
-    dir: Option<&Path>,
+    installed: bool,
     io: &InfoOpts,
 ) -> Result<()> {
     let nv = info.nv();
@@ -779,9 +802,9 @@ fn print_pkg_info(
         }
     }
     if io.all || io.contents {
-        if let Some(d) = dir {
+        if installed {
             println!("{nv} contains:");
-            for r in db::read_files(d)? {
+            for r in db.read_pkg_files(&info.name, &info.version)? {
                 println!("{}", r.path_lossy());
             }
         }
@@ -797,15 +820,44 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
         if args.is_empty() {
             return Err(Error::Msg("info -W needs at least one PATH".into()));
         }
+        let rfs = crate::rootfs::RootFs::new(&db.root);
+        let mut all_found = true;
+
+        if db.is_sqlite() {
+            // O(log N) SQLite index lookup via idx_pkg_files_path
+            for arg in args {
+                let abs = if db.root == Path::new("/") && !arg.starts_with('/') {
+                    std::env::current_dir().map(|d| d.join(arg)).unwrap_or_else(|_| PathBuf::from(arg))
+                } else {
+                    PathBuf::from(arg)
+                };
+                let rel_s = abs.to_string_lossy();
+                let rel = rel_s.trim_start_matches('/');
+                let mut names = db.find_path_owners(rel.as_bytes())?.unwrap_or_default();
+                if names.is_empty() {
+                    if let Ok(res) = rfs.resolve(rel.as_bytes(), true) {
+                        names = db.find_path_owners(&res.canon)?.unwrap_or_default();
+                    }
+                }
+                let metas: Vec<&db::PkgMeta> = names.iter().filter_map(|n| db.installed.get(n).map(|ip| &ip.meta)).collect();
+                if let Some(winner) = commit::pick_owner(&metas) {
+                    println!("{arg} is owned by {}", winner.nv());
+                } else {
+                    eprintln!("vpm: {arg}: not owned by any installed package");
+                    all_found = false;
+                }
+            }
+            return Ok(all_found);
+        }
+
+        // Legacy read-only fallback for unmigrated `.vpm/` roots
         let mut pkgs: Vec<PkgState> = Vec::with_capacity(db.installed.len());
-        for ip in db.installed.values() {
-            if let Ok(st) = PkgState::load(&ip.dir, false) {
+        for (name, ip) in &db.installed {
+            if let Ok(st) = PkgState::load_from_db(&db, name, ip.meta.version(), false) {
                 pkgs.push(st);
             }
         }
         let (own, _) = commit::ownership(&pkgs);
-        let rfs = crate::rootfs::RootFs::new(&db.root);
-        let mut all_found = true;
         for arg in args {
             let abs = if db.root == Path::new("/") && !arg.starts_with('/') {
                 std::env::current_dir().map(|d| d.join(arg)).unwrap_or_else(|_| PathBuf::from(arg))
@@ -815,7 +867,6 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             let rel_s = abs.to_string_lossy();
             let rel = rel_s.trim_start_matches('/');
             let found = own.owner.get(rel.as_bytes()).copied().or_else(|| {
-                // Retry once following the final component if it is a symlink inside ROOT.
                 let res = rfs.resolve(rel.as_bytes(), true).ok()?;
                 own.owner.get(&res.canon).copied()
             });
@@ -837,9 +888,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
     if io.installed {
         let mut all_ok = true;
         for name in args {
-            let found = db.installed.contains_key(name)
-                || db.installed.values().any(|ip| ip.meta.info.provides.iter().any(|p| p.name == *name));
-            if found {
+            if db.is_installed_or_provided(name) {
                 println!("{name}");
             } else {
                 all_ok = false;
@@ -855,7 +904,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             println!();
         }
         if let Some(ip) = db.installed.get(name) {
-            print_pkg_info(&ip.meta.info, Some(&ip.dir), io)?;
+            print_pkg_info(&db, &ip.meta.info, true, io)?;
             continue;
         }
         // Fallback to repositories if not installed
@@ -876,7 +925,7 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             .filter(|p| p.name == *name)
             .max_by(|a, b| crate::version::cmp(&a.version, &b.version));
         if let Some(p) = best {
-            print_pkg_info(p, None, io)?;
+            print_pkg_info(&db, p, false, io)?;
         } else {
             eprintln!("vpm: {name}: package not found");
             all_ok = false;
@@ -930,7 +979,7 @@ pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
     }
     for (name, ip) in &db.installed {
         let wanted = filter.is_empty() || filter.contains(name.as_str());
-        match PkgState::load(&ip.dir, false) {
+        match PkgState::load_from_db(&db, name, ip.meta.version(), false) {
             Ok(st) => {
                 let idx = pkgs.len();
                 pkgs.push(st);

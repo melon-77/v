@@ -20,7 +20,9 @@
 //! - [`solver`]: dependency resolution.
 //! - [`fetch`]: downloads into the cache, identity checks.
 //! - [`unpack`]: packages into `ROOT/Programs/<name>/<version>`.
-//! - [`db`]: the database in the root (metadata, world, journal).
+//! - [`db`]: the SQLite metadata database (`var/lib/vpm/state.db`), world,
+//!   journal, and `Programs/` layout helpers.
+//! - [`sqlite`]: direct FFI wrapper over system `libsqlite3`.
 //! - [`commit`]: the switch of the live tree, scripts, triggers, recovery.
 //! - [`engine`]: the `add`/`del`/`upgrade`/`list` transactions.
 //! - [`progress`], [`rootfs`], [`sys`]: display, in-root path resolution,
@@ -38,6 +40,7 @@ pub mod progress;
 pub mod repo;
 pub mod rootfs;
 pub mod solver;
+pub mod sqlite;
 pub mod sys;
 pub mod unpack;
 pub mod verify;

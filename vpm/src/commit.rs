@@ -40,7 +40,7 @@
 //! 4. owners re-resolved once more; triggers;
 //! 5. `syncfs`, the journal deleted, old version directories deleted.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Read};
@@ -52,7 +52,7 @@ use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::adb::FileKind;
-use crate::db::{self, Db, FileRec, Installed, JournalFile, Op, PkgMeta, RecKind};
+use crate::db::{self, Db, FileRec, JournalFile, Op, PkgMeta, RecKind, StagedPkg};
 use crate::digest::{Alg, Hasher};
 use crate::error::{Error, Result};
 use crate::rootfs::{self, Resolved, RootFs};
@@ -91,6 +91,22 @@ impl PkgState {
     pub fn load(dir: &Path, changed: bool) -> Result<PkgState> {
         Ok(PkgState { meta: db::read_meta(dir)?, recs: db::read_files(dir)?, dir: dir.to_path_buf(), changed })
     }
+
+    /// Loads a package's metadata and file manifest from `Db` (SQLite, or
+    /// legacy `.vpm/` fallback for read-only unmigrated roots).
+    pub fn load_from_db(db: &Db, name: &str, version: &str, changed: bool) -> Result<PkgState> {
+        let meta = db.read_pkg_meta(name, version)?;
+        let recs = db.read_pkg_files(name, version)?;
+        let dir = Db::pkg_dir(&db.root, name, version);
+        Ok(PkgState { meta, dir, recs, changed })
+    }
+
+    /// Constructs a `PkgState` from an in-memory `StagedPkg` (avoiding any
+    /// round-trip read back from disk/SQLite).
+    pub fn from_staged(root: &Path, sp: &StagedPkg, changed: bool) -> PkgState {
+        let dir = Db::pkg_dir(root, sp.meta.name(), sp.meta.version());
+        PkgState { meta: sp.meta.clone(), dir, recs: sp.recs.clone(), changed }
+    }
 }
 
 /// Who owns each non-directory path of the final set, and its directories.
@@ -109,6 +125,25 @@ fn same_entry(a: &FileRec, b: &FileRec) -> bool {
 
 fn replaces(a: &PkgMeta, b: &PkgMeta) -> bool {
     a.info.replaces.iter().any(|d| d.name == b.info.name && d.matches_version(&b.info.version))
+}
+
+/// Chooses the owning package among multiple installed candidates for the same
+/// path, using the same `replaces` / `replaces-priority` / `origin` precedence
+/// as [`ownership`] (used by SQLite-indexed `vpm info -W`).
+pub fn pick_owner<'a>(candidates: &[&'a PkgMeta]) -> Option<&'a PkgMeta> {
+    let mut best: Option<&'a PkgMeta> = None;
+    for &b in candidates {
+        let Some(a) = best else {
+            best = Some(b);
+            continue;
+        };
+        let a_prio = if replaces(a, b) { a.replaces_priority as i64 } else { -1 };
+        let b_prio = if replaces(b, a) { b.replaces_priority as i64 } else { -1 };
+        if b_prio > a_prio || (b_prio == a_prio && !a.info.origin.is_empty() && a.info.origin == b.info.origin) {
+            best = Some(b);
+        }
+    }
+    best
 }
 
 /// Assigns every path to one package, as apk's `apk_pkg_replaces_file`
@@ -282,6 +317,7 @@ fn interpreter(body: &[u8]) -> Option<&[u8]> {
 
 struct Switch<'a> {
     root: PathBuf,
+    db: &'a Db,
     fs: RootFs,
     ids: IdMap,
     j: JournalFile,
@@ -568,7 +604,7 @@ impl<'a> Switch<'a> {
         if self.j.is_done(key) {
             return;
         }
-        let Some(body) = db::read_script(dir, typ) else { return };
+        let Some(body) = self.db.read_pkg_script(name, version, typ) else { return };
         if !self.opts.no_scripts {
             if defer_ok {
                 if let Some(interp) = interpreter(&body) {
@@ -835,31 +871,41 @@ impl<'a> Switch<'a> {
 /// placed this is marked in the journal (`placed:NAME`, made durable with
 /// a syncfs before a post script runs), so that a recovery does not place
 /// them again over what its scripts did; every script run is marked too.
-pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFile, opts: &SwitchOptions) -> Result<Report> {
+pub fn switch(
+    db: &Db,
+    j: JournalFile,
+    opts: &SwitchOptions,
+    preloaded: Option<&HashMap<(String, String), StagedPkg>>,
+) -> Result<Report> {
+    let root = &db.root;
     let plan = j.plan.clone();
     let programs = Db::programs(root);
     let changed: HashMap<&str, &Op> = plan.ops.iter().map(|o| (o.name(), o)).collect();
 
     // the final set: unchanged packages first, then new ones in order
     let mut pkgs: Vec<PkgState> = Vec::new();
-    for (name, ip) in installed {
+    for (name, ip) in &db.installed {
         if !changed.contains_key(name.as_str()) {
-            pkgs.push(PkgState::load(&ip.dir, false)?);
+            pkgs.push(PkgState::load_from_db(db, name, ip.meta.version(), false)?);
         }
     }
     let first_new = pkgs.len();
     for op in &plan.ops {
         if let Some(v) = op.new_version() {
-            pkgs.push(PkgState::load(&programs.join(op.name()).join(v), true)?);
+            let st = if let Some(sp) = preloaded.and_then(|m| m.get(&(op.name().to_string(), v.to_string()))) {
+                PkgState::from_staged(root, sp, true)
+            } else {
+                PkgState::load_from_db(db, op.name(), v, true)?
+            };
+            pkgs.push(st);
         }
     }
     // old versions (absent if already deleted)
     let mut olds: HashMap<String, PkgState> = HashMap::new();
     for op in &plan.ops {
         if let Some(v) = op.old_version() {
-            let d = programs.join(op.name()).join(v);
-            if d.join(db::META_DIR).exists() {
-                olds.insert(op.name().to_string(), PkgState::load(&d, true)?);
+            if db.has_pkg(op.name(), v)? {
+                olds.insert(op.name().to_string(), PkgState::load_from_db(db, op.name(), v, true)?);
             }
         }
     }
@@ -870,6 +916,7 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
 
     let mut s = Switch {
         root: root.to_path_buf(),
+        db,
         fs: RootFs::new(root),
         ids: IdMap::load(root),
         j,
@@ -896,9 +943,9 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
     // 1. installed and upgraded packages, dependencies first
     for (i, p) in pkgs.iter().enumerate().skip(first_new) {
         let name = p.meta.name().to_string();
-        let (pre, post, args) = match changed[name.as_str()] {
-            Op::Upgrade { old, new, .. } => ("pre-upgrade", "post-upgrade", vec![new.clone(), old.clone()]),
-            _ => ("pre-install", "post-install", vec![p.meta.version().to_string()]),
+        let (pre, post, args, old_ver) = match changed[name.as_str()] {
+            Op::Upgrade { old, new, .. } => ("pre-upgrade", "post-upgrade", vec![new.clone(), old.clone()], Some(old.as_str())),
+            _ => ("pre-install", "post-install", vec![p.meta.version().to_string()], None),
         };
         let placed = format!("placed:{name}");
         let post_key = format!("{post}:{name}");
@@ -926,7 +973,8 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
                 s.remove_old(o, &own, keep.as_ref().unwrap(), &mut modified);
             }
             db::set_current(root, &name, p.meta.version())?;
-            let runs_post = !opts.no_scripts && !s.j.is_done(&post_key) && db::read_script(&p.dir, post).is_some();
+            db.mark_installed(&name, p.meta.version(), old_ver)?;
+            let runs_post = !opts.no_scripts && !s.j.is_done(&post_key) && db.has_pkg_script(&name, p.meta.version(), post);
             if runs_post {
                 s.sync()?;
             }
@@ -961,7 +1009,8 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            if o.map_or(false, |o| db::read_script(&o.dir, "post-deinstall").is_some()) && !opts.no_scripts {
+            db.mark_removed(name, old)?;
+            if o.map_or(false, |_| db.has_pkg_script(name, old, "post-deinstall")) && !opts.no_scripts {
                 s.sync()?;
             }
             s.j.mark_with(&key, false)?;
@@ -975,10 +1024,10 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
     }
     s.crash("removed");
 
-    // 3. the world
+    // 3. the world (SQLite + plain-text mirror)
     let world: Vec<crate::adb::Dependency> =
         plan.world.iter().filter_map(|w| crate::adb::Dependency::parse(w).ok()).collect();
-    db::write_atomic(&Db::state(root).join("world"), db::format_world(&world).as_bytes())?;
+    db.save_world(&world)?;
     s.crash("world");
 
     // 4. owners once more, now that all files (etc/passwd too) are in place
@@ -1005,13 +1054,8 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
         }
     }
 
-    // 5. triggers (§D9, apk's fire_triggers): a package's trigger script
-    // runs when it was just installed/upgraded or a directory matching one
-    // of its globs was modified; it gets the matching directories
-    // apk's installed directories: every directory of a package and all
-    // their parents
+    // 5. triggers (§D9, apk's fire_triggers)
     let mut installed_dirs: BTreeSet<Vec<u8>> = BTreeSet::new();
-    // the root directory itself ("/") is one of them, as in apk
     installed_dirs.insert(Vec::new());
     for p in &pkgs {
         for r in &p.recs {
@@ -1025,7 +1069,7 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
         modified.insert(parent_dir(c));
     }
     for p in &pkgs {
-        if p.meta.triggers.is_empty() || db::read_script(&p.dir, "trigger").is_none() {
+        if p.meta.triggers.is_empty() || !db.has_pkg_script(p.meta.name(), p.meta.version(), "trigger") {
             continue;
         }
         let mut pending = false;
@@ -1058,10 +1102,11 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
     }
     s.crash("triggers");
 
-    // 6. durable, then forget the journal and the old versions
+    // 6. durable, then forget the journal, non-installed DB rows, and old version dirs
     s.sync()?;
     let Switch { j, rep, .. } = s;
     j.remove(root)?;
+    db.purge_non_installed()?;
     for op in &plan.ops {
         // only through real directories (Programs/<name> a symlink is
         // corruption, never followed)
