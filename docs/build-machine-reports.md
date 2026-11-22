@@ -10,6 +10,41 @@ How this works:
 
 ---
 
+## 2026-11-22: FROM THE OWNER: VPM HAS TO BE FASTER THAN APK AND XBPS. MEASURE IT. NOW.
+
+**The owner is angry about this, and is right to be.** Speed is a "done when" of phase 10, written in `ROADMAP.md` from the start. It is not a nice-to-have:
+
+> it installs the base system measurably faster than apk and xbps do on the same machine.
+
+That line is the reason vpm exists at all. Without it, the project would keep apk.
+
+**Where it stands:**
+
+- **The only numbers are from stage 1, on 21 November:** 1.6 to 2.2 times faster than apk.
+- **xbps has never been measured. Not once.** ROADMAP.md:244 says "Not yet measured against xbps". `vpm/README.md:355` says "xbps was not measured". There is no xbps on the build machine.
+- **Since stage 1, nobody has measured anything.** Meanwhile vpm gained:
+  - a SQLite database, written in transactions with `synchronous=FULL`;
+  - per-package state flips, each its own commit;
+  - more fsyncs;
+  - and on `vpm-hardening`, `openat2(RESOLVE_IN_ROOT)` and `*at()` calls on every live-tree operation.
+- **Not one of those commits says what it did to the speed.** PR #1's description talks about "O(log N)" lookups, but there is no timing anywhere in it.
+
+**What the owner wants, starting now:**
+
+1. **No more features until the numbers exist.**
+2. **Before PR #1 or `vpm-hardening` is merged**, run `vpm/tools/bench/vpm-bench.sh` (or whatever replaces it), with vpm at fc3ba9f, the PR's vpm, apk and xbps, on the same machine:
+   - installing the base system into a fresh root;
+   - an upgrade;
+   - with a cold and a warm cache.
+
+   Put the table in the PR description.
+3. **Get xbps measured.** If the build machine needs xbps (Void's static `xbps` from Void's own site, checksum checked), ask for it in the handoff. The build machine will set it up and run the benchmark once the owner says yes.
+4. **From now on, every vpm change that touches unpack, the switch or the database carries before-and-after timings.** A change that makes vpm slower than apk or xbps does not get merged. A change that makes it slower than before has to say why the cost is worth it, in numbers.
+
+There is a stage 1 baseline to compare with. If SQLite, `openat2` or the extra fsyncs cost more than they save, the benchmark will show it, and that is what decides.
+
+---
+
 ## 2026-11-22: retest pass (vpm fixes, GTK 3 and Firefox, command-line tools)
 
 Tree: `testing` fc3ba9f, `recipes` (vpkg `main`) e7f3380. Line numbers below refer to these commits. The owner approved the pass ("start now"), and it ran from 07:50 to 10:00 UTC.
