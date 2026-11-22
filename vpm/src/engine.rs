@@ -53,6 +53,9 @@ pub struct Options {
     /// Accept an index older than the one used before (see
     /// [`repo::Freshness`]).
     pub allow_rollback: bool,
+    /// Optional maximum age in days for remote indexes (enforced even on a
+    /// fresh root via the signed index timestamp).
+    pub max_index_age_days: Option<u64>,
     /// Test hook (`VPM_CRASH_AT`): kill the process at a named point of the
     /// switch.
     pub crash_at: Option<String>,
@@ -206,7 +209,8 @@ fn load_repos(
     let http = if remote { Some(Http::new()?) } else { None };
     let vo = VerifyOptions { allow_untrusted: o.allow_untrusted, ..Default::default() };
     let cache = root.join(db::CACHE_DIR);
-    let mut fresh = repo::Freshness::load(root, o.allow_rollback);
+    let max_age = o.max_index_age_days.map(|d| std::time::Duration::from_secs(d.saturating_mul(86_400)));
+    let mut fresh = repo::Freshness::load_with_max_age(root, o.allow_rollback, max_age);
     let mut repos = Vec::new();
     let mut problems: usize = 0;
     let mut last_err: Option<Error> = None;

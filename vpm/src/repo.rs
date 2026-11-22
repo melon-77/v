@@ -245,6 +245,9 @@ impl Seen {
 pub struct Freshness {
     pub seen: HashMap<String, Seen>,
     pub allow_rollback: bool,
+    /// Optional maximum age for remote indexes (enforced even on a fresh root
+    /// that has never seen the repository before).
+    pub max_age: Option<std::time::Duration>,
     dir: PathBuf,
 }
 
@@ -252,8 +255,70 @@ fn url_key(index_url: &str) -> String {
     digest::hex(&digest::sha256(index_url.as_bytes()))
 }
 
+/// Converts a UTC civil date/time to Unix epoch seconds (Howard Hinnant's
+/// civil-to-days algorithm; valid for all Gregorian years >= 1970).
+fn utc_to_unix(year: i64, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> Option<u64> {
+    if year < 1970 || !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let max_day = match month {
+        2 => if leap { 29 } else { 28 },
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day > max_day {
+        return None;
+    }
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400; // [0, 399]
+    let m = month as i64;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + (day as i64) - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    let days = era * 146_097 + doe - 719_468;
+    if days < 0 {
+        return None;
+    }
+    Some((days as u64) * 86_400 + (hour as u64) * 3600 + (min as u64) * 60 + (sec as u64))
+}
+
+/// Parses a signed UTC timestamp from an index's `description` field
+/// (`NDX_DESCRIPTION`), supporting `YYYYMMDDTHHMMSSZ` (preferred) and legacy
+/// `YYYYMMDD` tokens (e.g. `"Valence 20261122T164500Z"` or `"Valence 20261122"`).
+pub fn parse_description_timestamp(desc: &str) -> Option<u64> {
+    let mut best: Option<u64> = None;
+    for tok in desc.split_whitespace() {
+        let b = tok.as_bytes();
+        let ts = if b.len() == 16 && b[8] == b'T' && b[15] == b'Z' {
+            let y: i64 = tok[0..4].parse().ok()?;
+            let mo: u32 = tok[4..6].parse().ok()?;
+            let d: u32 = tok[6..8].parse().ok()?;
+            let h: u32 = tok[9..11].parse().ok()?;
+            let mi: u32 = tok[11..13].parse().ok()?;
+            let s: u32 = tok[13..15].parse().ok()?;
+            utc_to_unix(y, mo, d, h, mi, s)
+        } else if b.len() == 8 && b.iter().all(|c| c.is_ascii_digit()) {
+            let y: i64 = tok[0..4].parse().ok()?;
+            let mo: u32 = tok[4..6].parse().ok()?;
+            let d: u32 = tok[6..8].parse().ok()?;
+            utc_to_unix(y, mo, d, 0, 0, 0)
+        } else {
+            None
+        };
+        if let Some(t) = ts {
+            best = Some(best.map_or(t, |cur| cur.max(t)));
+        }
+    }
+    best
+}
+
 impl Freshness {
     pub fn load(root: &Path, allow_rollback: bool) -> Freshness {
+        Self::load_with_max_age(root, allow_rollback, None)
+    }
+
+    pub fn load_with_max_age(root: &Path, allow_rollback: bool, max_age: Option<std::time::Duration>) -> Freshness {
         let dir = root.join(db::STATE_DIR).join("indexes");
         let mut seen = HashMap::new();
         if let Ok(rd) = fs::read_dir(&dir) {
@@ -267,20 +332,41 @@ impl Freshness {
                 }
             }
         }
-        Freshness { seen, allow_rollback, dir }
+        Freshness { seen, allow_rollback, max_age, dir }
     }
 
     /// Refuses an index that is older than the one accepted before from
-    /// the same location: its newest build-time is older, or it offers a
-    /// package name only in a lower version than before.
-    fn check(&self, index_url: &str, index: &Index) -> Result<()> {
-        let Some(prev) = self.seen.get(&url_key(index_url)) else { return Ok(()) };
-        let now = Seen::of(index);
-        let mut why = Vec::new();
-        if now.generation < prev.generation {
-            why.push(format!("newest package build time {} < {}", now.generation, prev.generation));
+    /// the same location, or (for remote indexes when `max_age` is set)
+    /// older than `now - max_age` even on a brand-new root.
+    fn check(&self, index_url: &str, index: &Index, remote: bool) -> Result<()> {
+        let now_seen = Seen::of(index);
+        if remote {
+            if let Some(max_age) = self.max_age {
+                let wall_now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let limit = wall_now.saturating_sub(max_age.as_secs());
+                if now_seen.generation < limit {
+                    let age_days = wall_now.saturating_sub(now_seen.generation) / 86_400;
+                    let max_days = max_age.as_secs() / 86_400;
+                    let msg = format!(
+                        "{index_url}: signed index timestamp is {age_days}d old (exceeds --max-index-age {max_days}d)"
+                    );
+                    if self.allow_rollback {
+                        eprintln!("vpm: warning: {msg}; accepted (--allow-rollback)");
+                    } else {
+                        return Err(Error::Untrusted(format!("{msg}; refused (--allow-rollback accepts it)")));
+                    }
+                }
+            }
         }
-        for (n, v) in &now.newest {
+        let Some(prev) = self.seen.get(&url_key(index_url)) else { return Ok(()) };
+        let mut why = Vec::new();
+        if now_seen.generation < prev.generation {
+            why.push(format!("index timestamp/build time {} < {}", now_seen.generation, prev.generation));
+        }
+        for (n, v) in &now_seen.newest {
             if let Some(pv) = prev.newest.get(n) {
                 if version::cmp(v, pv) == std::cmp::Ordering::Less {
                     why.push(format!("{n} {v} < {pv}"));
@@ -325,7 +411,9 @@ impl Freshness {
 }
 
 fn generation(index: &Index) -> u64 {
-    index.packages.iter().map(|p| p.build_time).max().unwrap_or(0)
+    let pkg_max = index.packages.iter().map(|p| p.build_time).max().unwrap_or(0);
+    let desc_ts = parse_description_timestamp(&index.description).unwrap_or(0);
+    pkg_max.max(desc_ts)
 }
 
 /// Loads one repository index and checks its signature and freshness.
@@ -350,7 +438,7 @@ pub fn load(
     let read = |path: &Path| -> Result<(Index, TrustInfo, u64)> {
         let (index, trust) =
             adb::read_index_file(path, keys, opts).map_err(|e| prefix(e, &format!("{index_url}: ")))?;
-        fresh.check(&index_url, &index)?;
+        fresh.check(&index_url, &index, remote)?;
         let g = generation(&index);
         Ok((index, trust, g))
     };
@@ -527,19 +615,43 @@ mod tests {
         };
         let v2 = idx(&[("hello", "2.0-r0", 100), ("lib", "1-r0", 50)]);
         let mut f = Freshness::default();
-        assert!(f.check("u", &v2).is_ok()); // nothing seen yet
+        assert!(f.check("u", &v2, false).is_ok()); // nothing seen yet
         f.seen.insert(url_key("u"), Seen::of(&v2));
         assert_eq!(Seen::parse(&Seen::of(&v2).format("u")), Some(Seen::of(&v2)));
         // same, newer, a new name, a name removed: fine
-        assert!(f.check("u", &v2).is_ok());
-        assert!(f.check("u", &idx(&[("hello", "2.1-r0", 120), ("x", "1", 120)])).is_ok());
+        assert!(f.check("u", &v2, false).is_ok());
+        assert!(f.check("u", &idx(&[("hello", "2.1-r0", 120), ("x", "1", 120)]), false).is_ok());
         // a name only in a lower version, or an older newest build-time
-        assert_eq!(f.check("u", &idx(&[("hello", "1.0-r0", 100)])).unwrap_err().kind(), "untrusted");
-        assert!(f.check("u", &idx(&[("hello", "2.0-r0", 90)])).is_err());
+        assert_eq!(f.check("u", &idx(&[("hello", "1.0-r0", 100)]), false).unwrap_err().kind(), "untrusted");
+        assert!(f.check("u", &idx(&[("hello", "2.0-r0", 90)]), false).is_err());
         // another location is not compared
-        assert!(f.check("w", &idx(&[("hello", "1.0-r0", 1)])).is_ok());
+        assert!(f.check("w", &idx(&[("hello", "1.0-r0", 1)]), false).is_ok());
         f.allow_rollback = true;
-        assert!(f.check("u", &idx(&[("hello", "1.0-r0", 100)])).is_ok());
+        assert!(f.check("u", &idx(&[("hello", "1.0-r0", 100)]), false).is_ok());
+    }
+
+    #[test]
+    fn signed_timestamp_and_fresh_root_max_age() {
+        // 1970-01-01T00:00:00Z = 0; 2024-02-29T23:59:59Z = 1709251199
+        assert_eq!(parse_description_timestamp("Valence 19700101T000000Z"), Some(0));
+        assert_eq!(parse_description_timestamp("Valence 20240229T235959Z"), Some(1_709_251_199));
+        assert_eq!(parse_description_timestamp("Valence 20240229"), Some(1_709_164_800));
+        assert_eq!(parse_description_timestamp("Valence 20230229"), None); // not a leap year
+        assert_eq!(parse_description_timestamp("no date here"), None);
+
+        // Fresh root with max_age refuses a remote index signed in 2020, allows local, allows --allow-rollback
+        let old_idx = Index {
+            description: "Valence 20200101T000000Z".into(),
+            ..Default::default()
+        };
+        let mut f = Freshness {
+            max_age: Some(std::time::Duration::from_secs(30 * 86_400)),
+            ..Default::default()
+        };
+        assert_eq!(f.check("https://example.org/Packages.adb", &old_idx, true).unwrap_err().kind(), "untrusted");
+        assert!(f.check("/local/Packages.adb", &old_idx, false).is_ok());
+        f.allow_rollback = true;
+        assert!(f.check("https://example.org/Packages.adb", &old_idx, true).is_ok());
     }
 
     #[test]

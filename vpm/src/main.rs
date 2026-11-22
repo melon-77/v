@@ -38,6 +38,8 @@ options:
   --jobs N               fetch/unpack threads (default: one per CPU, max 16)
   --allow-rollback       accept a repository index older than the one used
                          before (refused by default: replay protection)
+  --max-index-age DAYS   refuse remote indexes whose signed timestamp is
+                         older than DAYS (enforced even on a fresh root)
   --allow-untrusted      accept unsigned or untrusted files (testing only)
 
 commands:
@@ -64,10 +66,10 @@ commands:
                          content read from its DATA blocks
 
 layout of a root managed by vpm:
-  ROOT/Programs/NAME/VERSION/   the package's files (+ .vpm/ metadata)
+  ROOT/Programs/NAME/VERSION/   the package's unpacked files
   ROOT/Programs/NAME/Current    symlink to the version in use
   the usual tree: hard links to Programs (copies under etc/ and boot/)
-  ROOT/var/lib/vpm/             world, journal, lock
+  ROOT/var/lib/vpm/             state.db (SQLite), world, journal, lock
   ROOT/var/cache/vpm/           downloaded packages
 ";
 
@@ -82,6 +84,7 @@ struct Opts {
     plain: bool,
     allow_untrusted: bool,
     allow_rollback: bool,
+    max_index_age_days: Option<u64>,
     no_scripts: bool,
     no_commit_hooks: bool,
     simulate: bool,
@@ -106,6 +109,7 @@ impl Opts {
             plain: self.plain,
             allow_untrusted: self.allow_untrusted,
             allow_rollback: self.allow_rollback,
+            max_index_age_days: self.max_index_age_days,
             no_scripts: self.no_scripts,
             no_commit_hooks: self.no_commit_hooks,
             simulate: self.simulate,
@@ -128,6 +132,7 @@ fn parse_args() -> Result<Opts, String> {
         plain: false,
         allow_untrusted: false,
         allow_rollback: false,
+        max_index_age_days: None,
         no_scripts: false,
         no_commit_hooks: false,
         simulate: false,
@@ -162,6 +167,10 @@ fn parse_args() -> Result<Opts, String> {
             }
             "--allow-untrusted" => o.allow_untrusted = true,
             "--allow-rollback" => o.allow_rollback = true,
+            "--max-index-age" => {
+                o.max_index_age_days =
+                    Some(val("--max-index-age")?.parse().map_err(|_| "--max-index-age needs a number of days".to_string())?)
+            }
             "--json" => o.json = true,
             "-s" if cmd == "info" => o.info.size = true,
             "-s" => o.simulate = true,

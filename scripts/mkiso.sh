@@ -145,7 +145,7 @@ extras="valence-base bash busybox glibc apk-tools"
 # guest tools, which the installers add when they run inside a VM
 ls $M/repo/$APK_ARCH/valence-vm-guest-[0-9]*.apk >/dev/null 2>&1 && extras="$extras valence-vm-guest"
 apkx fetch --recursive --output $ISO/valence/repo/$APK_ARCH $extras >/dev/null
-( cd $ISO/valence/repo/$APK_ARCH && $APK --keys-dir $M/keys/trusted --sign-key "${VALENCE_SIGN_KEY:-$M/keys/valence-signing.rsa}" mkndx -d "Valence $DATE" -o Packages.adb *.apk )
+( cd $ISO/valence/repo/$APK_ARCH && $APK --keys-dir $M/keys/trusted --sign-key "${VALENCE_SIGN_KEY:-$M/keys/valence-signing.rsa}" mkndx -d "Valence $(date -u +%Y%m%dT%H%M%SZ)" -o Packages.adb *.apk )
 
 step "initramfs"
 mkdir -p $INITRD/bin $INITRD/usr/lib $INITRD/dev

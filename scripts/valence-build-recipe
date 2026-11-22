@@ -480,7 +480,7 @@ if [ -f "$st" ]; then tail -n +4 "$st" | while read -r old; do
   printf '%s\n' "${made[@]}" | grep -qxF "$old" || [ ! -e "$OUT/$old" ] || { msg "removed $old (no longer made by this recipe)"; rm -f "$OUT/$old"; }
 done; fi
 msg "reindex"
-( cd $OUT && flock .lock bash -c "$APK --keys-dir $M/keys/trusted --sign-key $KEY mkndx -d 'Valence $(date +%Y%m%d)' -o Packages.adb.new *.apk && mv Packages.adb.new Packages.adb" )
+( cd $OUT && flock .lock bash -c "$APK --keys-dir $M/keys/trusted --sign-key $KEY mkndx -d 'Valence $(date -u +%Y%m%dT%H%M%SZ)' -o Packages.adb.new *.apk && mv Packages.adb.new Packages.adb" )
 
 # ---------- the record scripts/valence-build reads ----------
 # line 1: the recipe's fingerprint as valence-build worked it out ("by hand" when this script was run directly, which
