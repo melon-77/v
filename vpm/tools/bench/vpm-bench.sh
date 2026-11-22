@@ -250,10 +250,17 @@ stage_xbps() {
         fi
         local have; have=$(sha256sum $X/dl/$TB | cut -d' ' -f1)
         if [ -z "$want" ] || [ "$want" != "$have" ]; then
-            echo "xbps: checksum missing or wrong (want '$want', have $have); not using it"
-            return 1
+            # Void's "latest" line in sha256sums.txt can lag behind the tarball it points to;
+            # accept if the exact hash appears under a versioned xbps-static-static-*x86_64-musl.tar.xz entry.
+            if [ -f "$X/dl/sha256sums.txt" ] && grep -q "^SHA256 (xbps-static-static-.*\.x86_64-musl\.tar\.xz) = $have\$\|^$have  \*?xbps-static-static-.*\.x86_64-musl\.tar\.xz\$" "$X/dl/sha256sums.txt"; then
+                echo "  sha256 $have matched versioned xbps-static entry in sha256sums.txt"
+            else
+                echo "xbps: checksum missing or wrong (want '$want', have $have); not using it"
+                return 1
+            fi
+        else
+            echo "  sha256 $have OK"
         fi
-        echo "  sha256 $have OK"
         mkdir -p $X/static
         tar -xJf $X/dl/$TB -C $X/static
     fi
@@ -275,6 +282,44 @@ stage_xbps() {
     for cache in cold warm; do
         [ $cache = warm ] && { cat $X/repo/*.xbps > /dev/null; one_run warmup warm 0 xbps 0 xbps base-system > /dev/null; drop_warmups; }
         for i in $(seq 1 $RUNS); do one_run void-base $cache 0 xbps $i xbps base-system; done
+    done
+}
+
+# Single-package add benchmarks (add-small: nano; add-large: go) on top of a fresh valence-base root
+stage_small() {
+    for pair in "add-small:nano" "add-large:go"; do
+        local label=${pair%%:*} pkg=${pair#*:}
+        for cache in cold warm; do
+            echo "== $label ($pkg), $cache, scripts=0 ($RUNS runs each)"
+            for i in $(seq 1 $RUNS); do
+                local order="apk vpm"; [ $((i % 2)) = 0 ] && order="vpm apk"
+                for t in $order; do
+                    safe_rm $T; sync
+                    make_cmd $t 0 $BASE_SET
+                    "${CMD[@]}" > /dev/null 2>&1 < /dev/null
+                    sync -f $T
+                    [ $cache = cold ] && drop_caches
+                    local log=$B/logs/$label-$cache-s0-$t-$i.log
+                    local load1 t0 t1 t2 rc
+                    load1=$(cut -d' ' -f1 /proc/loadavg)
+                    if [ $t = apk ]; then
+                        CMD=($APK --root $T --arch x86_64 --keys-dir $KEYS --repositories-file /dev/null --repository $REPO --no-cache --no-scripts add $pkg)
+                    else
+                        CMD=($VPM --root $T --repository $REPO --keys-dir $KEYS --plain --no-scripts $VPM_EXTRA add $pkg)
+                    fi
+                    t0=$(ns)
+                    /usr/bin/time -o $B/time.out -f '%U %S %M %F %I %O' "${CMD[@]}" > $log 2>&1 < /dev/null
+                    rc=$?
+                    t1=$(ns); sync -f $T; t2=$(ns)
+                    local user sys rss majf fin fout
+                    read -r user sys rss majf fin fout < <(tail -1 $B/time.out)
+                    local w ws; w=$(secs $t0 $t1); ws=$(secs $t0 $t2)
+                    printf '%s\t%s\t0\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t1\t\t\t\t%s\t\n' \
+                        $label $cache $t $i $rc $w $ws $user $sys $rss $majf $fin $fout $load1 >> $RES
+                    printf '  %-9s %-4s %-4s run %s: %7.3fs  +sync %7.3fs  rc=%s\n' $label $cache $t $i $w $ws $rc
+                done
+            done
+        done
     done
 }
 
