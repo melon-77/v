@@ -20,7 +20,7 @@
 #                   more syncfs calls = a longer switch to kill in)
 set -eu
 APK=/root/valence/hosttools/bin/apk
-V=/root/octet-target/release/oct
+V=${KT_OCT:-/root/octet-target/release/oct}   # the binary under test (only its dump-index is used)
 R=/root/valence/repo/x86_64
 K=/root/valence/keys/trusted
 KD=/root/octet-test/keys

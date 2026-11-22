@@ -10,6 +10,43 @@ How this works:
 
 ---
 
+## 2026-11-22, late: vpm is now octet (`oct add gcc`)
+
+**The owner named the package manager: octet, with the command `oct`.** In the owner's words: "The octet rule says an atom is stable once its outer shell is full. It's a nice metaphor for a system that's complete and stable." Also, `oct add` sounds like octet. That settles phase 10's last open question (ROADMAP.md, "Decided").
+
+**What changed (testing 7f5e734 and the commit after it; vpkg dc09201 and 1c5b0d9):**
+
+| | before | now |
+|---|---|---|
+| source | `vpm/` | `octet/` |
+| crate / binary | `vpm` / `vpm` | `octet` / `oct` |
+| recipe | `recipes/vpm` | `recipes/octet` (r0, installs `/usr/bin/oct`) |
+| state, cache | `/var/lib/vpm`, `/var/cache/vpm` | `/var/lib/octet`, `/var/cache/octet` |
+| each program's record | `Programs/<name>/<version>/.vpm/` | `.octet/` |
+| a kept, changed config | `<file>.vpm-new` | `<file>.octet-new` |
+| commit hooks | `/etc/vpm/commit_hooks.d` | `/etc/octet/commit_hooks.d` (apk's hook folders are still read) |
+| environment, journal | `VPM_*`, `vpm-journal 1` | `OCTET_*`, `octet-journal 1` |
+| messages | `vpm: ...` | `oct: ...` |
+| the ISO switch | `VALENCE_PKG=vpm` → `valence-vpm-*.iso` | `VALENCE_PKG=octet` → `valence-octet-*.iso` |
+
+**Also renamed:**
+- **The installer scripts** now look for `/var/lib/octet/world` and run `oct`: `valence-install`, `cal-finish`, `valence-wish`, `valence-first-boot`, `valencefetch` and `valence-snapshot`. The pkgrels of valence-base, valence-desktop and calamares-valence are bumped.
+- **The test tools** are `octet-killtest.sh` (with `KT_OCT`) and `octet-bench*.sh`. The build machine's test area is now `/root/octet-test`.
+
+**What wasn't renamed:**
+- **Roots made by vpm aren't converted.** Only test roots exist.
+- **The stage-1 reviews in `octet/docs/reviews/`** keep the old name, and the README says so.
+- **`octet/HANDOVER.md` is gone**, now that phase 10 is back with the owner.
+
+**Checks:**
+- **Build:** clean.
+- **`cargo test --release`:** 38 unit, 9 CLI and 9 real-data tests pass.
+- **Kill test:** 40/40 rounds pass, run on upgrade packages rebuilt under the new name: 39 killed while running, 13 of them with a package half placed (seed 20261123). The builder of that repository now uses the binary under test, `KT_OCT`.
+- **FAT32 `/boot`:** OK.
+- **The octet ISOs haven't been built yet.** That's stage E.
+
+---
+
 ## 2026-11-22, late: phase 10 stage A: the record is back in the folders
 
 **Done on `testing` (this commit) and vpkg `main` (9f0263e).** `vpm/` is the flat-file engine again (fc3ba9f, the version that passed 310 + 80 killed upgrades and every vpm QEMU suite), with these changes:

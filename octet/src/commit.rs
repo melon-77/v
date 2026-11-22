@@ -1238,7 +1238,7 @@ pub fn run_commit_hooks(root: &Path, stage: &str) -> Result<()> {
     Ok(())
 }
 
-/// Summary of a `oct fix` pass.
+/// Summary of an `oct fix` pass.
 #[derive(Debug, Default)]
 pub struct RepairReport {
     pub checked: usize,
