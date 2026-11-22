@@ -33,7 +33,7 @@ source by our own scripts and shipped as a signed apk v3 package.
 | NVIDIA | the open driver: nouveau + `linux-firmware-nvidia` (GSP 570.144 from upstream linux-firmware) + NVK (`mesa-nvk`), with zink for OpenGL; or NVIDIA's own kernel driver: `nvidia-open` 615 (open modules + NVIDIA's firmware) | package repository only; `valence-first-boot` asks which one on computers with an NVIDIA card (GTX 16/RTX 20 and newer). With `nvidia-open`, only Flatpak apps (Steam) get NVIDIA's userspace libraries, from Flathub. On Melon that was the only way, because those libraries need glibc; on glibc the system itself could use them, but Valence has no package of them and none of this has been tested on glibc |
 | gaming | Flatpak 1.16 + Flathub, GameMode | `valence-first-boot` offers Steam (and Firefox, VLC, Prism Launcher) from Flathub on first login. Steam is built for glibc, so on Melon Flatpak was the only way to run it; on glibc a native Steam is possible but untested, and it also needs 32-bit libraries (undecided, ROADMAP.md) |
 | game library | SDL3 3.4 + SDL3_image + SDL3_ttf (`sdl3`, `sdl3-image`, `sdl3-ttf`) | package repository only; SDL dlopen()s its Wayland/X11/audio backends |
-| apps and games | Cataclysm: DDA and GNU gettext (package repository only) | what goes on an ISO follows the size rule in "Contributing" |
+| other | GNU gettext (package repository only) | what goes on an ISO follows the size rule in "Contributing" |
 
 Owner's config (`CONFIG_*` answers) lives in `docs/config.txt`. Don't change those choices without the owner's approval.
 
@@ -55,10 +55,11 @@ the 58 recipes the console ISO is made of, the GNU tools among them (with mandoc
 for its documentation); and the Plasma desktop (`--edition desktop`, 345 recipes with the console's: LLVM and Mesa,
 Qt 6, KDE Frameworks, Plasma, SDDM, PipeWire, Flatpak, CUPS, Calamares and the applications).
 
-The other 106 recipes are on no ISO: the developer tools (binutils, gcc, clang, cmake, meson, ninja, git, perl, Rust,
+The other recipes (106 when phase 4 ended, 122 on 2026-11-21 counted the way given below) are on no ISO: the
+developer tools (binutils, gcc, clang, cmake, meson, ninja, git, perl, Rust,
 Go, qemu, ...), the LXQt desktop that Melon's 32-bit edition used (LXQt, labwc, wlroots and their libraries, built
 here for x86_64), and what Melon's online repository offered beside the ISOs (nvidia-open, linux-firmware-nvidia,
-mesa-nvk, xfsprogs, cataclysm-dda, ...). Compare `ls recipes` with `scripts/valence-build --edition desktop --order`
+mesa-nvk, xfsprogs, ...). Compare `ls recipes` with `scripts/valence-build --edition desktop --order`
 for the list. Phase 4 took the musl workarounds out of them and gave them their `makedepends`, and checked the
 result three ways: `scripts/compare-with-index.py` against Melon's packages (what differs is meant, and the recipe
 says why); `scripts/check-dev-deps.py`; and a root made of the packages with apk, in which gcc, g++, clang, rustc,
@@ -1332,7 +1333,7 @@ not, and the tests these notes speak of were Melon's, on musl.
   changes with the exact errors, asks the owner about product decisions, or merges into `testing`. It never pushes
   to a contributor's branch. The owner answers on PRs or on the pinned issue #17 ("Owner <-> build machine").
 - **What goes on an ISO (the owner's size rule):** small packages, below about 45 MB, may go on the ISOs; anything
-  bigger is an online install from the package repository (gcc and friends, Cataclysm: DDA). **Extra desktops are
+  bigger is an online install from the package repository (gcc and friends, clang, QEMU). **Extra desktops are
   always online installs, whatever their size**: Plasma stays the only desktop on the 64-bit ISO (issue #18, niri +
   Noctalia). The 32-bit desktop ISO carries LXQt instead of Plasma (the owner's decision); LXQt is in the 64-bit
   package repository too, as an online install.
