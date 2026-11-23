@@ -282,6 +282,16 @@ These are open on purpose. Each gets settled before the phase that needs it.
   2026).
 
 ## Decided
+- **A change takes one sync, before its switch** (23 November 2026). With the correction below on the table (apk syncs
+  once at the end of every change), the owner was asked how an add should end: with no sync, as it then did; with a sync
+  at the end, as apk; or with one sync before the switch, so that a power cut leaves the add undone or finished by the
+  next run and never half done. The owner: "one sync and do whatever else you found to make it faster". The build
+  machine applied the same rule to removals and upgrades, which until then flushed three times. That part is its
+  reading of the owner's words, not something the owner was asked; `oct --sync` gives a change that is on disk when the
+  command returns, as before. What is given up: until the file system writes its journal (some seconds), a power cut
+  can take a change back whole. The check that guessed at damage after an unsynced add (next entry but one) is gone
+  with the unsynced add. See `catalyst/README.md`, "One sync". Left to the distribution: `oct recover` in
+  `/etc/runit/1`, once the root is writable, so that a change a power cut interrupted is finished at start-up.
 - **`oct add` uses a cached repository index for four hours** (23 November 2026). catalyst fetched the index on every
   `add`, a request apk does not make: over the network that was the difference between one request and two (43 ms
   against 14 ms for `add nano` from a server on the same machine). Asked whether `add` may plan with an index up to
@@ -299,6 +309,7 @@ These are open on purpose. Each gets settled before the phase that needs it.
   apk syncs once at the end of every change on an installed system (it skips that only with `--root`, as the
   benchmark ran it, or in a chroot). So an unsynced add is on disk later than apk's would be. The decision was made
   without that fact and is back with the owner; one `syncfs` at the end of an add would close the difference.
+  **Settled the same day:** "A change takes one sync, before its switch", above.
 - **Defaults for five open questions** (21 November 2026). The owner had no preference yet and took the
   recommended defaults ("yeah sure put them on record"). Each can still change.
   - *GSettings schemas:* glib gets a trigger that runs `glib-compile-schemas` when an installed package changes

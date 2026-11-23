@@ -123,6 +123,101 @@ pub fn is_root() -> bool {
     unsafe { geteuid() == 0 }
 }
 
+/// Whether directory `path` has a default ACL (which a directory made in
+/// it inherits, with a mode worked out from it instead of from the umask).
+/// "Cannot tell" counts as yes.
+pub fn has_default_acl(path: &Path) -> bool {
+    let Ok(c) = cstr(path) else { return true };
+    let r = unsafe { libc::lgetxattr(c.as_ptr(), b"system.posix_acl_default\0".as_ptr() as *const c_char, std::ptr::null_mut(), 0) };
+    if r >= 0 {
+        return true;
+    }
+    // no such attribute, or a file system without ACLs
+    !matches!(io::Error::last_os_error().raw_os_error(), Some(libc::ENODATA) | Some(libc::EOPNOTSUPP))
+}
+
+/// The kind of work [`name_threads`] is asked about.
+#[derive(Clone, Copy)]
+pub enum NameWork {
+    /// hard links and renames into a tree
+    Link,
+    /// unlinking names of files that keep another name
+    Unlink,
+    /// deleting whole trees: the last names of their files
+    Trees,
+}
+
+const BTRFS_SUPER_MAGIC: u64 = 0x9123_683E;
+const XFS_SUPER_MAGIC: u64 = 0x5846_5342;
+
+/// The magic number of the file system that holds `path`.
+fn fs_magic(path: &Path) -> Option<u64> {
+    let c = cstr(path).ok()?;
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.f_type as u64 & 0xffff_ffff)
+}
+
+/// How many threads at most are worth it for work that makes or removes
+/// names on the file system that holds `path` (`usize::MAX`: as many as the
+/// caller would use anyway).
+///
+/// It depends on the file system. Btrfs keeps all the names of a subvolume
+/// in one tree, and threads that change it wait for each other; XFS frees
+/// inodes no faster on several threads. Measured on Linux 6.18 with 12
+/// CPUs, each file system on the same disk image, Cataclysm's 8,500 entries
+/// (milliseconds on 1, 2, 4 and 16 threads):
+///
+/// |                         | ext4           | XFS               | Btrfs (zstd:1)    |
+/// |-------------------------|----------------|-------------------|-------------------|
+/// | linking them into place | 28, 17, 11, 11 | 33, 20, 15, 15    | 83, 67, 114, 173  |
+/// | unlinking them there    | 41, 28, 21, 20 | 46, 31, 25, 24    | 121, 145, 314, 275|
+/// | deleting the old tree   | 77, 57, 41, 40 | 137, 170, 162, 167| 120, 210, 474, 522|
+///
+/// So: as many threads as there are on ext4 and on what was not measured;
+/// on XFS a tree is deleted on one; on Btrfs links are made on two and
+/// everything is removed on one.
+///
+/// `CATALYST_LINK_THREADS`, `CATALYST_UNLINK_THREADS` and
+/// `CATALYST_TREE_THREADS` set the number (for measuring on another file
+/// system or kernel).
+pub fn name_threads(path: &Path, work: NameWork) -> usize {
+    let var = match work {
+        NameWork::Link => "CATALYST_LINK_THREADS",
+        NameWork::Unlink => "CATALYST_UNLINK_THREADS",
+        NameWork::Trees => "CATALYST_TREE_THREADS",
+    };
+    if let Some(n) = std::env::var(var).ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n >= 1) {
+        return n;
+    }
+    match (fs_magic(path), work) {
+        (Some(BTRFS_SUPER_MAGIC), NameWork::Link) => 2,
+        (Some(BTRFS_SUPER_MAGIC), _) => 1,
+        (Some(XFS_SUPER_MAGIC), NameWork::Trees) => 1,
+        _ => usize::MAX,
+    }
+}
+
+/// The umask the process was started with (0o777 while it is not known:
+/// then nothing may be assumed about what `mkdir` leaves of a mode).
+static UMASK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0o777);
+
+/// Reads the process's umask (it can only be read by setting it, so this is
+/// for the very start of the program, before any thread exists).
+pub fn note_umask() {
+    unsafe {
+        let u = umask(0o022);
+        umask(u);
+        UMASK.store(u & 0o777, AtomicOrdering::Relaxed);
+    }
+}
+
+pub fn umask_at_start() -> u32 {
+    UMASK.load(AtomicOrdering::Relaxed)
+}
+
 /// The descriptor that holds the root's lock (-1: none). Package scripts
 /// inherit it, so that a script left running after catalyst itself was killed
 /// keeps the root locked until it ends (no second catalyst can start the same

@@ -16,7 +16,8 @@ usage:
   catalyst-kt-check.py final ROOT REF.json
       the state after the completing run equals the clean upgrade REF:
       every entry, the owners, Programs (versions, Current, metadata), the
-      world, the lookup index (canonical: rebuilt by a recovery, it equals the
+      world, the lookup index (canonical but for the directory symlinks of
+      packages the change leaves alone: rebuilt by a recovery, it equals the
       clean run's), the hard links; no journal, temporary or .partial left
   catalyst-kt-check.py crit ROOT              only the /bin/sh, libc, loader checks
   catalyst-kt-check.py phase ROOT             where an upgrade stopped
@@ -174,8 +175,8 @@ def programs(root):
 
 
 def owned(root):
-    """canonical path -> [name, version, path as recorded, kind] for every
-    entry of every installed package."""
+    """canonical path -> [name, version, path as recorded, kind, hash] for
+    every entry of every installed package."""
     res = {}
     progs = os.path.join(root, 'Programs')
     for name in sorted(os.listdir(progs)):
@@ -187,7 +188,7 @@ def owned(root):
             for line in f:
                 x = line.rstrip('\n').split('\t')
                 path = unescape(x[9])
-                res[canon(root, path)] = [name, ver, path, x[0]]
+                res[canon(root, path)] = [name, ver, path, x[0], x[6]]
     return res
 
 
@@ -328,7 +329,13 @@ def crash(root, pre, ref):
             continue
         a, b, l = PE.get(p), RE.get(p), L.get(p)
         if l is None:
-            if a is not None and b is not None:
+            # A path that a removed package had, and that is there again
+            # after the change without belonging to a package, was put back
+            # by a trigger (busybox links its bc where the package bc was):
+            # between the removal and the trigger it is missing, with apk too.
+            gone = (p in pre['owned'] and p not in ref['owned']
+                    and 'current' not in ref['programs'].get(pre['owned'][p][0], {}))
+            if a is not None and b is not None and not gone:
                 viol.append('missing: /%s (there before and after the upgrade; before: %s)' % (p, show(a)))
             continue
         checked += 1
@@ -365,7 +372,11 @@ def crash(root, pre, ref):
             d = os.path.join(progs, name, os.readlink(c), '.catalyst')
             if not (os.path.isfile(os.path.join(d, 'info')) and os.path.isfile(os.path.join(d, 'files'))):
                 viol.append('Programs/%s/Current -> %s is not a complete version' % (name, os.readlink(c)))
-        elif name in pre['programs'] and 'current' in pre['programs'][name]:
+        elif (name in pre['programs'] and 'current' in pre['programs'][name]
+              and 'current' in ref['programs'].get(name, {})):
+            # installed before and after: its Current is flipped by a rename
+            # and is never missing (a package the change removes loses it,
+            # and its folder a moment later)
             viol.append('Programs/%s/Current is missing' % name)
     for p, e in sorted(L.items()):
         if p in PE or p in RE or p in VOLATILE:
@@ -412,14 +423,20 @@ def final(root, ref):
         viol.append('the lookup index differs from the clean run in %d files, e.g. %s' % (len(ks), ', '.join(ks[:5])))
     # hard links
     nlinks = 0
-    for p, (name, ver, path, kind) in sorted(now['owned'].items()):
+    for p, o in sorted(now['owned'].items()):
+        name, ver, path, kind = o[:4]
         e = E.get(p)
         if kind not in ('f', 'h') or e is None or e['t'] != 'f':
             continue
-        pst = os.lstat(os.path.join(root, 'Programs', name, ver, path))
+        own = os.path.join(root, 'Programs', name, ver, path)
+        pst = os.lstat(own)
         if p.startswith('etc/'):
             if e['ino'] == pst.st_ino or e['nlink'] != 1:
                 viol.append('/%s is not a separate copy (nlink %d)' % (p, e['nlink']))
+            # the package's own copy is another inode than the live file:
+            # its content is checked against the record by itself
+            if len(o) > 4 and len(o[4]) == 64 and sha(own) != o[4]:
+                viol.append('Programs/%s/%s/%s does not have the content of its record' % (name, ver, path))
         elif e['ino'] != pst.st_ino:
             viol.append('/%s is not a hard link to Programs/%s/%s' % (p, name, ver))
         else:
@@ -442,7 +459,18 @@ def final(root, ref):
             if f.startswith(TMP_PREFIX) or f.startswith('.Current') or f.endswith('.partial'):
                 viol.append('left in Programs: %s' % os.path.join(dp, f))
         if os.path.basename(dp) == '.catalyst':
+            if 'staged' in dns:
+                viol.append('left in Programs: %s' % os.path.join(dp, 'staged'))
             dns[:] = []
+    # an installed version is open for reading (it is root's alone only
+    # while it is unpacked and switched in)
+    progs = os.path.join(root, 'Programs')
+    for name in sorted(os.listdir(progs)):
+        c = os.path.join(progs, name, 'Current')
+        if os.path.islink(c):
+            m = stat.S_IMODE(os.lstat(os.path.join(progs, name, os.readlink(c))).st_mode)
+            if m != 0o755:
+                viol.append('Programs/%s/%s has mode %o' % (name, os.readlink(c), m))
     notes.append('%d files outside etc/ are hard links to their Programs copy' % nlinks)
     return viol, notes
 
@@ -463,7 +491,8 @@ def main():
         ref = json.load(open(sys.argv[2]))
         random.seed(sys.argv[3])
         files = {}
-        for p, (name, ver, path, kind) in ref['owned'].items():  # in record order
+        for p, o in ref['owned'].items():  # in record order
+            name, ver, path, kind = o[:4]
             if kind in ('f', 'h') and not p.startswith('etc/') and ver == sys.argv[4]:
                 files.setdefault(name, []).append(p)
         name = random.choice(sorted(n for n, f in files.items() if len(f) >= 2))

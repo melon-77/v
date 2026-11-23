@@ -55,11 +55,15 @@ pub struct Options {
     /// Test hook (`CATALYST_CRASH_AT`): kill the process at a named point of the
     /// switch.
     pub crash_at: Option<String>,
+    /// `--sync`: a change is on disk when the command returns (the journal's
+    /// name is fsync'ed and the switch ends with a syncfs), as every change
+    /// but an add was before 23 November 2026.
+    pub sync: bool,
 }
 
 impl Options {
     fn switch_opts(&self) -> SwitchOptions {
-        SwitchOptions { no_scripts: self.no_scripts, crash_at: self.crash_at.clone(), verbose: false, unsynced: false }
+        SwitchOptions { no_scripts: self.no_scripts, crash_at: self.crash_at.clone(), verbose: false, light: false }
     }
     fn fancy(&self) -> bool {
         !self.plain && sys::is_tty(1)
@@ -94,16 +98,56 @@ fn open_locked(o: &Options) -> Result<Db> {
     Db::open(&root, o.initdb)
 }
 
+/// The errors of an interrupted switch that this run finished first.
+static RECOVERY_ERRORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many errors the interrupted switch had that this run finished before
+/// its own work (0: there was none, or it went through). A command that
+/// went well after such a recovery has still not left the system as it
+/// reports: `main` makes it fail.
+pub fn recovery_errors() -> usize {
+    RECOVERY_ERRORS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Finishes a leftover journal, cleans up after an interrupted run, and
 /// rebuilds a missing or outdated index.
-fn settle(o: &Options, db: &mut Db) -> Result<()> {
+fn settle(o: &Options, db: &mut Db) -> Result<usize> {
     let root = db.root.clone();
-    // the system went down since adds that were not synced: what was not
-    // written to disk is found and removed before anything else
-    if let Some(mark) = crate::unsynced::stale(&root) {
-        after_unsynced_stop(db, &mark)?;
-    }
     let mut recovered = false;
+    let mut errors = 0;
+    // The catalyst of 23 November 2026 put the journal of an add in effect
+    // without any sync, under its mark `unsynced`. A power cut can have
+    // left that journal empty or cut short: it cannot be finished, and is
+    // removed (while the mark that tells is still there). Some of what its
+    // switch did can be on disk all the same: the packages it had begun
+    // are named, because files of theirs may be left in the tree.
+    if crate::unsynced::path(&root).exists() {
+        if let Ok(b) = fs::read(Db::journal_path(&root)) {
+            if Journal::parse(&String::from_utf8_lossy(&b)).is_err() {
+                eprintln!("oct: note: a journal an earlier catalyst wrote without a sync is incomplete; removed");
+                let mut begun: Vec<String> = Vec::new();
+                if let Ok(rd) = fs::read_dir(Db::programs(&root)) {
+                    for e in rd.flatten() {
+                        if e.path().is_dir() && fs::symlink_metadata(e.path().join(crate::db::CURRENT)).is_err() {
+                            begun.push(e.file_name().to_string_lossy().into_owned());
+                        }
+                    }
+                }
+                begun.sort();
+                if !begun.is_empty() {
+                    eprintln!(
+                        "oct: note: the add it was for had begun with: {}. Files of these may be left in the tree, \
+                         belonging to no package and possibly empty; `oct add` puts a package and its files right",
+                        begun.join(", ")
+                    );
+                }
+                fs::remove_file(Db::journal_path(&root))?;
+                db.reload()?;
+                recovered = true;
+            }
+        }
+    }
+    legacy_unsynced_notice(&root, db);
     if let Some(j) = JournalFile::open(&root)? {
         println!("oct: finishing an interrupted switch ({} package changes)", j.plan.ops.len());
         // a switch planned with the index is finished with the index as it
@@ -127,11 +171,17 @@ fn settle(o: &Options, db: &mut Db) -> Result<()> {
         if !broken.is_empty() {
             return Err(Error::Msg(format!("{}\n(finishing the interrupted switch needs it)", broken_records(&broken))));
         }
+        // finished as a full switch: the journal's name, which a light
+        // switch had not put on disk, goes there first with everything else,
+        // and the switch ends with a syncfs
+        commit::sync_root(&root)?;
         if j.plan.unsynced {
-            // finished as a synced switch: what the journal names is on disk first
-            sys::sync_fs(&fs::File::open(&root)?)?;
+            eprintln!(
+                "oct: note: this switch was begun by an earlier catalyst without a sync; \
+                 if the system lost power then, `oct fix` checks its packages"
+            );
         }
-        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts(), before.as_ref(), Vec::new()).map_err(|e| {
+        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts(), before.as_ref(), Vec::new(), None).map_err(|e| {
             Error::Msg(format!(
                 "finishing the interrupted switch failed: {e}\n  if a record can't be read, `oct fix` rebuilds it from the signed package and then finishes the switch"
             ))
@@ -140,6 +190,8 @@ fn settle(o: &Options, db: &mut Db) -> Result<()> {
             "oct: switch finished: {} files placed, {} already in place, {} removed",
             rep.placed, rep.unchanged, rep.removed
         );
+        errors = rep.errors.len();
+        RECOVERY_ERRORS.store(errors, std::sync::atomic::Ordering::Relaxed);
         db.reload()?;
         recovered = true;
     }
@@ -147,12 +199,16 @@ fn settle(o: &Options, db: &mut Db) -> Result<()> {
     // written but never put in effect (a crash before the switch)
     crate::index::clean_leftovers(&root);
     let _ = fs::remove_file(Db::journal_pending_path(&root));
+    let _ = fs::remove_file(Db::world_pending_path(&root));
+    for t in stray_temporaries(&root) {
+        let _ = fs::remove_file(t);
+    }
     // the clean-up walk over Programs is only needed after an interrupted or
     // failed run: one whose journal was just finished, or that left the
     // dirty mark (set before unpacking, removed when a change succeeded)
     let dirty = dirty_mark(&root);
     if recovered || dirty.exists() {
-        gc(&root, db, &mut |_| {})?;
+        gc(&root, db)?;
         let _ = fs::remove_file(&dirty);
     }
     // the index, rebuilt from the records when it is missing or out of date
@@ -164,299 +220,47 @@ fn settle(o: &Options, db: &mut Db) -> Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(errors)
 }
 
-/// Verifies that regular file `p` hashes to `expected` (when `expected` has a
-/// recognized digest length).
-fn hash_matches(p: &Path, expected: &[u8]) -> bool {
-    use std::io::Read;
-    let Some(alg) = crate::digest::Alg::from_len(expected.len()) else { return true };
-    let Ok(mut f) = sys::open_regular_nofollow(p) else { return false };
-    let mut h = crate::digest::Hasher::new(alg);
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let Ok(n) = f.read(&mut buf) else { return false };
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    h.finish() == expected
-}
-
-/// The package in a version directory, if the directory holds what its
-/// record says: the record readable, every entry there, every regular or
-/// hard-linked file matching its recorded size and content hash, every
-/// symlink matching its target, and no script empty. What a power cut takes
-/// from files that were written and not synced is their content (short, empty,
-/// or zero-filled blocks).
-fn whole_version(dir: &Path) -> Option<PkgState> {
-    use std::os::unix::ffi::OsStrExt;
-    let st = PkgState::load(dir, false).ok()?;
-    if let Ok(rd) = fs::read_dir(dir.join(db::META_DIR).join("scripts")) {
-        if !rd.flatten().all(|e| e.metadata().map_or(false, |m| m.len() > 0)) {
-            return None;
-        }
-    }
-    let whole = st.recs.iter().all(|r| {
-        let p = dir.join(std::ffi::OsStr::from_bytes(&r.path));
-        let Ok(m) = fs::symlink_metadata(&p) else { return false };
-        match &r.kind {
-            db::RecKind::Dir => m.is_dir(),
-            db::RecKind::File(crate::adb::FileKind::Regular | crate::adb::FileKind::Hardlink(_)) => {
-                m.is_file() && m.len() == r.size && hash_matches(&p, &r.hash)
-            }
-            db::RecKind::File(crate::adb::FileKind::Symlink(target)) => {
-                m.file_type().is_symlink()
-                    && fs::read_link(&p).ok().map_or(false, |t| t.as_os_str().as_bytes() == target.as_slice())
-            }
-            _ => true,
-        }
-    });
-    whole.then_some(st)
-}
-
-/// Verifies that an already-current recent package's entries also reached the
-/// live tree intact (catching missing hard links, missing symlinks, or 0-byte
-/// delayed-allocation `etc/` copies after a power cut when no journal remains).
-fn live_whole(root: &Path, st: &PkgState) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
-    let mut rfs = crate::rootfs::RootFs::new(root);
-    for r in &st.recs {
-        match &r.kind {
-            db::RecKind::Dir => {
-                let Ok(res) = rfs.resolve(&r.path, true) else { return false };
-                if !fs::symlink_metadata(&res.host).map_or(false, |m| m.is_dir()) {
-                    return false;
-                }
-            }
-            db::RecKind::File(crate::adb::FileKind::Symlink(_)) => {
-                let Ok(Some(e)) = rfs.entry_if_dir_exists(&r.path) else { return false };
-                if fs::symlink_metadata(&e.host).is_err() {
-                    return false;
-                }
-            }
-            db::RecKind::File(crate::adb::FileKind::Regular | crate::adb::FileKind::Hardlink(_)) => {
-                let Ok(Some(e)) = rfs.entry_if_dir_exists(&r.path) else { return false };
-                let Ok(lm) = fs::symlink_metadata(&e.host) else { return false };
-                if lm.is_file() && r.size > 0 && lm.len() == 0 {
-                    return false;
-                }
-                if !commit::is_etc(&r.path) && lm.is_file() {
-                    let src = st.dir.join(std::ffi::OsStr::from_bytes(&r.path));
-                    if let Ok(pm) = fs::symlink_metadata(&src) {
-                        if lm.dev() != pm.dev() && (lm.len() != r.size || !hash_matches(&e.host, &r.hash)) {
-                            return false;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    true
-}
-
-/// The canonical places of every entry of the installed packages, those
-/// named in `except` left out.
-fn live_claims(root: &Path, db: &Db, except: &HashSet<String>) -> HashSet<Vec<u8>> {
-    let mut rfs = crate::rootfs::RootFs::new(root);
-    let mut set = HashSet::new();
-    for (n, ip) in &db.installed {
-        if except.contains(n) {
-            continue;
-        }
-        for r in db::read_files(&ip.dir).unwrap_or_default() {
-            if let Ok(Some(e)) = rfs.entry_if_dir_exists(&r.path) {
-                set.insert(e.canon);
-            }
-        }
-    }
-    set
-}
-
-/// Removes from the live tree what version directory `vdir` put there,
-/// going by the directory itself and not by its record (which may be what
-/// is damaged):
-/// - the regular files that are its own inodes (they were hard-linked);
-/// - where no other package has an entry (`others`; nothing of this kind
-///   when that is not known): its symlinks, its copies under `etc/` that
-///   are untouched or empty, and its directories once they are empty.
-fn unlink_live(root: &Path, vdir: &Path, others: Option<&HashSet<Vec<u8>>>) {
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
-    let mut rfs = crate::rootfs::RootFs::new(root);
-    let mut dirs: Vec<Vec<u8>> = Vec::new();
-    let mut todo: Vec<Vec<u8>> = vec![Vec::new()];
-    while let Some(rel) = todo.pop() {
-        let Ok(rd) = fs::read_dir(vdir.join(std::ffi::OsStr::from_bytes(&rel))) else { continue };
+/// The temporary files of `db::write_atomic` that a power cut left in
+/// catalyst's state directory and in its `indexes/`: such a file is fsync'ed
+/// before it is renamed, so a cut between the two leaves it on disk beside
+/// the file it was to replace (which is whole, and stays).
+fn stray_temporaries(root: &Path) -> Vec<PathBuf> {
+    let state = root.join(db::STATE_DIR);
+    let mut out = Vec::new();
+    for d in [state.clone(), state.join("indexes")] {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
-            let name = e.file_name();
-            if rel.is_empty() && name.as_bytes() == db::META_DIR.as_bytes() {
-                continue;
-            }
-            let mut r = rel.clone();
-            if !r.is_empty() {
-                r.push(b'/');
-            }
-            r.extend_from_slice(name.as_bytes());
-            let Ok(m) = e.metadata() else { continue };
-            if m.is_dir() {
-                dirs.push(r.clone());
-                todo.push(r);
-                continue;
-            }
-            let Ok(Some(live)) = rfs.entry_if_dir_exists(&r) else { continue };
-            let Ok(lm) = fs::symlink_metadata(&live.host) else { continue };
-            let free = others.map_or(false, |o| !o.contains(&live.canon));
-            let ours = if m.is_file() && lm.dev() == m.dev() && lm.ino() == m.ino() {
-                true
-            } else if !free {
-                false
-            } else if m.file_type().is_symlink() {
-                lm.file_type().is_symlink() && fs::read_link(&live.host).ok() == fs::read_link(e.path()).ok()
-            } else {
-                m.is_file()
-                    && lm.is_file()
-                    && commit::is_etc(&r)
-                    && (lm.len() == 0 || (lm.len() == m.len() && fs::read(&live.host).ok() == fs::read(e.path()).ok()))
-            };
-            if ours {
-                let _ = fs::remove_file(&live.host);
+            if e.file_name().as_encoded_bytes().ends_with(b".catalyst-tmp") && e.file_type().map_or(false, |t| t.is_file()) {
+                out.push(e.path());
             }
         }
     }
-    let Some(others) = others else { return };
-    dirs.sort_by(|a, b| b.len().cmp(&a.len()));
-    for d in dirs {
-        if let Ok(Some(live)) = rfs.entry_if_dir_exists(&d) {
-            let real = fs::symlink_metadata(&live.host).map_or(false, |m| m.is_dir());
-            if real && !others.contains(&live.canon) {
-                let _ = fs::remove_dir(&live.host);
-            }
-        }
-    }
+    out
 }
 
-/// What follows a stop of the system since adds that were not synced
-/// ([`crate::unsynced`]): `mark` is of another boot. A clean shutdown wrote
-/// everything out and this finds nothing to do. After a power cut:
-/// - a package installed since the mark (not in its list) that is not
-///   whole is removed: its record can't be read, its files are missing,
-///   short, or fail hash verification, or (when no journal is pending for
-///   it) its live-tree entries are missing or zero-length;
-/// - a synced journal (`!j.unsynced`) is ALWAYS kept so an interrupted
-///   upgrade/removal is finished intact;
-/// - an unsynced journal is finished only when everything it installs is
-///   whole (and nothing had to be removed); otherwise it is deleted, and
-///   what it had unpacked goes too;
-/// - the lookup index is invalidated so it is rebuilt cleanly from the
-///   folders once after the reboot (avoiding stale/poisoned in-place buckets).
-fn after_unsynced_stop(db: &mut Db, mark: &crate::unsynced::Mark) -> Result<()> {
-    let root = db.root.clone();
-    let jp = Db::journal_path(&root);
-    let journal = match fs::read(&jp) {
-        Ok(b) => Some(b),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.into()),
-    };
-    let parsed_journal = journal
-        .as_ref()
-        .and_then(|b| std::str::from_utf8(b).ok())
-        .and_then(|t| Journal::parse(t).ok());
-    let synced_journal = parsed_journal.as_ref().map_or(false, |j| !j.unsynced);
-    // Packages currently being installed/upgraded by a leftover journal may not
-    // have placed all live-tree files yet, and a synced journal owns its own
-    // targets (never dropped as an unsynced add).
-    let pending_in_journal: HashSet<String> = parsed_journal
-        .as_ref()
-        .map(|j| j.ops.iter().filter(|op| op.new_version().is_some()).map(|op| op.name().to_string()).collect())
-        .unwrap_or_default();
-    let synced_targets: HashSet<(String, String)> = if synced_journal {
-        parsed_journal
-            .as_ref()
-            .map(|j| {
-                j.ops
-                    .iter()
-                    .filter_map(|op| op.new_version().map(|v| (op.name().to_string(), v.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        HashSet::new()
-    };
-
-    let recent = |n: &str, v: &str| {
-        !mark.had.contains(&(n.to_string(), v.to_string())) && !synced_targets.contains(&(n.to_string(), v.to_string()))
-    };
-    let mut drops: Vec<(String, String)> =
-        db.broken.iter().filter(|(n, v, _)| recent(n, v)).map(|(n, v, _)| (n.clone(), v.clone())).collect();
-    for (n, ip) in &db.installed {
-        let v = ip.meta.info.version.as_str();
-        if recent(n, v) {
-            let ok = match whole_version(&ip.dir) {
-                Some(st) => pending_in_journal.contains(n) || live_whole(&root, &st),
-                None => false,
-            };
-            if !ok {
-                drops.push((n.clone(), v.to_string()));
-            }
-        }
+/// Retires the mark of "unsynced adds" (see `unsynced.rs`): if one is
+/// there it is removed, with a note naming the packages added under it.
+/// Nothing is checked and nothing is uninstalled: telling a file damaged by
+/// a power cut from one the admin changed took guesses, and a wrong guess
+/// removed a healthy package.
+fn legacy_unsynced_notice(root: &Path, db: &Db) {
+    let Some(had) = crate::unsynced::take_legacy(root) else { return };
+    let names: Vec<String> = db
+        .installed
+        .iter()
+        .filter(|(n, ip)| !had.contains(&((*n).clone(), ip.meta.info.version.clone())))
+        .map(|(n, ip)| format!("{n}-{}", ip.meta.info.version))
+        .collect();
+    if !names.is_empty() {
+        eprintln!(
+            "oct: note: added by an earlier catalyst without a sync: {}\n     \
+             if the system lost power right after, `oct fix NAME` checks and repairs them",
+            names.join(", ")
+        );
     }
-
-    let keep = synced_journal
-        || (drops.is_empty()
-            && parsed_journal.as_ref().map_or(false, |j| {
-                j.ops.iter().all(|op| {
-                    op.new_version().map_or(true, |v| whole_version(&Db::pkg_dir(&root, op.name(), v)).is_some())
-                })
-            }));
-    let cut = journal.is_some() && !keep;
-    if cut {
-        fs::remove_file(&jp)?;
-    }
-    if !drops.is_empty() || cut {
-        let names: HashSet<String> = drops.iter().map(|(n, _)| n.clone()).collect();
-        // what the other packages have in the live tree; not known when
-        // one of them has a record that can't be read
-        let unknown = db.broken.iter().any(|(n, _, _)| !names.contains(n));
-        let others = (!unknown).then(|| live_claims(&root, db, &names));
-        for (n, v) in &drops {
-            let pdir = db::checked_pkg_parent(&root, n)?;
-            let vdir = pdir.join(v);
-            if fs::symlink_metadata(&vdir).map_or(false, |m| m.is_dir()) {
-                unlink_live(&root, &vdir, others.as_ref());
-                fs::remove_dir_all(&vdir)?;
-            }
-            let _ = fs::remove_file(pdir.join(db::CURRENT));
-            let _ = fs::remove_dir(&pdir);
-        }
-        db.reload()?;
-        // Never gc() before a kept synced journal finishes, or we would delete
-        // the synced journal's unpacked new version directories.
-        if !synced_journal {
-            gc(&root, db, &mut |vdir| unlink_live(&root, vdir, others.as_ref()))?;
-        }
-        if drops.is_empty() {
-            println!("oct: an install was cut short when the system went down; what it had not finished was removed");
-        } else {
-            let list: Vec<String> = drops.iter().map(|(n, v)| format!("{n}-{v}")).collect();
-            println!(
-                "oct: the system went down before {} was written to disk completely; removed.\n     \
-                 The next change installs again what the world names; `oct add` does it now.",
-                list.join(", ")
-            );
-        }
-    }
-    // Always rebuild the lookup index once after a reboot following unsynced
-    // adds: an in-place bucket write whose `state` didn't reach disk can
-    // otherwise leave stale claims under an older `state`.
-    crate::index::invalidate(&root);
-    db.reload()?;
-    crate::unsynced::remove(&root);
-    Ok(())
 }
 
 /// The mark a change leaves while it unpacks and switches.
@@ -489,9 +293,8 @@ pub fn open_readonly(o: &Options) -> Result<Db> {
 /// current (left by an interrupted run before its journal was written, or
 /// after it was deleted), and interrupted downloads in the cache. Entries
 /// of `Programs` that are not real directories, or whose `Current` is not
-/// valid, are left alone (and reported by [`Db::reload`]). `cut` is called
-/// with every version directory about to be deleted.
-fn gc(root: &Path, db: &Db, cut: &mut dyn FnMut(&Path)) -> Result<()> {
+/// valid, are left alone (and reported by [`Db::reload`]).
+fn gc(root: &Path, db: &Db) -> Result<()> {
     let programs = Db::programs(root);
     for e in fs::read_dir(&programs)? {
         let e = e?;
@@ -513,9 +316,6 @@ fn gc(root: &Path, db: &Db, cut: &mut dyn FnMut(&Path)) -> Result<()> {
             }
             let p = v.path();
             if v.file_type()?.is_dir() {
-                if !vn.ends_with(db::PARTIAL_SUFFIX) {
-                    cut(&p);
-                }
                 fs::remove_dir_all(&p)?;
             } else {
                 fs::remove_file(&p)?;
@@ -580,8 +380,10 @@ fn load_repos(
     cache_max_age: Option<std::time::Duration>,
 ) -> Result<(Vec<Repo>, Option<Http>, usize)> {
     let specs = repo_specs(o, root)?;
-    let remote = specs.iter().any(|s| repo::is_remote(&repo::locate(s, arch).0));
-    let http = if remote { Some(Http::new()?) } else { None };
+    // always there: a local index may name packages on a server, and the
+    // client costs nothing until a request is made (TLS is set up by the
+    // first https one)
+    let http = Some(Http::new()?);
     let vo = VerifyOptions { allow_untrusted: o.allow_untrusted, ..Default::default() };
     let cache = root.join(db::CACHE_DIR);
     let mut fresh = repo::Freshness::load(root, o.allow_rollback);
@@ -590,7 +392,7 @@ fn load_repos(
     let mut problems: usize = 0;
     let mut last_err: Option<Error> = None;
     for s in &specs {
-        match repo::load_with_cache(s, arch, keys, &vo, http.as_ref(), &cache, &fresh, cache_max_age, save_freshness) {
+        match repo::load_with_cache(s, arch, keys, &vo, http.as_ref(), &cache, &fresh, cache_max_age, save_freshness, !o.simulate) {
             Ok(r) => {
                 if r.stale {
                     problems += 1;
@@ -694,7 +496,14 @@ fn run_jobs(
                 warnings.lock().unwrap().extend(st.warnings.iter().map(|w| format!("{nv}: {w}")));
                 progress.finish_item(i, true, format!("{} entries, {}", st.entries, human(st.bytes)));
             }
-            Err(e) => fail(e),
+            Err(e) => {
+                // a downloaded file that turns out to be bad must not be met
+                // in the cache again by the next attempt
+                if js.url.is_some() && matches!(e, Error::Integrity(_) | Error::Format(_) | Error::Schema(_) | Error::Untrusted(_)) {
+                    let _ = fs::remove_file(&js.job.src);
+                }
+                fail(e)
+            }
         }
     };
     // writeback overlapping the unpacking: a helper thread syncs the file
@@ -716,8 +525,16 @@ fn run_jobs(
         }
         for _ in 0..workers {
             sc.spawn(|| {
+                // counted from a guard: a worker that panics is done as
+                // well, and the helper must not go on waiting for it
+                struct Done<'a>(&'a AtomicUsize);
+                impl Drop for Done<'_> {
+                    fn drop(&mut self) {
+                        self.0.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                let _done = Done(&workers_done);
                 worker();
-                workers_done.fetch_add(1, Ordering::Relaxed);
             });
         }
     });
@@ -810,6 +627,10 @@ fn transact_at(
     crate::prof::mark("  keys loaded");
     let (repos, http, _) =
         if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate, max_age)? } else { (Vec::new(), None, 0) };
+    // Never freed: an index is some twenty thousand small allocations, and
+    // giving each back took 0.6 ms at the end of every `add`, just before
+    // the process ends and the system takes all of it back at once.
+    let repos = std::mem::ManuallyDrop::new(repos);
     crate::prof::mark("repositories: read and verified");
     let u = Universe::with_arches(&repos, &db.installed, &arches);
     crate::prof::mark("  resolve: universe built");
@@ -865,6 +686,10 @@ fn transact_at(
     if ops.is_empty() {
         if !o.simulate && new_world != world_strings(&db.world) {
             db::write_atomic(&Db::state(&root).join("world"), db::format_world(&world).as_bytes())?;
+            if o.sync {
+                // the world's new name too, not only its content
+                fs::File::open(Db::state(&root))?.sync_all()?;
+            }
         }
         println!("OK: nothing to do; {} packages installed", db.installed.len());
         return Ok(true);
@@ -902,17 +727,16 @@ fn transact_at(
         commit::run_commit_hooks(&root, "pre-commit")?;
     }
 
-    // An add of new packages only, and of little, is not synced
-    // (crate::unsynced): nothing installed is replaced or removed, so a
-    // power cut can cost only the packages being added, and the next run
-    // finds and removes what is not whole. From 32 MiB on a change is
-    // synced as before: there the flushes are a few percent, and the
-    // helper below already overlaps them with the unpacking.
-    let unsynced = !ops.is_empty()
-        && ops.iter().all(|op| matches!(op, Op::Install { .. }))
-        && jobs.iter().map(|j| j.work).sum::<u64>() < HELPER_MIN_BYTES
-        && crate::unsynced::ensure(&root, &db.installed);
-    crate::prof::mark(if unsynced { "this add is not synced" } else { "this change is synced" });
+    // A change is light unless --sync asks otherwise (README, "One sync"):
+    // one syncfs puts the journal and everything it names on disk, the
+    // journal's rename into place is not fsync'ed, and the switch ends
+    // without a syncfs. Nothing in the live tree is touched before that one
+    // syncfs, and everything after it is done in an order the file system
+    // keeps, so what a power cut leaves is the change not begun (discarded
+    // by the next run) or begun (finished by it). A switch that runs a
+    // script puts the journal's name on disk first and syncs after it
+    // (`Switch::harden`).
+    let light = !o.sync;
 
     // fetch and unpack; the dirty mark makes the next run clean up after a
     // crash before the journal exists
@@ -971,6 +795,7 @@ fn transact_at(
                 news_st.push(PkgState::load(&Db::pkg_dir(&root, op.name(), v), true)?);
             }
         }
+        crate::prof::mark("  check: records of the change read");
         // the unchanged packages whose records matter: with a matching index
         // only those the switch will read (crate::index::wanted, as the switch decides)
         let wanted: Option<HashSet<String>> = db.index.as_ref().and_then(|ix| {
@@ -980,6 +805,7 @@ fn transact_at(
             crate::index::wanted(ix, &mut crate::rootfs::RootFs::new(&root), &db.installed, &names, &o, &n)
         });
         decided = wanted.clone();
+        crate::prof::mark("  check: index lookups");
         for (name, ip) in &db.installed {
             if !changed.contains(name.as_str()) && wanted.as_ref().map_or(true, |w| w.contains(name)) {
                 match PkgState::load(&ip.dir, false) {
@@ -993,6 +819,7 @@ fn transact_at(
         }
         finals.extend(news_st);
         olds_read = olds_st;
+        crate::prof::mark("  check: other records read");
         let (_, conflicts) = commit::ownership(&finals);
         if !conflicts.is_empty() {
             return Err(Error::Msg(format!("file conflicts:\n  {}", conflicts.join("\n  "))));
@@ -1009,6 +836,20 @@ fn transact_at(
     // the records read for the check go to the switch, which needs the same
     let mut pool = finals;
     pool.extend(olds_read);
+    // the copies under etc/ that the switch will rename into the live tree
+    // are made now, so that the syncfs below puts them on disk whole
+    {
+        let new_dirs: HashSet<PathBuf> =
+            ops.iter().filter_map(|op| op.new_version().map(|v| Db::pkg_dir(&root, op.name(), v))).collect();
+        let news: Vec<&PkgState> = pool.iter().filter(|p| new_dirs.contains(&p.dir)).collect();
+        if let Err(e) = commit::stage_copies(&root, &news) {
+            cleanup_new(&root, db, &ops);
+            if run_hooks {
+                let _ = commit::run_commit_hooks(&root, "post-commit");
+            }
+            return Err(e.into());
+        }
+    }
     crate::prof::mark("check: records, index lookups, ownership");
 
     // the switch
@@ -1023,28 +864,92 @@ fn transact_at(
     let index_stamp = reads.as_ref().map(|_| {
         crate::index::stamp(&db.installed.iter().map(|(n, ip)| (n.clone(), ip.meta.info.version.clone())).collect())
     });
-    // written under its temporary name first, so that one syncfs makes it
-    // durable together with everything unpacked; in effect only after that
+    // The journal and the world it ends with are written under temporary
+    // names; one syncfs puts them on disk with everything unpacked; only
+    // then is the journal renamed into place: a journal is never there
+    // before what it names. A full change fsyncs that rename; a light one
+    // does not (PendingJournal::commit_named says why that is enough).
+    // A light change through the index leaves nothing of the index to be
+    // written after its one syncfs: the index of after the change is
+    // written now, beside the current one, and the switch puts it in place
+    // by renames (index::stage). If that can't be done the switch updates
+    // the index its other way and ends with a syncfs.
+    let staged = match (&db.index, &reads) {
+        (Some(ix), Some(_)) if light => {
+            let names: HashSet<String> = changed.iter().map(|s| s.to_string()).collect();
+            let old_dirs: HashSet<PathBuf> =
+                ops.iter().filter_map(|op| op.old_version().map(|v| Db::pkg_dir(&root, op.name(), v))).collect();
+            let olds: Vec<&PkgState> = pool.iter().filter(|p| old_dirs.contains(&p.dir)).collect();
+            // in the order of the change, as the switch places them
+            let news: Vec<&PkgState> = ops
+                .iter()
+                .filter_map(|op| op.new_version().map(|v| Db::pkg_dir(&root, op.name(), v)))
+                .filter_map(|d| pool.iter().find(|p| p.dir == d))
+                .collect();
+            let mut metas: BTreeMap<String, &db::PkgMeta> = db
+                .installed
+                .iter()
+                .filter(|(n, _)| !changed.contains(n.as_str()))
+                .map(|(n, ip)| (n.clone(), &ip.meta))
+                .collect();
+            for p in &news {
+                metas.insert(p.meta.name().to_string(), &p.meta);
+            }
+            match crate::index::stage(&root, ix, &names, &olds, &news, &metas, &mut crate::rootfs::RootFs::new(&root)) {
+                Ok(st) => Some(st),
+                Err(e) => {
+                    eprintln!("oct: warning: index: {e}");
+                    crate::index::discard_staged(&root);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     let pending = JournalFile::prepare(
         &root,
-        Journal { ops: ops.clone(), world: new_world, reads, index: index_stamp, unsynced, done: Default::default() },
+        Journal {
+            ops: ops.clone(),
+            world: new_world,
+            reads,
+            index: index_stamp,
+            unsynced: false,
+            no_scripts: o.no_scripts,
+            closed_versions: true,
+            done: Default::default(),
+        },
     )?;
-    let jf = if unsynced {
-        pending.commit_unsynced(&root)?
-    } else {
-        sys::sync_fs(&fs::File::open(&root)?)?;
-        crate::unsynced::remove(&root);
-        crate::prof::mark("syncfs before the switch (packages and journal)");
-        pending.commit(&root)?
-    };
+    commit::sync_root(&root)?;
+    crate::prof::mark("syncfs before the switch (packages and journal)");
+    if o.crash_at.as_deref() == Some("synced") {
+        eprintln!("oct: CATALYST_CRASH_AT=synced: killed (test hook)");
+        sys::kill_self();
+    }
+    let jf = if light { pending.commit_named(&root)? } else { pending.commit(&root)? };
     crate::prof::mark("journal in effect");
     if o.crash_at.as_deref() == Some("journal") {
         eprintln!("oct: CATALYST_CRASH_AT=journal: killed (test hook)");
         sys::kill_self();
     }
-    let switch_res =
-        commit::switch(&root, &db.installed, jf, &SwitchOptions { unsynced, ..o.switch_opts() }, db.index.as_ref(), pool);
+    let switch_res = commit::switch(
+        &root,
+        &db.installed,
+        jf,
+        &SwitchOptions { light, ..o.switch_opts() },
+        db.index.as_ref(),
+        pool,
+        staged,
+    );
     if run_hooks {
+        // A hook may write, and sync, what it likes (a snapshot, a note of
+        // the change): like a script it must not get ahead of the change.
+        // So when there are hooks the change is put on disk before they
+        // run, also after a switch that failed and left its journal.
+        if light && !commit::discover_commit_hooks(&root).is_empty() {
+            if let Err(e) = commit::sync_root(&root) {
+                eprintln!("oct: warning: syncfs before the post-commit hooks: {e}");
+            }
+        }
         let _ = commit::run_commit_hooks(&root, "post-commit");
     }
     crate::prof::mark("switch: old versions deleted; post-commit hooks");
@@ -1130,6 +1035,41 @@ pub fn upgrade(o: &Options) -> Result<bool> {
     let mut db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let world = db.world.clone();
     transact(o, &mut db, world, Mode::Upgrade, HashSet::new(), true)
+}
+
+/// `recover`: finishes what an interrupted run left behind (a switch whose
+/// journal is there, what a run prepared and never began, an index half
+/// rebuilt) and does nothing else. It is what every other command does
+/// first; as a command of its own it is for the start of the system, so
+/// that a change cut by a power failure is finished before anyone logs in.
+/// When nothing was left, the root is not even locked (it may still be
+/// mounted read-only).
+pub fn recover(o: &Options) -> Result<bool> {
+    let root = abs_root(o, false)?;
+    let state = root.join(db::STATE_DIR);
+    let mut left: Vec<&str> = ["journal", "journal.new", "world.new", "dirty", "index.new", "index.old", "index/next"]
+        .into_iter()
+        .filter(|n| fs::symlink_metadata(state.join(n)).is_ok())
+        .collect();
+    if !stray_temporaries(&root).is_empty() {
+        left.push("temporary files");
+    }
+    if left.is_empty() {
+        println!("OK: nothing to finish");
+        return Ok(true);
+    }
+    if o.simulate {
+        println!("OK: simulated; would finish or clean up: {}", left.join(", "));
+        return Ok(true);
+    }
+    let mut db = open_locked(o)?;
+    let errors = settle(o, &mut db)?;
+    if errors > 0 {
+        println!("ERRORS: the interrupted switch was finished with {errors} errors; {} packages installed", db.installed.len());
+        return Ok(false);
+    }
+    println!("OK: finished; {} packages installed", db.installed.len());
+    Ok(true)
 }
 
 pub fn list(o: &Options) -> Result<bool> {
@@ -1403,7 +1343,10 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
             let keys = load_keys(o, root)?;
             match load_repos(o, root, &arches[0], &keys, false, Some(std::time::Duration::from_secs(60))) {
                 Ok((repos, _, _)) => repos_cache = Some(repos),
-                Err(_) => repos_cache = Some(Vec::new()),
+                Err(e) => {
+                    eprintln!("oct: warning: the repositories could not be read: {e}");
+                    repos_cache = Some(Vec::new())
+                }
             }
         }
         let best = repos_cache
@@ -1586,7 +1529,7 @@ pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
     // the index from the records as they are now: fix is where doubts end
     if !o.simulate && !blocked {
         match crate::index::rebuild(&db.root, &pkgs, true) {
-            Ok(()) => crate::unsynced::remove(&db.root),
+            Ok(()) => {}
             Err(e) => errors.push(format!("the index could not be written: {e}")),
         }
     }
@@ -1635,7 +1578,13 @@ fn rebuild_record(
     }
     let opts = VerifyOptions { allow_untrusted: o.allow_untrusted, expected_identity: Some(c.info.hashes.clone()), require_signature: false };
     // the whole file: signature or identity, and every file's content
-    verify::verify_file(&src, keys, &opts)?;
+    if let Err(e) = verify::verify_file(&src, keys, &opts) {
+        // a downloaded file that is bad does not stay in the cache
+        if url.is_some() && matches!(e, Error::Integrity(_) | Error::Format(_) | Error::Schema(_) | Error::Untrusted(_)) {
+            let _ = fs::remove_file(&src);
+        }
+        return Err(e);
+    }
     let f = fs::File::open(&src).map_err(|e| Error::Msg(format!("{}: {e}", src.display())))?;
     let pr = crate::adb::PackageReader::open(BufReader::new(f), keys, &opts)?;
     let pkg = pr.package().clone();

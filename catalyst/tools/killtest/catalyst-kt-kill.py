@@ -45,6 +45,8 @@ elif mode in ('step', 'script'):
     K, delay = int(K), float(delay)
 elif mode == 'file':
     watch, delay = param.rsplit('/', 1)
+    if not watch:
+        raise SystemExit('catalyst-kt-kill: file mode needs PATH/DELAY, got %r' % param)
     watch, delay = os.path.join(root, watch), float(delay)
     ino0 = os.lstat(watch).st_ino
 else:

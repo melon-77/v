@@ -68,9 +68,10 @@
 #                      updates the lookup index; the upgrade moves lib64, so it reads every
 #                      record and rebuilds the index.
 #   env KT_JOB=add     instead of the upgrade: add nano less tree htop tmux jq bc file
-#                      (new packages only, under 32 MiB: an add that is not synced,
-#                      src/unsynced.rs). The kill modes that need an upgraded file or a
-#                      script are left out of the default rotation.
+#                      (new packages only). The kill modes that need an upgraded file or
+#                      a script are left out of the default rotation.
+#   env KT_JOB=del     the removal of those eight from a root that has them (the same
+#                      rotation as add)
 # Exit status 0 when every round passes. Writes only under /root/catalyst-test.
 set -u
 ROUNDS=${1:-80}
@@ -108,6 +109,10 @@ fresh() {  # fresh ROOT: valence-base from the real repository, plus an admin ed
     safe_rm $1
     $V --root $1 --initdb --repository $R1 --keys-dir $KD --plain add valence-base > $1.install.log 2>&1 \
         || die "install into $1 failed: $1.install.log"
+    if [ -n "${PREP:-}" ]; then   # what the job removes
+        $V --root $1 --repository $R1 --keys-dir $KD --plain add $PREP >> $1.install.log 2>&1 \
+            || die "install of $PREP into $1 failed: $1.install.log"
+    fi
     echo "# admin was here" >> $1/etc/fstab
     touch -d @1795000000 $1/etc/fstab   # a fixed mtime, so roots compare equal
 }
@@ -115,7 +120,8 @@ case ${KT_JOB:-upgrade} in
     upgrade) JOB="upgrade";;
     small) JOB="add -u coreutils util-linux shadow gzip nano";;
     add) JOB="add nano less tree htop tmux jq bc file"; : ${KT_MODES:="time journal step+thr step+thr gone step+thr"};;
-    *) die "KT_JOB is upgrade, small or add";;
+    del) PREP="nano less tree htop tmux jq bc file"; JOB="del $PREP"; : ${KT_MODES:="time journal step+thr step+thr gone step+thr"};;
+    *) die "KT_JOB is upgrade, small, add or del";;
 esac
 upg() { echo "$V --root $1 --repository $R1 --repository $R3 --keys-dir $KD --plain $JOB"; }
 calc() { awk "BEGIN{printf \"%.4f\", $*}"; }
@@ -180,15 +186,16 @@ T_START=$(date +%s)
 
 # ------------------------------------------------------------ rounds
 MODES=(${KT_MODES:-time file journal file+thr double step+thr gone script file})
-FAILS=0; NKILLED=0; KEPT=0; NHALF=0
+FAILS=0; NKILLED=0; KEPT=0; NHALF=0; NFILE=0; NFILEK=0
 printf '%3s %-8s %-14s %-44s %-46s %s\n' "#" mode "killed in" "when (kill helper mode and parameter)" "state at the kill (journal; Current links)" "half-placed packages | scripts re-run | result" | tee $KT/results.txt
 for i in $(seq 1 $ROUNDS); do
     mode=${MODES[$(( (i - 1) % ${#MODES[@]} ))]}
     case $mode in
         time) km=time; p=$(rnd $i $TW);;
         journal) km=journal; p=$(rnd $i $SWW);;
-        file|double) km=file; p="$($CHK pickfile $KT/ref.json $SEED-$i 9999-r0)/0";;
-        file+thr) km=file+throttle; p="$($CHK pickfile $KT/ref.json $SEED-$i 9999-r0)/0";;
+        # a round that watches no file would kill nothing and pass: no file is an error of the test itself
+        file|double) km=file; pf="$($CHK pickfile $KT/ref.json $SEED-$i 9999-r0)"; [ -n "$pf" ] || { echo "ABORT: pickfile gave no file (round $i)"; exit 2; }; p="$pf/0";;
+        file+thr) km=file+throttle; pf="$($CHK pickfile $KT/ref.json $SEED-$i 9999-r0)"; [ -n "$pf" ] || { echo "ABORT: pickfile gave no file (round $i)"; exit 2; }; p="$pf/0";;
         step+thr) km=step+throttle; p="$(( $(rndi $i $(( MMAX - 1 ))) + 1 ))/0";;
         gone) km=gone; p=$(rnd $i $GW);;
         script) km=script; p="$(( $(rndi $i $(( SMAX - 1 ))) + 1 ))/$(rnd $i-d 0.003)";;
@@ -199,6 +206,8 @@ for i in $(seq 1 $ROUNDS); do
     res=$($KILL $km $p $T $KT/run1.log -- $(upg $T))
     killed=$(kv "$res" killed)
     [ "$killed" = 1 ] && NKILLED=$((NKILLED + 1))
+    # the rounds that watch a file of the change: the ones meant to leave a package half placed
+    case $km in file*) NFILE=$((NFILE + 1)); [ "$killed" = 1 ] && NFILEK=$((NFILEK + 1));; esac
     fail=""
     { echo "=== round $i: mode $mode ($km $p): $res"; sed 's/^/    | /' $KT/run1.log | tail -4; } >> $L
     ph="completed"; half="-"
@@ -261,4 +270,11 @@ echo "=== $ROUNDS rounds in $(( $(date +%s) - T_START ))s: $NKILLED killed while
 echo "    killed in: $(tail -n +2 $KT/results.txt | awk '{print $3}' | sort | uniq -c | awk '{printf "%s %s, ", $1, ($2 == "-" ? "(not killed)" : $2)}')"
 echo "    results in $KT/results.txt, every round's log in $KT/all-rounds.log"
 grep -q catalyst-test /proc/mounts && echo "WARNING: mounts under /root/catalyst-test"
-[ $FAILS = 0 ]
+[ $FAILS = 0 ] || exit 1
+# A kill can come too late in one round. When none of the rounds that watch a file killed anything, the test
+# has not done what it is for (as when the checker's pickfile failed and every such round passed unkilled).
+if [ $NFILE -gt 0 ] && [ $NFILEK = 0 ]; then
+    echo "INCONCLUSIVE: none of the $NFILE rounds that watch a file killed catalyst"
+    exit 3
+fi
+exit 0

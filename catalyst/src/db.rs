@@ -227,14 +227,59 @@ pub fn format_files(recs: &[FileRec]) -> Vec<u8> {
 }
 
 pub fn parse_files(text: &str) -> Result<Vec<FileRec>> {
-    let mut v = Vec::new();
+    // A big record (Cataclysm's has 8,500 lines, which took 7 ms) is cut at
+    // line ends into parts that are parsed on several threads. If a part
+    // fails, the whole text goes the one-thread way, which names the line.
+    const PART: usize = 128 * 1024;
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min(text.len() / PART);
+    parse_files_on(text, threads)
+}
+
+/// [`parse_files`] with the text cut into `threads` parts (fewer than two:
+/// all of it on this thread).
+fn parse_files_on(text: &str, threads: usize) -> Result<Vec<FileRec>> {
+    if threads >= 2 {
+        let size = text.len() / threads;
+        let mut parts: Vec<&str> = Vec::with_capacity(threads);
+        let mut rest = text;
+        while parts.len() + 1 < threads && rest.len() > size {
+            let Some(p) = rest.as_bytes()[size..].iter().position(|&c| c == b'\n') else { break };
+            let (a, b) = rest.split_at(size + p + 1);
+            parts.push(a);
+            rest = b;
+        }
+        parts.push(rest);
+        let parsed: Vec<Result<Vec<FileRec>>> = std::thread::scope(|sc| {
+            let hs: Vec<_> = parts.iter().map(|&p| sc.spawn(move || parse_file_lines(p))).collect();
+            hs.into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err(Error::Format("files: a worker thread failed".into()))))
+                .collect()
+        });
+        if parsed.iter().all(|r| r.is_ok()) {
+            let mut v = Vec::with_capacity(parsed.iter().map(|r| r.as_ref().map_or(0, |v| v.len())).sum());
+            for r in parsed {
+                v.extend(r?);
+            }
+            return Ok(v);
+        }
+    }
+    parse_file_lines(text)
+}
+
+fn parse_file_lines(text: &str) -> Result<Vec<FileRec>> {
+    let mut v = Vec::with_capacity(text.len() / 96);
     for (n, line) in text.lines().enumerate() {
         if line.is_empty() {
             continue;
         }
         let bad = || Error::Format(format!("files line {}: malformed", n + 1));
-        let f: Vec<&str> = line.split('\t').collect();
-        if f.len() != 10 {
+        // exactly ten fields
+        let mut f = [""; 10];
+        let mut fields = line.split('\t');
+        for slot in f.iter_mut() {
+            *slot = fields.next().ok_or_else(bad)?;
+        }
+        if fields.next().is_some() {
             return Err(bad());
         }
         let num = |s: &str| s.parse::<u64>().map_err(|_| bad());
@@ -545,6 +590,12 @@ impl Db {
     pub fn journal_pending_path(root: &Path) -> PathBuf {
         root.join(STATE_DIR).join("journal.new")
     }
+    /// The world a change ends with, written with its journal before the
+    /// switch; one left without a journal belongs to a change that never
+    /// began and goes.
+    pub fn world_pending_path(root: &Path) -> PathBuf {
+        root.join(STATE_DIR).join("world.new")
+    }
 
     fn own_dirs(root: &Path) -> [PathBuf; 6] {
         [
@@ -745,43 +796,27 @@ pub fn format_world(world: &[Dependency]) -> String {
     s
 }
 
-/// Writes the world for a switch that is not synced ([`crate::unsynced`]):
-/// nothing that is in the file may be lost to a power cut. When the new
-/// world only adds entries, they are appended and the bytes already there
-/// are not rewritten (the file is then not sorted; it is read as a set and
-/// sorted again by the next synced change). Otherwise the new file is put
-/// on disk before it replaces the old one.
-pub fn write_world_unsynced(root: &Path, world: &[Dependency]) -> io::Result<()> {
+/// The world step of a switch. The new world was written as `world.new`
+/// before the syncfs that preceded the switch ([`JournalFile::prepare`]),
+/// so renaming it into place puts on disk a name whose content is already
+/// there. A re-run finds the rename done. Without a `world.new` that says
+/// what the plan says (a journal written by an older catalyst), the world is
+/// written with an fsync of its own.
+pub fn switch_world(root: &Path, world: &[Dependency]) -> io::Result<()> {
     let p = Db::state(root).join("world");
-    let new = format_world(world);
-    let old = match fs::read_to_string(&p) {
-        Ok(t) => t,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e),
-    };
-    let have: std::collections::HashSet<&str> = old.split_whitespace().collect();
-    let want: Vec<&str> = new.split_whitespace().collect();
-    if have.iter().all(|w| want.contains(w)) {
-        let mut add = String::new();
-        for w in want.iter().filter(|w| !have.contains(*w)) {
-            add.push_str(w);
-            add.push('\n');
+    let staged = Db::world_pending_path(root);
+    let want = format_world(world);
+    match fs::read(&staged) {
+        Ok(b) if b == want.as_bytes() => return fs::rename(&staged, &p),
+        Ok(_) => {
+            let _ = fs::remove_file(&staged);
         }
-        if add.is_empty() {
-            return Ok(());
-        }
-        if !old.is_empty() && !old.ends_with('\n') {
-            add.insert(0, '\n');
-        }
-        return OpenOptions::new().append(true).create(true).open(&p)?.write_all(add.as_bytes());
+        Err(_) => {}
     }
-    let tmp = p.with_extension("catalyst-tmp");
-    {
-        let mut f = File::create(&tmp)?;
-        f.write_all(new.as_bytes())?;
-        f.sync_data()?;
+    if fs::read(&p).map_or(false, |b| b == want.as_bytes()) {
+        return Ok(());
     }
-    fs::rename(&tmp, &p)
+    write_atomic(&p, want.as_bytes())
 }
 
 /// Writes a file atomically: temporary name, fsync, rename.
@@ -855,10 +890,22 @@ pub struct Journal {
     /// `None`: every record).
     pub reads: Option<Vec<String>>,
     pub index: Option<String>,
-    /// Put in effect without a `syncfs` (an add that is not synced,
-    /// [`crate::unsynced`]): after the system went down, what it installs
-    /// is checked before it is finished.
+    /// Written by the catalyst of 23 November 2026 only, for an add it put
+    /// in effect without any sync (see `unsynced.rs`). Never set now; a
+    /// journal that has it is finished like any other, with a note.
     pub unsynced: bool,
+    /// The change was asked for with `--no-scripts`: whoever finishes it
+    /// after an interruption runs no script and no trigger either (a
+    /// journal written before this was recorded is finished with the
+    /// options of the command that finishes it).
+    pub no_scripts: bool,
+    /// The new versions of this change are closed (mode 0700) until the
+    /// switch has given their entries their final owners, and are opened
+    /// then: one that is found open has had that done, and is not gone
+    /// through by path again (other users can enter it by then). A journal
+    /// written before this was recorded has versions that were open from
+    /// the start.
+    pub closed_versions: bool,
     pub done: std::collections::HashSet<String>,
 }
 
@@ -886,12 +933,21 @@ impl Journal {
         if self.unsynced {
             s.push_str("unsynced\n");
         }
+        if self.no_scripts {
+            s.push_str("no-scripts\n");
+        }
+        if self.closed_versions {
+            s.push_str("closed-versions\n");
+        }
         s.push_str("end\n");
         s
     }
 
     pub fn parse(t: &str) -> Result<Journal> {
         let mut j = Journal::default();
+        // only whole lines count: a last line without its newline is a done
+        // mark that was cut while it was written
+        let t = t.rfind('\n').map_or("", |i| &t[..=i]);
         let mut lines = t.lines();
         if lines.next() != Some("catalyst-journal 1") {
             return Err(Error::Format("journal: bad header".into()));
@@ -912,6 +968,8 @@ impl Journal {
                     j.reads = Some(f[1..].iter().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
                 }
                 ("unsynced", 1) if !ended => j.unsynced = true,
+                ("no-scripts", 1) if !ended => j.no_scripts = true,
+                ("closed-versions", 1) if !ended => j.closed_versions = true,
                 ("end", 1) => ended = true,
                 ("done", 2) if ended => {
                     j.done.insert(f[1].into());
@@ -961,15 +1019,20 @@ impl PendingJournal {
         let p = Db::journal_path(root);
         fs::rename(Db::journal_pending_path(root), &p)?;
         File::open(Db::state(root))?.sync_all()?;
+        crate::prof::mark("  journal: its name fsync'ed");
         let f = OpenOptions::new().append(true).open(&p)?;
         Ok(JournalFile { f, plan: self.plan })
     }
 
-    /// Puts the journal in effect without making it durable, for an add
-    /// that is not synced ([`crate::unsynced`]). It still guides the next
-    /// run after this process is killed; a power cut may take it, and what
-    /// it installs, away.
-    pub fn commit_unsynced(self, root: &Path) -> Result<JournalFile> {
+    /// Puts the journal in effect by its rename alone, for a light change
+    /// (every change without `--sync`; README, "One sync"). Called, like
+    /// [`commit`](Self::commit), after the syncfs that put the journal's
+    /// content and everything it names on disk. The rename is the first
+    /// thing the switch does to the file system, so on a file system that
+    /// commits what was not fsync'ed in the order it was done, nothing the
+    /// switch does can be on disk without it; `Switch::harden` fsyncs the
+    /// directory before a script runs, which may not rest on that.
+    pub fn commit_named(self, root: &Path) -> Result<JournalFile> {
         let p = Db::journal_path(root);
         fs::rename(Db::journal_pending_path(root), &p)?;
         let f = OpenOptions::new().append(true).open(&p)?;
@@ -981,20 +1044,38 @@ impl JournalFile {
     /// Writes the plan under the journal's temporary name, without an
     /// fsync: the syncfs before the switch makes it durable together with
     /// the unpacked packages, then [`PendingJournal::commit`] renames it.
+    ///
+    /// The world the plan ends with is written beside it, as `world.new`:
+    /// the same syncfs puts it on disk, and the switch renames it into
+    /// place ([`switch_world`]), so the world is never a name whose content
+    /// has not reached the disk.
     pub fn prepare(root: &Path, plan: Journal) -> Result<PendingJournal> {
+        let world: Vec<Dependency> = plan.world.iter().filter_map(|w| Dependency::parse(w).ok()).collect();
+        fs::write(Db::world_pending_path(root), format_world(&world))?;
         fs::write(Db::journal_pending_path(root), plan.format())?;
         Ok(PendingJournal { plan })
     }
 
     pub fn open(root: &Path) -> Result<Option<JournalFile>> {
         let p = Db::journal_path(root);
-        let t = match fs::read_to_string(&p) {
-            Ok(t) => t,
+        // marks appended without a sync can come back from a power cut as
+        // anything: read as bytes, so that such a tail does not make the
+        // plan before it unreadable
+        let b = match fs::read(&p) {
+            Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let plan = Journal::parse(&t)?;
+        let plan = Journal::parse(&String::from_utf8_lossy(&b))?;
         let f = OpenOptions::new().append(true).open(&p)?;
+        // A torn last mark is cut off, so that the next one starts on a
+        // line of its own. It is not completed with a newline: what is left
+        // of `done placed:zstd-libs` may read `done placed:zstd`, a whole
+        // mark of another package for the next reader.
+        let keep = b.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
+        if keep < b.len() {
+            f.set_len(keep as u64)?;
+        }
         Ok(Some(JournalFile { f, plan }))
     }
 
@@ -1117,11 +1198,27 @@ mod tests {
             reads: Some(vec!["d".into(), "e".into()]),
             index: Some("ab".repeat(32)),
             unsynced: false,
+            no_scripts: false,
+            closed_versions: false,
             done: Default::default(),
         };
+        // the line an earlier catalyst wrote is still read
         let u = Journal { unsynced: true, ..j.clone() };
         assert!(u.format().contains("\nunsynced\nend\n"));
         assert!(Journal::parse(&u.format()).unwrap().unsynced && !Journal::parse(&j.format()).unwrap().unsynced);
+        // a change asked for without scripts says so, for whoever finishes it
+        let n = Journal { no_scripts: true, ..j.clone() };
+        assert!(n.format().ends_with("\nno-scripts\nend\n") && !j.format().contains("no-scripts"));
+        assert!(Journal::parse(&n.format()).unwrap().no_scripts && !Journal::parse(&j.format()).unwrap().no_scripts);
+        // new versions closed until their owners are final: said too
+        let c = Journal { closed_versions: true, ..n.clone() };
+        assert!(c.format().ends_with("\nno-scripts\nclosed-versions\nend\n"));
+        assert!(Journal::parse(&c.format()).unwrap().closed_versions && !Journal::parse(&n.format()).unwrap().closed_versions);
+        // marks: whole lines only; a cut last one does not count
+        let t = format!("{}done placed:a\ndone placed:b", j.format());
+        let p = Journal::parse(&t).unwrap();
+        assert!(p.done.contains("placed:a") && !p.done.contains("placed:b"));
+        assert!(Journal::parse(&j.format()[..j.format().len() - 1]).is_err(), "a plan cut before its end");
         let mut t = j.format();
         t.push_str("done pre:a\ndon");
         let p = Journal::parse(&t).unwrap();
@@ -1132,5 +1229,69 @@ mod tests {
         assert!(p.done.contains("pre:a"));
         assert!(Journal::parse("catalyst-journal 1\ninstall a 1\n").is_err());
         assert!(Journal::parse("catalyst-journal 1\ninstall ../a 1\nend\n").is_err());
+    }
+
+    /// A big record is parsed in parts on several threads: the result is
+    /// that of the one-thread parser, and an error names the same line.
+    #[test]
+    fn a_big_record_parsed_in_parts_is_the_same() {
+        let recs: Vec<FileRec> = (0..6000)
+            .map(|i| FileRec {
+                kind: if i % 50 == 0 { RecKind::Dir } else { RecKind::File(FileKind::Regular) },
+                mode: 0o644,
+                user: Some("root".into()),
+                group: Some("root".into()),
+                size: i,
+                mtime: 1_700_000_000 + i,
+                hash: if i % 50 == 0 { vec![] } else { vec![(i % 251) as u8; 32] },
+                xattrs: vec![],
+                path: format!("usr/share/a-package-with-many-files/dir{}/file-{i}-with-a-long-name.json", i / 50).into_bytes(),
+            })
+            .collect();
+        let text = String::from_utf8(format_files(&recs)).unwrap();
+        assert!(text.len() > 4 * 128 * 1024, "big enough for several parts: {}", text.len());
+        // in four parts whatever this machine has (with one CPU parse_files
+        // would not cut the text at all)
+        let parsed = parse_files_on(&text, 4).unwrap();
+        assert_eq!(parsed.len(), 6000);
+        assert_eq!(parse_files(&text).unwrap().len(), 6000);
+        assert!(format_files(&parsed) == text.as_bytes() && format_files(&parse_file_lines(&text).unwrap()) == text.as_bytes());
+        // a bad line far into the text: the same error either way
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines[5899] = "f\t0644\tnot enough fields";
+        let bad = lines.join("\n") + "\n";
+        let (a, b) = (parse_files_on(&bad, 4).unwrap_err().to_string(), parse_file_lines(&bad).unwrap_err().to_string());
+        assert!(a == b && a.contains("line 5900"), "{a} / {b}");
+        // without its last newline, and with empty lines
+        assert_eq!(parse_files_on(text.trim_end(), 4).unwrap().len(), 6000);
+        assert_eq!(parse_files_on(&text.replace("\nd\t", "\n\nd\t"), 4).unwrap().len(), 6000);
+    }
+
+    /// A journal whose last mark was cut while it was written: the mark
+    /// does not count, and it is cut off, not completed, so that it does
+    /// not count for the next reader either.
+    #[test]
+    fn a_torn_mark_of_the_journal_is_cut_off() {
+        let root = std::env::temp_dir().join(format!("catalyst-journal-torn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(Db::state(&root)).unwrap();
+        let j = Journal {
+            ops: vec![Op::Install { name: "zstd-libs".into(), new: "1".into() }, Op::Install { name: "zstd".into(), new: "1".into() }],
+            ..Default::default()
+        };
+        // "done placed:zstd-libs" cut after "zstd"
+        let whole = format!("{}done start\n", j.format());
+        fs::write(Db::journal_path(&root), format!("{whole}done placed:zstd")).unwrap();
+        for _ in 0..2 {
+            let jf = JournalFile::open(&root).unwrap().unwrap();
+            assert!(jf.is_done("start") && !jf.is_done("placed:zstd"));
+            drop(jf);
+            assert_eq!(fs::read_to_string(Db::journal_path(&root)).unwrap(), whole);
+        }
+        let mut jf = JournalFile::open(&root).unwrap().unwrap();
+        jf.mark_with("placed:zstd-libs", false).unwrap();
+        drop(jf);
+        assert_eq!(fs::read_to_string(Db::journal_path(&root)).unwrap(), format!("{whole}done placed:zstd-libs\n"));
+        fs::remove_dir_all(&root).unwrap();
     }
 }

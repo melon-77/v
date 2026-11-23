@@ -6,6 +6,14 @@ use std::time::Instant;
 
 static CLOCK: OnceLock<Option<Mutex<(Instant, Instant)>>> = OnceLock::new();
 
+/// Prints a time that was added up apart from the marks (a part of a step
+/// that is spread over it).
+pub fn part(label: &str, d: std::time::Duration) {
+    if let Some(Some(_)) = CLOCK.get() {
+        eprintln!("prof: {:8.1} ms {:8.1} ms  {label}", d.as_secs_f64() * 1000.0, 0.0);
+    }
+}
+
 /// Prints the time since the previous mark (and since the first), then `label`.
 pub fn mark(label: &str) {
     let clock = CLOCK.get_or_init(|| {

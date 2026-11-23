@@ -13,22 +13,38 @@
 //! - `meta` holds every package's `info`, so that opening a root reads one
 //!   file instead of one per package; in binary form ([`crate::codec`]),
 //!   which reads back in a fifth of the time the text records take.
-//! - `files/XXX` (4096 buckets by a hash of the path) hold, per path, the
-//!   packages that have a non-directory entry there and those that have a
-//!   directory there. A change reads and rewrites only the buckets of its
-//!   own paths.
+//! - `files/XXX` hold, per path, the packages that have a non-directory
+//!   entry there and those that have a directory there: 65,536 buckets by
+//!   a hash of the path, 128 to a file (512 segment files). A change reads
+//!   only the buckets of its own paths and rewrites only their segments; a
+//!   bucket it does not touch is written back as it was read. (With 4,096
+//!   buckets, one to a file, the removal of a big package read some 3,700
+//!   files and deleted 3,000, each a wait for the directory's lock; and on
+//!   a system of 80,000 files every bucket it touched held twenty paths of
+//!   other packages, which were parsed, copied and written out again: 80 ms
+//!   of a 180 ms removal. A bucket now holds a path or two.)
 //! - `aliases` holds the entries that reach another place through a
 //!   directory symlink (canonical path, literal path, package).
 //!
 //! Every file of the index is checked when it is read: `state` holds which
 //! buckets are not empty, the SHA-256 of `meta` and of `aliases`, and a sum
-//! of itself; each bucket starts with the SHA-256 of the rest of it. A
+//! of itself; a segment file starts with a checksum of the rest of it (16
+//! hex digits of its SHA-256: against damage, not against a forger, who
+//! could write the root anyway), then the length of each of its buckets. A
 //! missing, truncated or changed file makes the index unusable, and the
 //! change reads every record instead. Before a change goes through the
 //! index, everything it may look up there is read ([`Index::preload`]), so
 //! that damage is found before the switch, not in the middle of it.
 //!
-//! A change updates the index inside the switch, before its final
+//! A change that ends without a `syncfs` (README, "One sync") writes
+//! nothing of the index after its one `syncfs`: the index of after the
+//! change is worked out and written beside the current one, in `next/`,
+//! before that `syncfs` ([`stage`]), and at the end of the switch it is put
+//! in place by renames alone, `state` removed first and renamed in last
+//! ([`commit_staged`]). So whatever a power cut leaves has either no
+//! `state` (the index is rebuilt) or the new one with every file it
+//! describes whole on disk. A change that syncs at its end (`--sync`, or a
+//! script ran) updates the index inside the switch, before that final
 //! `syncfs`, without an fsync per file (`state` removed first and written
 //! last). A crash before that `syncfs` leaves the journal, which names the
 //! records the switch reads and the index it was planned with. Finishing an
@@ -40,13 +56,18 @@
 //! index is written beside the old one, synced, and swapped in.
 //!
 //! The index is canonical: the same installed packages give the same files,
-//! whether it was updated change by change or rebuilt.
+//! whether it was updated change by change or rebuilt. One exception: the
+//! list of directory symlinks in `state` is carried over by an update and
+//! worked out afresh by a rebuild, so the two differ when a symlink of a
+//! package the change does not touch starts or stops leading to a directory
+//! (another package brings or takes away the directory it points at).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::commit::PkgState;
 use crate::adb::FileKind;
@@ -56,11 +77,36 @@ use crate::error::{Error, Result};
 use crate::rootfs::{self, RootFs};
 
 pub const INDEX_DIR: &str = "var/lib/catalyst/index";
-// 3: `meta` in binary form (an index of an older form is rebuilt)
-const HEADER: &str = "catalyst-index 3";
-/// A bucket file's first line: this, a space, and the SHA-256 of the rest.
-const BUCKET_HEADER: &str = "catalyst-bucket";
-const BUCKETS: u32 = 4096;
+// 3: `meta` in binary form; 4: 4,096 buckets, eight to a file, a checksum
+// per bucket (never released); 5: 65,536 buckets, 128 to a file, one
+// checksum per file. An index of another form is rebuilt.
+const HEADER: &str = "catalyst-index 5";
+/// A segment's checksum: this many hex digits of a SHA-256.
+const SUM_LEN: usize = 16;
+const BUCKETS: u32 = 65536;
+/// How many buckets one file of `files/` holds.
+const PER_SEGMENT: u32 = 128;
+/// A segment file's first line: this and the checksum of everything after
+/// that line. The second line: the length in bytes of each of its buckets
+/// (0: an empty one). The buckets follow, one after another: a line per
+/// path, with the packages that have a non-directory entry there and those
+/// that have a directory there.
+const SEGMENT_HEADER: &str = "catalyst-segment";
+
+/// A segment file as read (and checked): its text, and where each of its
+/// buckets is in it.
+struct Segment {
+    text: String,
+    at: Vec<(usize, usize)>,
+}
+
+impl Segment {
+    /// The text of bucket `b` (empty: an empty bucket).
+    fn bucket(&self, b: u32) -> &str {
+        let (from, to) = self.at[(b % PER_SEGMENT) as usize];
+        &self.text[from..to]
+    }
+}
 
 fn bucket_of(path: &[u8]) -> u32 {
     // FNV-1a
@@ -72,8 +118,12 @@ fn bucket_of(path: &[u8]) -> u32 {
     h % BUCKETS
 }
 
-fn bucket_name(b: u32) -> String {
-    format!("{b:03x}")
+fn segment_of(b: u32) -> u32 {
+    b / PER_SEGMENT
+}
+
+fn segment_name(s: u32) -> String {
+    format!("{s:03x}")
 }
 
 /// The directory of the index of `root`.
@@ -112,22 +162,16 @@ fn parse_names(f: &str) -> Vec<String> {
 }
 
 fn parse_bucket(text: &str) -> Result<Bucket> {
-    let damaged = || Error::Format("index: damaged bucket".into());
-    let (head, body) = text.split_once('\n').ok_or_else(damaged)?;
-    let sum = head.strip_prefix(BUCKET_HEADER).and_then(|s| s.strip_prefix(' ')).ok_or_else(damaged)?;
-    if sum_of(body.as_bytes()) != sum {
-        return Err(damaged());
-    }
     let mut b = Bucket::new();
-    for line in body.lines() {
+    for line in text.lines() {
         if line.is_empty() {
             continue;
         }
-        let f: Vec<&str> = line.split('\t').collect();
-        if f.len() != 3 {
+        let mut f = line.split('\t');
+        let (Some(path), Some(files), Some(dirs), None) = (f.next(), f.next(), f.next(), f.next()) else {
             return Err(Error::Format("index: malformed bucket line".into()));
-        }
-        b.insert(unescape(f[0])?, Claims { files: parse_names(f[1]), dirs: parse_names(f[2]) });
+        };
+        b.insert(unescape(path)?, Claims { files: parse_names(files), dirs: parse_names(dirs) });
     }
     Ok(b)
 }
@@ -137,7 +181,7 @@ fn format_bucket(b: &Bucket) -> String {
     for (p, c) in b {
         body.push_str(&format!("{}\t{}\t{}\n", escape(p), names_field(&c.files), names_field(&c.dirs)));
     }
-    format!("{BUCKET_HEADER} {}\n{body}", sum_of(body.as_bytes()))
+    body
 }
 
 fn sum_of(data: &[u8]) -> String {
@@ -195,6 +239,8 @@ pub struct Index {
     meta_sum: String,
     aliases_sum: String,
     buckets: std::cell::RefCell<HashMap<u32, Bucket>>,
+    /// The segment files read so far, as they were read.
+    segs: std::cell::RefCell<HashMap<u32, Arc<Segment>>>,
     aliases: std::cell::RefCell<Option<HashMap<Vec<u8>, Vec<(Vec<u8>, String)>>>>,
     /// Each package's `info` as `meta` held it: an update writes these
     /// back for the packages it doesn't change instead of formatting them.
@@ -260,6 +306,7 @@ impl Index {
             meta_sum: st.meta_sum,
             aliases_sum: st.aliases_sum,
             buckets: Default::default(),
+            segs: Default::default(),
             aliases: Default::default(),
             raw_meta: Default::default(),
         })
@@ -292,18 +339,29 @@ impl Index {
     }
 
     /// Bucket `b`, read and checked once (lookups then use the copy). A bucket
-    /// marked as not empty whose file is missing or damaged is an error.
+    /// marked as not empty whose segment is missing or damaged is an error.
     fn load(&self, b: u32) -> Result<()> {
-        if !self.buckets.borrow().contains_key(&b) {
-            let bk = read_bucket(&self.dir, &self.present, b)?;
-            self.buckets.borrow_mut().insert(b, bk);
+        if self.buckets.borrow().contains_key(&b) {
+            return Ok(());
         }
+        let bk = if has(&self.present, b) { bucket_in(&*self.segment(segment_of(b))?, b)? } else { Bucket::new() };
+        self.buckets.borrow_mut().insert(b, bk);
         Ok(())
     }
 
-    /// Like [`Index::load`] for many buckets: a big change touches thousands,
-    /// and read one after another from a cold cache each is a wait for the
-    /// disk, so they are read on several threads.
+    /// Segment `s` as its file holds it (read once).
+    fn segment(&self, s: u32) -> Result<Arc<Segment>> {
+        if let Some(seg) = self.segs.borrow().get(&s) {
+            return Ok(seg.clone());
+        }
+        let seg = Arc::new(read_segment(&self.dir, s)?);
+        self.segs.borrow_mut().insert(s, seg.clone());
+        Ok(seg)
+    }
+
+    /// Like [`Index::load`] for many buckets: a big change touches nearly
+    /// all of them, and read one after another from a cold cache each file
+    /// is a wait for the disk, so the segments are read on several threads.
     fn load_many(&self, ids: impl IntoIterator<Item = u32>) -> Result<()> {
         let mut todo: Vec<u32> = {
             let c = self.buckets.borrow();
@@ -311,12 +369,57 @@ impl Index {
         };
         todo.sort_unstable();
         todo.dedup();
-        // only the path and the bit map go to the threads (the index's caches are not Sync)
-        let (dir, present) = (&self.dir, &self.present);
-        for (b, bk) in on_threads(&todo, |&b| read_bucket(dir, present, b).map(|bk| (b, bk)))? {
-            self.buckets.borrow_mut().insert(b, bk);
+        // per segment: the buckets wanted of it that are not empty, and its
+        // text if it was read before
+        let mut groups: Vec<(u32, Vec<u32>, Option<Arc<Segment>>)> = Vec::new();
+        for b in todo {
+            if !has(&self.present, b) {
+                self.buckets.borrow_mut().insert(b, Bucket::new());
+                continue;
+            }
+            let s = segment_of(b);
+            match groups.last_mut() {
+                Some((gs, bs, _)) if *gs == s => bs.push(b),
+                _ => groups.push((s, vec![b], self.segs.borrow().get(&s).cloned())),
+            }
+        }
+        crate::prof::mark("      index: segments chosen");
+        // only the path goes to the threads (the index's caches are not Sync)
+        let dir = &self.dir;
+        let read = on_threads(&groups, |(s, bs, known)| -> Result<(Arc<Segment>, Vec<Bucket>)> {
+            let seg = match known {
+                Some(seg) => seg.clone(),
+                None => Arc::new(read_segment(dir, *s)?),
+            };
+            let parsed = bs.iter().map(|&b| bucket_in(&seg, b)).collect::<Result<Vec<Bucket>>>()?;
+            Ok((seg, parsed))
+        })?;
+        crate::prof::mark("      index: segments read and their buckets parsed");
+        for ((s, bs, _), (seg, parsed)) in groups.iter().zip(read) {
+            self.segs.borrow_mut().insert(*s, seg);
+            for (b, bk) in bs.iter().zip(parsed) {
+                self.buckets.borrow_mut().insert(*b, bk);
+            }
         }
         Ok(())
+    }
+
+    /// Each of these segments with its text as its file holds it, read where
+    /// it was not yet (`None`: none of its buckets is marked as not empty, so
+    /// there is no file to read).
+    fn segments_for(&self, segs: &[u32]) -> Result<Vec<(u32, Option<Arc<Segment>>)>> {
+        let any = |s: u32| (s * PER_SEGMENT..(s + 1) * PER_SEGMENT).any(|b| has(&self.present, b));
+        let missing: Vec<u32> = {
+            let c = self.segs.borrow();
+            segs.iter().copied().filter(|&s| any(s) && !c.contains_key(&s)).collect()
+        };
+        let dir = &self.dir;
+        let read = on_threads(&missing, |&s| read_segment(dir, s))?;
+        for (s, seg) in missing.iter().zip(read) {
+            self.segs.borrow_mut().insert(*s, Arc::new(seg));
+        }
+        let c = self.segs.borrow();
+        Ok(segs.iter().map(|&s| (s, if any(s) { c.get(&s).cloned() } else { None })).collect())
     }
 
     fn with_bucket<T>(&self, path: &[u8], f: impl FnOnce(Option<&Claims>) -> T) -> Result<T> {
@@ -356,6 +459,26 @@ impl Index {
         Ok(out)
     }
 
+    /// Whether a package that is not in `changed` has a directory at `path`.
+    pub fn dir_of_another(&self, path: &[u8], changed: &HashSet<String>) -> Result<bool> {
+        self.with_bucket(path, |c| c.map_or(false, |c| c.dirs.iter().any(|n| !changed.contains(n))))
+    }
+
+    /// Whether a package that is not in `changed` has an entry (of any
+    /// kind) that is `canon` itself or reaches it through a directory
+    /// symlink ([`Index::canon_claimants`] without the list).
+    pub fn place_of_another(&self, canon: &[u8], changed: &HashSet<String>) -> Result<bool> {
+        let here = self.with_bucket(canon, |c| {
+            c.map_or(false, |c| c.files.iter().chain(c.dirs.iter()).any(|n| !changed.contains(n)))
+        })?;
+        if here {
+            return Ok(true);
+        }
+        self.aliases_loaded()?;
+        let al = self.aliases.borrow();
+        Ok(al.as_ref().and_then(|m| m.get(canon)).map_or(false, |v| v.iter().any(|(_, n)| !changed.contains(n))))
+    }
+
     /// Reads, and so checks, everything about these packages' paths that a
     /// switch may look up: the buckets of the paths, of their directories and
     /// of their canonical places, of the directories their triggers name, and
@@ -364,34 +487,88 @@ impl Index {
         self.aliases_loaded()?;
         let mut ids: HashSet<u32> = HashSet::new();
         for p in pkgs {
+            // A record lists its entries directory by directory: what is the
+            // same for all entries of one directory (its own bucket, and
+            // where the directory really is) is worked out once for it.
+            let mut now: Option<(&[u8], Option<Vec<u8>>)> = None;
             for r in &p.recs {
                 ids.insert(bucket_of(&r.path));
-                ids.insert(bucket_of(rootfs::split_rel(&r.path).0));
-                if let Some(c) = canon_of(rfs, &r.path) {
-                    ids.insert(bucket_of(&c));
+                let (dir, name) = rootfs::split_rel(&r.path);
+                if now.as_ref().map_or(true, |(d, _)| *d != dir) {
+                    ids.insert(bucket_of(dir));
+                    now = Some((dir, rfs.dir_if_exists(dir)));
+                }
+                // the entry's canonical place: another path than its own only
+                // below a directory that is reached through a symlink
+                if let Some((_, Some(canon_dir))) = &now {
+                    if canon_dir.as_slice() != dir {
+                        ids.insert(bucket_of(&rootfs::join_rel(canon_dir, name)));
+                    }
                 }
             }
             for t in &p.meta.triggers {
                 ids.insert(bucket_of(t.trim_start_matches('+').trim_matches('/').as_bytes()));
             }
         }
+        crate::prof::mark("      index: buckets of the paths worked out");
         self.load_many(ids)
     }
 }
 
-fn read_bucket(dir: &Path, present: &[u8], b: u32) -> Result<Bucket> {
-    if !has(present, b) {
-        return Ok(Bucket::new());
+/// Segment `s` as its file holds it, checked: the checksum of its first
+/// line fits the rest, and the lengths of its second line add up to what
+/// follows.
+fn read_segment(dir: &Path, s: u32) -> Result<Segment> {
+    let damaged = || Error::Format(format!("index: damaged segment {}", segment_name(s)));
+    let p = dir.join("files").join(segment_name(s));
+    let text = fs::read_to_string(&p).map_err(|e| Error::Format(format!("index: segment {}: {e}", segment_name(s))))?;
+    let (head, rest) = text.split_once('\n').ok_or_else(damaged)?;
+    let sum = head.strip_prefix(SEGMENT_HEADER).and_then(|r| r.strip_prefix(' ')).ok_or_else(damaged)?;
+    if sum.len() != SUM_LEN || sum_of(rest.as_bytes()).get(..SUM_LEN) != Some(sum) {
+        return Err(damaged());
     }
-    let p = dir.join("files").join(bucket_name(b));
-    let t = fs::read_to_string(&p).map_err(|e| Error::Format(format!("index: bucket {}: {e}", bucket_name(b))))?;
-    parse_bucket(&t)
+    let (lens, body) = rest.split_once('\n').ok_or_else(damaged)?;
+    let mut at = Vec::with_capacity(PER_SEGMENT as usize);
+    let mut pos = text.len() - body.len();
+    for n in lens.split(' ') {
+        let n: usize = n.parse().map_err(|_| damaged())?;
+        let end = pos.checked_add(n).ok_or_else(damaged)?;
+        // inside the text, and not in the middle of a character
+        text.get(pos..end).ok_or_else(damaged)?;
+        at.push((pos, end));
+        pos = end;
+    }
+    if at.len() != PER_SEGMENT as usize || pos != text.len() {
+        return Err(damaged());
+    }
+    Ok(Segment { text, at })
+}
+
+/// Bucket `b` out of its segment. It is marked as not empty, so an empty
+/// text there is damage.
+fn bucket_in(seg: &Segment, b: u32) -> Result<Bucket> {
+    let t = seg.bucket(b);
+    if t.is_empty() {
+        return Err(Error::Format("index: a bucket is missing from its segment".into()));
+    }
+    parse_bucket(t)
 }
 
 /// `f` over `items`: on the calling thread for a few, spread over threads
 /// for many; the results in the order of `items`, or the first error.
 pub(crate) fn on_threads<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
-    if items.len() < 16 {
+    on_threads_most(items, usize::MAX, f)
+}
+
+/// [`on_threads`] on `most` threads at most (1: all of it on the calling
+/// thread), for work that does not spread over CPUs on every file system
+/// ([`crate::sys::name_threads`]).
+pub(crate) fn on_threads_most<T: Sync, R: Send>(
+    items: &[T],
+    most: usize,
+    f: impl Fn(&T) -> Result<R> + Sync,
+) -> Result<Vec<R>> {
+    if items.len() < 16 || most < 2 {
         return items.iter().map(&f).collect();
     }
     // Starting the threads costs about 1.4 ms. When what is left would take
@@ -407,15 +584,23 @@ pub(crate) fn on_threads<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result
         out.push(f(&items[i])?);
         i += 1;
         let left = items.len() - i;
-        if i >= 8 && left >= 8 && t0.elapsed() * left as u32 / i as u32 > std::time::Duration::from_millis(3) {
-            break;
+        if left >= 8 {
+            // Work on a warm cache is judged after eight items. Items that
+            // wait for the disk show after two (150 microseconds each is no
+            // work of ours), and each further one done here is another wait
+            // in a row: eight of them were 4 ms of a cold `add`.
+            let spent = t0.elapsed();
+            let waits = i >= 2 && spent / i as u32 > std::time::Duration::from_micros(150);
+            if (i >= 8 || waits) && spent * left as u32 / i as u32 > std::time::Duration::from_millis(3) {
+                break;
+            }
         }
     }
     let items = &items[i..];
     if items.is_empty() {
         return Ok(out);
     }
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 16);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 16).min(most);
     let per = (items.len() + threads - 1) / threads;
     let f = &f;
     std::thread::scope(|sc| {
@@ -427,31 +612,100 @@ pub(crate) fn on_threads<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result
     })
 }
 
-/// Writes the buckets of `list` into the directory `files` (an empty one
-/// removed), on several threads when there are many. An existing bucket file
-/// is rewritten in place: creating or renaming files takes the directory's
-/// lock, which would make the threads wait for each other. That is safe
-/// because nothing reads the index while it is written (an update removes
-/// `state` first, a rebuild writes a new directory) and every bucket carries
-/// its own checksum.
-fn write_buckets(files: &Path, list: &[(u32, &Bucket)]) -> Result<()> {
-    on_threads(list, |(b, bk)| -> Result<()> {
-        let p = files.join(bucket_name(*b));
-        if bk.is_empty() {
+/// Writes the segment files of `segs` into the directory `files`: each
+/// bucket that `new` has as `new` has it; each other bucket that `present`
+/// marks as not empty as it is in the segment's old text (given with the
+/// segment); the rest empty. A segment left without any bucket is removed.
+/// On several threads when there are many.
+///
+/// An existing file is cut to nothing and written again, not replaced
+/// through a new name: creating and renaming take the directory's lock,
+/// which would make the threads wait for each other. That is safe because
+/// nothing reads the index while it is written (an update removes `state`
+/// first, a rebuild writes a new directory), and every file carries its
+/// own checksum. It is cut first, never written over in place: after a
+/// power cut, a file written over could still hold its old text, whole and
+/// with a good checksum; a file that was cut holds the new text or not
+/// enough of anything.
+///
+/// With `staged` the files are new ones in a directory of their own
+/// ([`stage`]) and nothing is removed. Returns, for each segment, whether
+/// it has a file (false: it is left without any bucket).
+fn write_segments(
+    files: &Path,
+    segs: &[(u32, Option<Arc<Segment>>)],
+    new: &HashMap<u32, Bucket>,
+    present: &[u8],
+    staged: bool,
+) -> Result<Vec<bool>> {
+    // staged files are all new names in one directory: made on several
+    // threads they would wait for each other for its lock (11 ms for 512
+    // of them, 6 ms one after another), so there the threads only work the
+    // texts out
+    let done = on_threads(segs, |(s, old)| -> Result<(bool, Option<String>)> {
+        let mut texts: Vec<std::borrow::Cow<str>> = Vec::with_capacity(PER_SEGMENT as usize);
+        for b in *s * PER_SEGMENT..(*s + 1) * PER_SEGMENT {
+            texts.push(match new.get(&b) {
+                Some(bk) => format_bucket(bk).into(),
+                None if has(present, b) => {
+                    let t = old.as_ref().map_or("", |o| o.bucket(b));
+                    if t.is_empty() {
+                        return Err(Error::Format("index: a bucket is missing from its segment".into()));
+                    }
+                    t.into()
+                }
+                None => "".into(),
+            });
+        }
+        let p = files.join(segment_name(*s));
+        if texts.iter().all(|t| t.is_empty()) {
+            if staged {
+                return Ok((false, None));
+            }
             return match fs::remove_file(&p) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Ok(()) => Ok((false, None)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok((false, None)),
                 Err(e) => Err(e.into()),
             };
         }
-        let data = format_bucket(bk);
-        match fs::OpenOptions::new().write(true).truncate(true).open(&p) {
-            Ok(mut f) => Ok(io::Write::write_all(&mut f, data.as_bytes())?),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(fs::write(&p, data)?),
-            Err(e) => Err(e.into()),
+        let mut rest = String::with_capacity(texts.iter().map(|t| t.len() + 2).sum::<usize>() + 1);
+        for (i, t) in texts.iter().enumerate() {
+            if i > 0 {
+                rest.push(' ');
+            }
+            rest.push_str(&t.len().to_string());
         }
+        rest.push('\n');
+        for t in &texts {
+            rest.push_str(t);
+        }
+        let data = format!("{SEGMENT_HEADER} {}\n{rest}", &sum_of(rest.as_bytes())[..SUM_LEN]);
+        if staged {
+            return Ok((true, Some(data)));
+        }
+        match fs::OpenOptions::new().write(true).truncate(true).open(&p) {
+            Ok(mut f) => io::Write::write_all(&mut f, data.as_bytes())?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => fs::write(&p, data)?,
+            Err(e) => return Err(e.into()),
+        }
+        Ok((true, None))
     })?;
-    Ok(())
+    let mut kept = Vec::with_capacity(done.len());
+    for ((s, _), (has, data)) in segs.iter().zip(done) {
+        if let Some(data) = data {
+            fs::write(files.join(segment_name(*s)), data)?;
+        }
+        kept.push(has);
+    }
+    Ok(kept)
+}
+
+/// The segments of these buckets, in order, each once.
+fn segments_of<'a>(buckets: impl Iterator<Item = &'a u32>) -> Vec<u32> {
+    let mut v: Vec<u32> = buckets.map(|&b| segment_of(b)).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 fn read_aliases(dir: &Path, sum: &str) -> Result<HashMap<Vec<u8>, Vec<(Vec<u8>, String)>>> {
@@ -596,8 +850,8 @@ pub fn rebuild(root: &Path, pkgs: &[PkgState], durable: bool) -> Result<()> {
     }
     fs::create_dir_all(tmp.join("files"))?;
     let mut present = vec![0u8; (BUCKETS / 8) as usize];
-    let list: Vec<(u32, &Bucket)> = buckets.iter().map(|(b, bk)| (*b, bk)).collect();
-    write_buckets(&tmp.join("files"), &list)?;
+    let list: Vec<(u32, Option<Arc<Segment>>)> = segments_of(buckets.keys()).into_iter().map(|s| (s, None)).collect();
+    write_segments(&tmp.join("files"), &list, &buckets, &present, false)?;
     for b in buckets.keys() {
         set(&mut present, *b, true);
     }
@@ -622,21 +876,30 @@ pub fn rebuild(root: &Path, pkgs: &[PkgState], durable: bool) -> Result<()> {
     Ok(())
 }
 
-/// After a switch: the entries of the changed packages are replaced by
-/// those of their new versions (or dropped for removed packages), in the
-/// buckets of their paths only. `olds` are the old versions' states, `news`
-/// the new versions' (records loaded), `metas` the final set's metadata.
-/// `rfs` sees the live tree after the switch.
-pub fn update(
-    root: &Path,
+/// The index of after a change, worked out from the one before it.
+struct Updated {
+    /// the buckets of the change's paths, as they will be
+    buckets: HashMap<u32, Bucket>,
+    /// the segments to write again, each with its old text
+    segs: Vec<(u32, Option<Arc<Segment>>)>,
+    aliases: String,
+    meta: Vec<u8>,
+    state: String,
+}
+
+/// Works out the index of after a change: the entries of the changed
+/// packages replaced by those of their new versions (or dropped for removed
+/// packages), in the buckets of their paths only. `olds` are the old
+/// versions' states, `news` the new versions' (records loaded), `metas` the
+/// final set's metadata; `canon` gives the canonical place of a new entry.
+fn updated(
     ix: &Index,
     changed: &HashSet<String>,
     olds: &[&PkgState],
     news: &[&PkgState],
     metas: &BTreeMap<String, &PkgMeta>,
-    rfs: &mut RootFs,
-) -> Result<()> {
-    let d = dir(root);
+    canon: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
+) -> Result<Updated> {
     let mut touched: HashSet<u32> = HashSet::new();
     for p in olds.iter().chain(news.iter()) {
         for r in &p.recs {
@@ -646,8 +909,10 @@ pub fn update(
     // everything read (and checked) first, while the old index is whole
     ix.load_many(touched.iter().copied())?;
     ix.aliases_loaded()?;
+    // the segments that will be written again, with the buckets the change
+    // does not touch as their files hold them
+    let segs = ix.segments_for(&segments_of(touched.iter()))?;
     crate::prof::mark("  index: buckets read");
-    invalidate(root);
     let mut buckets: HashMap<u32, Bucket> = touched.iter().map(|&b| (b, ix.buckets.borrow()[&b].clone())).collect();
     for bk in buckets.values_mut() {
         for c in bk.values_mut() {
@@ -665,7 +930,7 @@ pub fn update(
             if !list.contains(&name) {
                 list.push(name.clone());
             }
-            if let Some(canon) = canon_of(rfs, &r.path) {
+            if let Some(canon) = canon(&r.path) {
                 if canon != r.path {
                     new_aliases.push((canon, r.path.clone(), name.clone()));
                 }
@@ -673,14 +938,10 @@ pub fn update(
         }
     }
     crate::prof::mark("  index: claims merged");
-    fs::create_dir_all(d.join("files"))?;
     let mut present = ix.present.clone();
-    let list: Vec<(u32, &Bucket)> = buckets.iter().map(|(b, bk)| (*b, bk)).collect();
-    write_buckets(&d.join("files"), &list)?;
     for (b, bk) in &buckets {
         set(&mut present, *b, !bk.is_empty());
     }
-    crate::prof::mark("  index: buckets written");
     let mut aliases: Vec<(Vec<u8>, Vec<u8>, String)> = ix
         .aliases
         .borrow()
@@ -693,15 +954,121 @@ pub fn update(
         })
         .unwrap_or_default();
     aliases.extend(new_aliases);
-    let al = format_aliases(&aliases);
+    let aliases = format_aliases(&aliases);
     let meta = format_meta(metas, Some((&ix.raw_meta.borrow(), changed)));
-    write_replace(&d.join("aliases"), al.as_bytes())?;
-    write_replace(&d.join("meta"), &meta)?;
     let versions: BTreeMap<String, String> =
         metas.iter().map(|(n, m)| (n.clone(), m.version().to_string())).collect();
-    let state = format_state(&versions, &ix.links, &present, &sum_of(&meta), &sum_of(al.as_bytes()));
-    write_replace(&d.join("state"), state.as_bytes())?;
+    let state = format_state(&versions, &ix.links, &present, &sum_of(&meta), &sum_of(aliases.as_bytes()));
+    Ok(Updated { buckets, segs, aliases, meta, state })
+}
+
+/// After a switch that ends with a `syncfs`: the index is updated in place
+/// ([`updated`]; `rfs` sees the live tree after the switch).
+pub fn update(
+    root: &Path,
+    ix: &Index,
+    changed: &HashSet<String>,
+    olds: &[&PkgState],
+    news: &[&PkgState],
+    metas: &BTreeMap<String, &PkgMeta>,
+    rfs: &mut RootFs,
+) -> Result<()> {
+    let d = dir(root);
+    let u = updated(ix, changed, olds, news, metas, &mut |p| canon_of(rfs, p))?;
+    invalidate(root);
+    fs::create_dir_all(d.join("files"))?;
+    write_segments(&d.join("files"), &u.segs, &u.buckets, &ix.present, false)?;
+    crate::prof::mark("  index: buckets written");
+    write_replace(&d.join("aliases"), u.aliases.as_bytes())?;
+    write_replace(&d.join("meta"), &u.meta)?;
+    write_replace(&d.join("state"), u.state.as_bytes())?;
     Ok(())
+}
+
+/// The directory, inside the index, of an update that waits ([`stage`]).
+const NEXT: &str = "next";
+
+/// An update of the index that waits in `next/`.
+pub struct Staged {
+    /// the segments whose new file waits there
+    replace: Vec<u32>,
+    /// the segments that end without any bucket
+    remove: Vec<u32>,
+}
+
+/// Before a switch (and before the `syncfs` that precedes it): the index
+/// of after the change is worked out ([`updated`]) and written into
+/// `next/`, where nothing reads it. `rfs` sees the live tree before the
+/// switch: a new entry's canonical place is where its directory is or will
+/// be made ([`RootFs::dir_planned`]). That is only right for a change that
+/// leaves the tree's directory symlinks alone and runs no script, which is
+/// when a staged update is used ([`wanted`], and the switch).
+pub fn stage(
+    root: &Path,
+    ix: &Index,
+    changed: &HashSet<String>,
+    olds: &[&PkgState],
+    news: &[&PkgState],
+    metas: &BTreeMap<String, &PkgMeta>,
+    rfs: &mut RootFs,
+) -> Result<Staged> {
+    let next = dir(root).join(NEXT);
+    discard_staged(root);
+    let mut planned: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    let u = updated(ix, changed, olds, news, metas, &mut |p| {
+        let (d, name) = rootfs::split_rel(p);
+        let canon = rootfs::join_rel(&rfs.dir_planned(d, &mut planned).ok()?, name);
+        (!db::is_reserved(&canon)).then_some(canon)
+    })?;
+    fs::create_dir_all(next.join("files"))?;
+    let kept = write_segments(&next.join("files"), &u.segs, &u.buckets, &ix.present, true)?;
+    let (mut replace, mut remove) = (Vec::new(), Vec::new());
+    for ((s, _), kept) in u.segs.iter().zip(kept) {
+        if kept {
+            replace.push(*s);
+        } else {
+            remove.push(*s);
+        }
+    }
+    fs::write(next.join("aliases"), u.aliases.as_bytes())?;
+    fs::write(next.join("meta"), &u.meta)?;
+    fs::write(next.join("state"), u.state.as_bytes())?;
+    crate::prof::mark("  index: staged");
+    Ok(Staged { replace, remove })
+}
+
+/// At the end of a switch that ends without a `syncfs`: the staged update
+/// is put in place by renames and removals alone. `state` goes first and
+/// its successor comes last, so at no moment, and in nothing a power cut
+/// can leave, is there a `state` beside files it does not describe.
+pub fn commit_staged(root: &Path, st: &Staged) -> Result<()> {
+    let d = dir(root);
+    let next = d.join(NEXT);
+    invalidate(root);
+    fs::create_dir_all(d.join("files"))?;
+    for s in &st.replace {
+        fs::rename(next.join("files").join(segment_name(*s)), d.join("files").join(segment_name(*s)))?;
+    }
+    for s in &st.remove {
+        match fs::remove_file(d.join("files").join(segment_name(*s))) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    fs::rename(next.join("aliases"), d.join("aliases"))?;
+    fs::rename(next.join("meta"), d.join("meta"))?;
+    fs::rename(next.join("state"), d.join("state"))?;
+    let _ = fs::remove_dir_all(&next);
+    Ok(())
+}
+
+/// Removes a staged update that was not used.
+pub fn discard_staged(root: &Path) {
+    let next = dir(root).join(NEXT);
+    if fs::symlink_metadata(&next).is_ok() {
+        let _ = fs::remove_dir_all(&next);
+    }
 }
 
 /// Which unchanged packages' records a change needs, with a matching index
@@ -729,10 +1096,13 @@ pub fn wanted(
     // everything the switch may look up, read and checked now: a damaged
     // index is found before the switch, which then reads every record
     let all: Vec<&PkgState> = olds.iter().chain(news.iter()).copied().collect();
+    crate::prof::mark("    index: directory links checked");
     if ix.preload(rfs, &all).is_err() {
         return None;
     }
+    crate::prof::mark("    index: buckets of the change read");
     let mut w = relevant(ix, changed, olds, news).ok()?;
+    crate::prof::mark("    index: other claimants found");
     for (name, ip) in installed {
         if !changed.contains(name) && !ip.meta.triggers.is_empty() {
             w.insert(name.clone());
@@ -749,11 +1119,28 @@ pub fn wanted(
 /// replaces one.
 pub fn touches_links(ix: &Index, rfs: &mut RootFs, olds: &[&PkgState], news: &[&PkgState]) -> bool {
     let known: HashSet<&[u8]> = ix.links.iter().map(|(p, _)| p.as_slice()).collect();
-    // what the new versions put at each path: a link's target may be one of them
-    let mut new_at: HashMap<&[u8], &FileRec> = HashMap::new();
+    // What the new versions put at each path: a link's target may be one of
+    // them. A target is worked out from the link's canonical place, so the
+    // new entries are known by theirs as well as by the path their record
+    // gives (`lib/bar` is `usr/lib/bar` where `lib` is a symlink): where a
+    // new entry's directory is, or will be made.
+    let mut new_at = NewAt { literal: HashMap::new(), canon: HashMap::new() };
+    let mut planned: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
     for p in news {
+        let mut now: Option<(&[u8], Vec<u8>)> = None;
         for r in &p.recs {
-            new_at.insert(r.path.as_slice(), r);
+            new_at.literal.insert(r.path.as_slice(), r);
+            let (dir, name) = rootfs::split_rel(&r.path);
+            if now.as_ref().map_or(true, |(d, _)| *d != dir) {
+                // a directory that cannot be worked out: read every record
+                let Ok(c) = rfs.dir_planned(dir, &mut planned) else { return true };
+                now = Some((dir, c));
+            }
+            if let Some((_, c)) = &now {
+                if c.as_slice() != dir {
+                    new_at.canon.insert(rootfs::join_rel(c, name), r);
+                }
+            }
         }
     }
     for p in olds.iter().chain(news.iter()) {
@@ -791,11 +1178,24 @@ fn normalize(p: &[u8]) -> Vec<u8> {
     out.join(&b'/')
 }
 
+/// The entries of the new versions, by the path of their record and (where
+/// that is another) by their canonical place.
+struct NewAt<'a> {
+    literal: HashMap<&'a [u8], &'a FileRec>,
+    canon: HashMap<Vec<u8>, &'a FileRec>,
+}
+
+impl<'a> NewAt<'a> {
+    fn get(&self, path: &[u8]) -> Option<&'a FileRec> {
+        self.literal.get(path).or_else(|| self.canon.get(path)).copied()
+    }
+}
+
 /// Whether a symlink at `place` with target `t` leads to a directory, now or
 /// once the new versions are placed: their entries come first (a link to one
 /// of their links is followed, 8 deep at most; deeper counts as a
 /// directory), then the live tree.
-fn leads_to_dir(rfs: &mut RootFs, new_at: &HashMap<&[u8], &FileRec>, place: &[u8], t: &[u8], depth: u32) -> bool {
+fn leads_to_dir(rfs: &mut RootFs, new_at: &NewAt, place: &[u8], t: &[u8], depth: u32) -> bool {
     if depth >= 8 {
         return true;
     }
@@ -837,11 +1237,13 @@ pub fn relevant(ix: &Index, changed: &HashSet<String>, olds: &[&PkgState], news:
             if r.is_dir() || !seen.insert(r.path.as_slice()) {
                 continue;
             }
-            for n in ix.file_claimants(&r.path)? {
-                if !changed.contains(&n) {
-                    out.insert(n);
+            ix.with_bucket(&r.path, |c| {
+                for n in c.iter().flat_map(|c| c.files.iter()) {
+                    if !changed.contains(n) && !out.contains(n) {
+                        out.insert(n.clone());
+                    }
                 }
-            }
+            })?;
         }
     }
     Ok(out)
@@ -919,8 +1321,10 @@ pub fn open_before(root: &Path, ops: &[db::Op], planned: &str) -> Option<Index> 
     Index::open(root, &v)
 }
 
-/// Removes what an interrupted rebuild left (`index.new`, `index.old`).
+/// Removes what an interrupted rebuild left (`index.new`, `index.old`), and
+/// an update that was staged and not used.
 pub fn clean_leftovers(root: &Path) {
+    discard_staged(root);
     for n in ["index.new", "index.old"] {
         let p = root.join(db::STATE_DIR).join(n);
         if fs::symlink_metadata(&p).map_or(false, |m| m.is_dir()) {

@@ -118,6 +118,8 @@ fn ensure_parent(
     made: &mut HashSet<Vec<u8>>,
     setgid: &mut HashSet<Vec<u8>>,
     chown: bool,
+    // every directory made here needs its owner set (root's group is not 0)
+    always: bool,
 ) -> io::Result<()> {
     let Some(i) = rel.iter().rposition(|&c| c == b'/') else { return Ok(()) };
     let parent = &rel[..i];
@@ -125,7 +127,7 @@ fn ensure_parent(
         return Ok(());
     }
     // an ancestor the package does not list: 0755 root:root (§E4)
-    ensure_parent(base, parent, made, setgid, chown)?;
+    ensure_parent(base, parent, made, setgid, chown, always)?;
     let p = path_of(base, parent);
     let created = match fs::DirBuilder::new().mode(0o755).create(&p) {
         Ok(()) => true,
@@ -133,7 +135,7 @@ fn ensure_parent(
         Err(e) => return Err(e),
     };
     let grandparent = crate::rootfs::split_rel(parent).0;
-    if setgid.contains(grandparent) {
+    if always || setgid.contains(grandparent) {
         if created && chown {
             lchown(&p, Some(0), Some(0))?;
             fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
@@ -145,9 +147,29 @@ fn ensure_parent(
     Ok(())
 }
 
-fn mtime(t: u64) -> FileTimes {
-    let st = UNIX_EPOCH + Duration::from_secs(t);
-    FileTimes::new().set_accessed(st).set_modified(st)
+/// The times of a file whose package says `t` seconds. A time no clock of
+/// this system holds (2^63 seconds and more) is an error of the package:
+/// adding it up without the check stopped the whole process.
+fn mtime(t: u64) -> io::Result<FileTimes> {
+    let st = UNIX_EPOCH.checked_add(Duration::from_secs(t)).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("modification time {t} cannot be represented"))
+    })?;
+    Ok(FileTimes::new().set_accessed(st).set_modified(st))
+}
+
+/// Whether what `f` holds has the hash `hash` of a record.
+fn content_is(f: &mut File, hash: &[u8]) -> bool {
+    let Some(alg) = crate::digest::Alg::from_len(hash.len()) else { return false };
+    let mut h = crate::digest::Hasher::new(alg);
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => h.update(&buf[..n]),
+            Err(_) => return false,
+        }
+    }
+    h.finish() == hash
 }
 
 /// Sets owner and mode of a just-made entry; with `chown` false (not
@@ -206,13 +228,21 @@ pub fn unpack(
             Err(e) => return Err(e.into()),
         }
     }
-    fs::DirBuilder::new().mode(0o755).create(&partial)?;
-    let r = unpack_into(&partial, job, keys, ids, allow_untrusted, progress);
+    // For root only (0700), and it stays so until the switch has given
+    // every entry its final owner (commit::switch, step 4): entries are
+    // made, and given their owner and mode, by path in here, here and
+    // again in the switch once a script has added users, and a package may
+    // hold a directory that its own user can write to. Nobody else can
+    // enter the tree before that is done, so nothing in it can be swapped
+    // under root's hands. The live tree does not need it open: its files
+    // are other names of the same inodes.
+    fs::DirBuilder::new().mode(0o700).create(&partial)?;
+    let r = unpack_into(&partial, job, keys, ids, allow_untrusted, progress).and_then(|st| {
+        fs::rename(&partial, &fin)?;
+        Ok(st)
+    });
     match r {
-        Ok(st) => {
-            fs::rename(&partial, &fin)?;
-            Ok(st)
-        }
+        Ok(st) => Ok(st),
         Err(e) => {
             let _ = fs::remove_dir_all(&partial);
             Err(e)
@@ -268,11 +298,18 @@ fn unpack_into(
     };
     let mut st = Stats::default();
     let mut made: HashSet<Vec<u8>> = HashSet::new();
-    // directories made setgid: what is created in them takes their group,
-    // so it needs its owner set even when that is root
+    // The directories in which a new entry may come out with another group
+    // than root's, so that it needs its owner set even when that is root:
+    // those made setgid (what is created in them takes their group), and
+    // those given a group other than root (on a file system mounted with
+    // grpid or bsdgroups every new entry takes its directory's group). The
+    // package's own directory is one of them when it is not plainly root's.
     let mut setgid: HashSet<Vec<u8>> = HashSet::new();
+    if chown && !root_egid_clean {
+        setgid.insert(Vec::new());
+    }
     // a new file is root:root already only when euid==0, egid==0, and neither
-    // the package root nor the file's parent directory is setgid
+    // the package root nor the file's parent directory is one of those
     let needs_chown = |rel: &[u8], uid: u32, gid: u32, setgid: &HashSet<Vec<u8>>| {
         !root_egid_clean || (uid, gid) != (0, 0) || setgid.contains(crate::rootfs::split_rel(rel).0)
     };
@@ -281,7 +318,7 @@ fn unpack_into(
     while let Some(mut e) = pr.next_entry()? {
         let rel = e.path.to_vec();
         let p = path_of(dest, &rel);
-        ensure_parent(dest, &rel, &mut made, &mut setgid, chown)?;
+        ensure_parent(dest, &rel, &mut made, &mut setgid, chown, chown && !root_egid_clean)?;
         st.entries += 1;
         if e.kind == EntryKind::Dir {
             let acl = &e.dir.acl;
@@ -292,7 +329,7 @@ fn unpack_into(
                 Err(err) => return Err(err.into()),
             }
             apply_acl(&p, acl, ids, chown, false)?;
-            if acl.mode & 0o2000 != 0 {
+            if acl.mode & 0o2000 != 0 || (chown && ids.gid(acl.group.as_deref()) != 0) {
                 setgid.insert(rel.clone());
             } else {
                 setgid.remove(&rel);
@@ -321,7 +358,7 @@ fn unpack_into(
                     fchown(&out, Some(uid), Some(gid))?;
                 }
                 out.set_permissions(fs::Permissions::from_mode(acl.mode & 0o7777))?;
-                out.set_times(mtime(fe.mtime))?;
+                out.set_times(mtime(fe.mtime).map_err(|err| integrity(&rel, err))?)?;
             }
             FileKind::Hardlink(t) => {
                 fs::hard_link(path_of(dest, t), &p)?;
@@ -394,11 +431,30 @@ pub fn fix_owners(base: &Path, recs: &[db::FileRec], ids: &IdMap) -> u64 {
         if m.uid() == uid && m.gid() == gid {
             continue;
         }
-        if lchown(&p, Some(uid), Some(gid)).is_ok() {
-            n += 1;
-            if !m.file_type().is_symlink() {
-                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(r.mode & 0o7777));
+        if !m.is_file() && !m.is_dir() {
+            // a symlink, device node or FIFO: the owner of the entry itself
+            // (chown leaves the mode of these as it is)
+            if lchown(&p, Some(uid), Some(gid)).is_ok() {
+                n += 1;
             }
+            continue;
+        }
+        // A file or a directory: owner and mode through a descriptor of the
+        // entry itself. The switch calls this only while the tree
+        // is root's alone (commit::owners_final); the tree of a journal an
+        // earlier catalyst wrote can be entered by other users, and one of
+        // the package's directories may belong to one of them: a chmod by
+        // path would follow a symlink put in the entry's place. A mode with
+        // set-id bits is given only to the content the package brought (a
+        // file put there instead would get them otherwise).
+        let f = if m.is_dir() { sys::open_dir_nofollow(&p) } else { sys::open_regular_nofollow(&p) };
+        let Ok(mut f) = f else { continue };
+        if m.is_file() && r.mode & 0o6000 != 0 && !content_is(&mut f, &r.hash) {
+            continue;
+        }
+        if fchown(&f, Some(uid), Some(gid)).is_ok() {
+            n += 1;
+            let _ = f.set_permissions(fs::Permissions::from_mode(r.mode & 0o7777));
         }
     }
     n

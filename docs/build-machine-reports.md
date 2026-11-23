@@ -10,6 +10,97 @@ How this works:
 
 ---
 
+## 2026-11-23: a second review of the one-sync change (22 findings), a kill test that was not killing, and btrfs
+
+**Read this before the entry below: two things in it do not hold as written.**
+- **Its kill-test result was weaker than it says.** I had added a field to the checker's list of owned files and not adapted the step that picks a file to watch. The rounds meant to kill while a package's files are placed killed nothing and passed. The review caught it. Rerun with the fix: 320 rounds, 307 killed while running, 51 with a package half placed (it was 2), 0 failures. The test now stops when no file is picked, and ends as inconclusive when none of those rounds killed anything.
+- **"Nothing was timed on btrfs" hid a real problem.** See btrfs below.
+
+**The second review.** Four reviewers read everything I changed after the first review (its 20 fixes and what followed), each through one lens; a skeptic then tried to refute each reviewer's findings; a last reader went through the diff for anything nobody had read. 22 findings, all confirmed, plus one from the last reader. What they were, and what was done:
+- **More than one file system (the main one, again).** The first fix made a switch fsync its journal's name before it touched another file system, but:
+  - nothing ever synced that other file system, so a mark in the journal could be on disk without the work it records (a recovery skips marked steps);
+  - the root directory, `Programs`, directories the switch makes itself and the target of a dangling symlink were never looked at, so a separate `/var` ran the whole switch unordered.
+  - Now: work outside the journal's file system is synced before its mark is written and again at the end; a layout with `Programs` or the root on another file system than `var/lib/catalyst` is a full switch from its start. A btrfs subvolume counts as another file system (`/var/log` on Valence).
+- **Owners set by path in a folder others can enter.** New versions stay root-only until their owners are final, but a run that finished an interrupted switch went through them by path again after they were opened. It no longer does (the journal says `closed-versions`; a version found open is left alone).
+- **The kill test** (above), and the power-cut test's "inconclusive" result, which could not occur: the rounds stopped at a switch's first moment made it pass by themselves.
+- **A command that finishes an interrupted switch with errors** printed OK and exited 0. It exits 1 and says so.
+- **The repository index** lost its fsync together with the packages; a power cut could leave it empty, and a run without network then failed. It is fsync'ed before it replaces the cached one.
+- **`--sync` with a change of the world only** did not put the world's name on disk.
+- **The lookup index** kept its version number although its layout changed. It is `catalyst-index 5`; an older one is rebuilt.
+- **Two entries of one package for the same place** (`lib/x` and `usr/lib/x` where `lib` is a symlink) could be linked by two threads at once.
+- **A version being switched** was unreadable for other users' `oct list` until the end of the switch. One with nothing in it for anyone but root is opened as soon as it is current.
+- **Tests that could not fail or did not exist:** added for a package cut half linked, for a change on two file systems, for the exact-mkdir rule; the parser test no longer depends on the machine's CPU count.
+- **A journal left cut by the short-lived unsynced adds** is removed as before; the packages it had begun are now named, because files of theirs can be left in the tree.
+
+**Left open, both low:**
+- A package that ships a symlink and a file for the same place can still have them placed in the wrong order.
+- The ownership pass still works by path. It only runs while the folder is root's alone; walking by descriptor would be defence in depth.
+
+**btrfs.** Every number so far was on ext4, because that is what the build machine's disk is. On a btrfs mounted the way `valence-install` mounts the root, removing Cataclysm took 900 ms against apk's 170 ms.
+- **Cause:** threads. Linking and unlinking on several threads is about twice as fast on ext4 and slower on btrfs, where one tree holds every name of a subvolume (table in `catalyst/README.md`, "On other file systems").
+- **Fix:** catalyst picks the number of threads by file system. Removing Cataclysm on btrfs: about 310 ms. Adding it: 0.95 s against apk's 2.2 s.
+- **What is left:** a big removal is still behind apk on btrfs (310 ms against 170 ms) and XFS (250 ms against 180 ms), and level on ext4. Two names per file, unlinked one after another.
+- **Decided by the owner today:** old files are deleted in the background after the command returns. That is the next commit, with its own tests and the strict benchmark on btrfs. The numbers above are three runs each, not the strict benchmark.
+
+**Tests on this commit.**
+- `cargo test`: 48 unit, 12 command, 24 on the real repository.
+- Kill test: 320 rounds over four jobs, 0 failures (figures above).
+- Power-cut test: 340 rounds, 0 failures (ext4 215, btrfs 80, XFS 45).
+- One message was changed after those long runs; on the binary of this commit 40 more kill rounds and 20 more power-cut rounds passed.
+- The strict benchmark's scripts are in the tree now (`catalyst/tools/bench/catalyst-strict*.sh`); `catalyst-strict-fs.sh` runs it on btrfs, ext4 or XFS in an image.
+
+**For the developers** (yours, not done by me):
+- Still asked for: `oct recover` in `/etc/runit/1`, once the root is writable.
+- A package script that writes to a file system other than the root's, `/boot`, `/boot/efi` or `/efi` has to sync it itself; those four catalyst syncs before it marks the script as run.
+- The journal has a new line, `closed-versions`, and the index a new number. Nothing to do: both are handled when read.
+
+---
+
+## 2026-11-23: one sync for every change; faster than apk in 14 of 26 cases and slower in 1; a power-cut test
+
+**The owner's decision.** Asked how an add should end, now that apk is known to sync: "one sync and do whatever else you found to make it faster". A change is put on disk by one `syncfs` before its switch and ends without another. I applied that to removals and upgrades as well (they flushed three times); that is my reading, the owner was asked about adds. `oct --sync` returns only when the change is on disk. The unsynced add and its check after a reboot, where the last review found eleven defects, are gone. `catalyst/README.md`, "One sync".
+
+**The numbers** (strict benchmark, 15 runs a case, apk run with `--sync` because that is what it does on an installed system; ext4 under WSL2). Of 26 cases catalyst is faster in 14, slower in 1, and in 11 there is no clear difference. Until the change is on disk: faster in 12, slower in 2.
+
+| job | system | apk | catalyst | verdict |
+|---|---|---|---|---|
+| add Cataclysm, warm | 39 packages | 2.27 s | 780 ms | faster |
+| add Cataclysm, warm | 244 packages | 1.45 s | 718 ms | faster |
+| upgrade 27 packages, warm | 39 packages | 247 ms | 163 ms | faster |
+| upgrade one package, warm | 39 packages | 74 ms | 65 ms | faster |
+| remove nano, warm | 39 packages | 14 ms | 10 ms | faster |
+| remove nano, warm | 244 packages | 39 ms | 15 ms | faster |
+| add nano, warm | 244 packages | 42 ms | 22 ms | faster |
+| add nano, warm | 39 packages | 18 ms | 17 ms | no clear difference |
+| add nano, cold | 39 packages | 52 ms | 57 ms | slower |
+| remove Cataclysm, warm | 39 packages | 126 ms | 130 ms | no clear difference |
+| remove Cataclysm, warm | 244 packages | 170 ms | 202 ms | no clear difference |
+
+**Where catalyst is not ahead.**
+- **Removing a big package:** level with apk, down from 2.2 times its time. Every file has two names and both are unlinked. Until the removal is on disk it takes 195 ms against apk's 138 on the small system.
+- **A one-package install on the small system:** level from a warm cache, 5 ms slower from a cold one. catalyst reads more small files from a cold disk than apk does.
+- **`oct --sync` for small changes:** three flushes against apk's one, about 4 ms more (22 ms against 18 for `add nano`). That is the price of a journal when the change must also be on disk at return.
+- **Nothing was timed on btrfs,** which Valence's root is. In the power-cut test's btrfs image (on tmpfs) the removal of Cataclysm took a second. Worth timing on a real install.
+
+**What changed in the code.**
+- One `syncfs` per change. What the switch puts in place by a rename is made before it: the world, the copies of `etc/` files, the lookup index of after the change (`index/next`).
+- The lookup index is in 512 files of 128 small buckets (it was 4,096 files); its form is 4, and an older one is rebuilt on the first run.
+- A directory is resolved with one `lstat` when the one above it is known; the removal of Cataclysm made 37,000 `lstat` calls, now 22,000 (88,500 system calls in all, now 62,300).
+- Records are parsed on several threads; a package's files are linked on several threads, each with one call; old version trees are deleted directory by directory on several threads, by path only where nobody else can rearrange them.
+- A new version is root's alone (0700) until its switch has set its owners; it was 0755 as soon as it was unpacked.
+- Downloads are no longer fsync'ed one by one. A file cut short in the cache does not verify, is removed and is fetched again.
+- New: `oct recover` (finishes an interrupted change and nothing else), `--sync`, and a `no-scripts` line in the journal, so that a recovery runs no script for a change that was asked for without them. An older `oct` refuses a journal with that line.
+
+**The review before this push.** Six reviewers, one area each, and a skeptic for every finding: 20 findings confirmed, none refuted, all fixed (one by narrowing a claim in the documentation). The serious one was mine: a change that writes to `/boot`, or to any file system other than the root's, could get ahead of its journal, so that a power cut left the new kernel in `/boot` with the old package installed and nothing to roll forward. The journal's name is now fsync'ed before any such step, before any copy the switch fsyncs, and the change is synced before post-commit hooks run. The ten findings left open by the review before are fixed as well.
+
+**The power-cut test** (`catalyst/tools/killtest/catalyst-powercut.sh`, new). The kill test stops the process, and everything it wrote reaches the disk. A power cut loses what was not written out, and unevenly: a name can be on disk without its content. The test keeps the root in an image behind a device-mapper device, suspends the device at a random moment of a real change (in two rounds of five with catalyst stopped inside its switch), copies the image as it is, mounts the copy and checks that `oct recover` leaves the root as it was before the change or as a clean run leaves it. Before it passed it found three defects the kill test could not see: a lookup index marked valid whose new files were still empty, a temporary file left behind, and a recovery that ran scripts for a change asked for without them. Results on the final code: 515 rounds on ext4, btrfs and XFS, 0 failures; kill test 80 of 80 for the upgrade, `small`, `add` and the new `del` job; 81 tests.
+
+**For the developers** (not done by me, these are yours):
+- **`/etc/runit/1`:** a line `oct recover` once the root is writable. It finishes a change that a power cut interrupted, before anyone logs in, and does nothing (it does not even lock the root) when there is nothing to finish. Any later `oct` command does the same, so this is about what the system looks like between the boot and that command.
+- **Commit hooks:** when hooks are installed, a change is synced once more before the post-commit hooks run, so that a hook cannot record a change that a power cut then takes back.
+
+---
+
 ## 2026-11-23: an independent review of the speed rounds and of the audit: 23 findings, the first fixed
 
 **After two bugs of mine got through, everything changed in the speed rounds was reviewed again, the audit commit (756c953) included.** Six reviewers took one area each; every finding then went to two more whose job was to refute it. 23 findings were confirmed by both, 1 was refuted. None is critical.

@@ -376,11 +376,15 @@ pub fn load(
     fresh: &Freshness,
     cache_max_age: Option<std::time::Duration>,
 ) -> Result<Repo> {
-    load_with_cache(spec, arch, keys, opts, http, cache_dir, fresh, cache_max_age, true)
+    load_with_cache(spec, arch, keys, opts, http, cache_dir, fresh, cache_max_age, true, true)
 }
 
 /// Like [`load`], but writes the parsed-index cache (`var/cache/catalyst/parsed-*`)
 /// only when `write_cache` is true (skipped under `--simulate` and read-only queries).
+/// A downloaded index replaces the cached one when `write_cache` is true;
+/// in a read-only query (`keep_download` without `write_cache`: search,
+/// info) only when it was accepted without `--allow-untrusted` and
+/// `--allow-rollback`; under `--simulate` (neither) never.
 #[allow(clippy::too_many_arguments)]
 pub fn load_with_cache(
     spec: &str,
@@ -392,6 +396,7 @@ pub fn load_with_cache(
     fresh: &Freshness,
     cache_max_age: Option<std::time::Duration>,
     write_cache: bool,
+    keep_download: bool,
 ) -> Result<Repo> {
     let (index_url, base, default_spec) = locate(spec, arch);
     let remote = is_remote(&index_url);
@@ -435,9 +440,13 @@ pub fn load_with_cache(
             let age = std::time::SystemTime::now().duration_since(mtime).ok()?;
             if age <= max_age { Some(()) } else { None }
         });
-        if cache_fresh.is_some() {
+        // A cached index that is new enough but cannot be used (it no longer
+        // verifies with these keys, or is older than what was accepted
+        // since) is no reason to stop: the server is asked, as for an old one.
+        let cached = if cache_fresh.is_some() { read(&dest).ok() } else { None };
+        if let Some(x) = cached {
             reused = true;
-            read(&dest)?
+            x
         } else {
             let http = http.ok_or_else(|| Error::Msg("no HTTP client".into()))?;
             let mut new = dest.as_os_str().to_os_string();
@@ -448,7 +457,21 @@ pub fn load_with_cache(
                 .and_then(|_| read(&new));
             match got {
                 Ok(x) => {
-                    fs::rename(&new, &dest)?;
+                    // what a run that changes nothing was shown must not
+                    // become what the next `add` plans with, least of all an
+                    // index let through by --allow-untrusted or --allow-rollback
+                    if write_cache || (keep_download && !opts.allow_untrusted && !fresh.allow_rollback) {
+                        // Unlike a package, the index is not followed by a
+                        // syncfs (`update`, `search`, an `add` with nothing
+                        // to do end without one): its content goes to disk
+                        // before its name replaces the cached index, so
+                        // that a power cut leaves the old index or the new
+                        // one, not an empty file for a run without network.
+                        fs::File::open(&new)?.sync_all()?;
+                        fs::rename(&new, &dest)?;
+                    } else {
+                        let _ = fs::remove_file(&new);
+                    }
                     x
                 }
                 Err(e) => {

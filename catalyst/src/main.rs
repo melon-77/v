@@ -33,6 +33,10 @@ options:
   --simulate, -s         show what add/del/upgrade/update/fix/cache clean
                          would do without changing anything
   --upgrade, -u          with add: upgrade named packages if already installed
+  --sync                 do not return before the change is on disk (by
+                         default the change is prepared on disk, then made;
+                         a power cut right after it leaves it undone or to
+                         be finished by the next run, never half done)
   --no-scripts           do not run package scripts, triggers or commit hooks
   --no-commit-hooks      do not run commit hooks (pre-commit / post-commit)
   --jobs N               fetch/unpack threads (default: one per CPU, max 16)
@@ -55,6 +59,8 @@ commands:
                          show package information (-e installed check,
                          -W who owns PATH; no args lists installed names)
   fix [NAME...]          verify and repair live-tree files from /Programs
+  recover                finish a change that was interrupted (every command
+                         does this first; on its own it is for system start)
   cache clean            remove downloaded .apk files from the cache
   verify FILE...         check signature and contents; print a summary
   dump-index FILE [--json]
@@ -86,6 +92,7 @@ struct Opts {
     no_commit_hooks: bool,
     simulate: bool,
     upgrade: bool,
+    sync: bool,
     jobs: usize,
     json: bool,
     search: engine::SearchOpts,
@@ -112,6 +119,7 @@ impl Opts {
             upgrade: self.upgrade,
             jobs: self.jobs,
             crash_at: std::env::var("CATALYST_CRASH_AT").ok().filter(|s| !s.is_empty()),
+            sync: self.sync,
         }
     }
 }
@@ -132,6 +140,7 @@ fn parse_args() -> Result<Opts, String> {
         no_commit_hooks: false,
         simulate: false,
         upgrade: false,
+        sync: false,
         jobs: 0,
         json: false,
         search: engine::SearchOpts::default(),
@@ -157,6 +166,7 @@ fn parse_args() -> Result<Opts, String> {
             "--no-commit-hooks" => o.no_commit_hooks = true,
             "--simulate" => o.simulate = true,
             "--upgrade" | "-u" => o.upgrade = true,
+            "--sync" => o.sync = true,
             "--jobs" | "-j" => {
                 o.jobs = val("--jobs")?.parse().map_err(|_| "--jobs needs a number".to_string())?
             }
@@ -363,6 +373,7 @@ fn cmd_manifest(o: &Opts) -> Result<bool, Error> {
 }
 
 fn main() -> ExitCode {
+    catalyst::sys::note_umask();
     catalyst::prof::mark("start");
     let o = match parse_args() {
         Ok(o) => o,
@@ -386,11 +397,12 @@ fn main() -> ExitCode {
         "manifest" => cmd_manifest(&o),
         "add" => engine::add(&o.engine(), &o.args),
         "del" => engine::del(&o.engine(), &o.args),
-        "upgrade" | "list" | "update" if !o.args.is_empty() => {
+        "upgrade" | "list" | "update" | "recover" if !o.args.is_empty() => {
             eprintln!("oct: '{}' takes no arguments", o.cmd);
             return ExitCode::from(2);
         }
         "upgrade" => engine::upgrade(&o.engine()),
+        "recover" => engine::recover(&o.engine()),
         "update" => engine::update(&o.engine()),
         "list" => engine::list(&o.engine()),
         "search" => engine::search(&o.engine(), &o.search, &o.args),
@@ -409,6 +421,16 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // A command that had to finish an interrupted switch first, and that
+    // switch had errors: the command has not succeeded, whatever its own
+    // work did (`recover` says so itself).
+    let r = r.map(|ok| {
+        let n = engine::recovery_errors();
+        if ok && n > 0 && o.cmd != "recover" {
+            println!("ERRORS: the interrupted switch that was finished first had {n} errors (they are listed above)");
+        }
+        ok && n == 0
+    });
     match r {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),

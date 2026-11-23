@@ -13,7 +13,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{fchown, DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{fchown, DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::{db, sys};
@@ -35,6 +35,40 @@ pub struct RootFs {
     dir_cache: HashMap<Vec<u8>, Vec<u8>>,
     /// Canonical directories created by this RootFs (for triggers).
     pub created_dirs: HashSet<Vec<u8>>,
+    /// The device of catalyst's state directory (looked up once).
+    home_dev: Option<Option<u64>>,
+    /// A directory resolved so far is on another device than catalyst's
+    /// state directory (a mounted `/boot`, a separate `/var/log`): what is
+    /// done there is not ordered against the journal by the file system.
+    pub off_device: bool,
+    /// While set, [`RootFs::ensure_dir`] makes no directory once
+    /// `off_device` is set and returns [`OffDevice`] instead (a light
+    /// switch then puts its journal's name on disk first).
+    pub hold: bool,
+    /// One open directory of each other file system met (`None`: it could
+    /// not be opened), for [`RootFs::sync_others`].
+    others: Vec<(u64, Option<fs::File>)>,
+    /// The directories of `dir_cache` that are on another device.
+    off_dirs: HashSet<Vec<u8>>,
+    /// A directory on another device was resolved, or made, since
+    /// [`RootFs::sync_others`] last ran: something may have been done there.
+    pub off_dirty: bool,
+}
+
+/// The error of [`RootFs::ensure_dir`] under [`RootFs::hold`].
+#[derive(Debug)]
+pub struct OffDevice;
+
+impl std::fmt::Display for OffDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a directory on another file system than catalyst's state")
+    }
+}
+
+impl std::error::Error for OffDevice {}
+
+pub fn is_off_device(e: &io::Error) -> bool {
+    e.get_ref().map_or(false, |r| r.is::<OffDevice>())
 }
 
 fn components(p: &[u8]) -> impl DoubleEndedIterator<Item = &[u8]> {
@@ -62,7 +96,71 @@ pub fn split_rel(p: &[u8]) -> (&[u8], &[u8]) {
 
 impl RootFs {
     pub fn new(root: &Path) -> RootFs {
-        RootFs { root: root.to_path_buf(), dir_cache: HashMap::new(), created_dirs: HashSet::new() }
+        RootFs {
+            root: root.to_path_buf(),
+            dir_cache: HashMap::new(),
+            created_dirs: HashSet::new(),
+            home_dev: None,
+            off_device: false,
+            hold: false,
+            others: Vec::new(),
+            off_dirs: HashSet::new(),
+            off_dirty: false,
+        }
+    }
+
+    /// Notes the device of a directory in which something is, or may be,
+    /// done (`host` is its path). Whether it is another device than the
+    /// state directory's.
+    fn note_dev(&mut self, dev: u64, host: &Path) -> bool {
+        let root = &self.root;
+        let home = *self.home_dev.get_or_insert_with(|| fs::metadata(root.join(db::STATE_DIR)).ok().map(|m| m.dev()));
+        if home == Some(dev) {
+            return false;
+        }
+        self.off_device = true;
+        self.off_dirty = true;
+        if !self.others.iter().any(|(d, _)| *d == dev) {
+            self.others.push((dev, fs::File::open(host).ok()));
+        }
+        true
+    }
+
+    /// Notes the file system of the directory at `host` (not one of a
+    /// package's entries: the root itself, `Programs`, a place a script
+    /// writes to). Whether it is another one than the state directory's.
+    pub fn note_dir(&mut self, host: &Path) -> bool {
+        match fs::metadata(host) {
+            Ok(m) if m.is_dir() => self.note_dev(m.dev(), host),
+            _ => false,
+        }
+    }
+
+    /// `syncfs` of every other file system noted so far: what was done
+    /// there is on disk when this returns. (The file system of the state
+    /// directory, with the journal, is not among them.)
+    pub fn sync_others(&mut self) -> io::Result<usize> {
+        let mut all = false;
+        for (_, f) in &self.others {
+            match f {
+                Some(f) => sys::sync_fs(f)?,
+                None => all = true,
+            }
+        }
+        if all {
+            // one of them could not be opened: every file system, then
+            unsafe { libc::sync() };
+        }
+        self.off_dirty = false;
+        Ok(self.others.len())
+    }
+
+    /// Something may have been done on the other file systems by someone
+    /// else (a script).
+    pub fn touch_others(&mut self) {
+        if !self.others.is_empty() {
+            self.off_dirty = true;
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -131,11 +229,48 @@ impl RootFs {
             return Ok(Some(Vec::new()));
         }
         if let Some(c) = self.dir_cache.get(rel_dir) {
-            return Ok(Some(c.clone()));
+            let c = c.clone();
+            // work may follow in a directory on another file system
+            if self.off_device && self.off_dirs.contains(rel_dir) {
+                self.off_dirty = true;
+            }
+            return Ok(Some(c));
+        }
+        // With the directory above known, one lstat settles the usual case
+        // (a real directory there). Walking every component again for each
+        // directory made the removal of a big package ask about the same
+        // directories some 17,000 times. A symlink, or a path with `.`, `..`
+        // or a doubled slash, goes the long way below.
+        let (parent, name) = split_rel(rel_dir);
+        if !name.is_empty() && name != b"." && name != b".." {
+            let Some(pc) = self.dir_canon(parent)? else { return Ok(None) };
+            let canon = join_rel(&pc, name);
+            let host = self.host(&canon);
+            match fs::symlink_metadata(&host) {
+                Ok(m) if m.is_dir() => {
+                    if self.note_dev(m.dev(), &host) {
+                        self.off_dirs.insert(rel_dir.to_vec());
+                    }
+                    self.dir_cache.insert(rel_dir.to_vec(), canon.clone());
+                    return Ok(Some(canon));
+                }
+                Ok(m) if m.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("/{} exists and is not a directory", String::from_utf8_lossy(rel_dir)),
+                    ))
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            }
         }
         let r = self.resolve(rel_dir, true)?;
         match fs::symlink_metadata(&r.host) {
             Ok(m) if m.is_dir() => {
+                if self.note_dev(m.dev(), &r.host) {
+                    self.off_dirs.insert(rel_dir.to_vec());
+                }
                 self.dir_cache.insert(rel_dir.to_vec(), r.canon.clone());
                 Ok(Some(r.canon))
             }
@@ -164,8 +299,22 @@ impl RootFs {
         // a dangling symlink, which resolve follows)
         let r = self.resolve(rel_dir, true)?;
         refuse_reserved(rel_dir, &r.canon)?;
+        // The new directory is made on the file system of the directory
+        // it is made in, which is not always one resolved before (a
+        // dangling symlink may lead to another mount): noted before the
+        // directory is made.
+        let off = match r.host.parent().map(|p| (p, fs::metadata(p))) {
+            Some((p, Ok(m))) => self.note_dev(m.dev(), p),
+            _ => false,
+        };
+        if self.hold && self.off_device {
+            return Err(io::Error::new(io::ErrorKind::Other, OffDevice));
+        }
         if make_dir_atomic(&r.host, mode, uid, gid)? {
             self.created_dirs.insert(r.canon.clone());
+        }
+        if off {
+            self.off_dirs.insert(rel_dir.to_vec());
         }
         self.dir_cache.insert(rel_dir.to_vec(), r.canon.clone());
         Ok(r.canon)
@@ -196,17 +345,58 @@ impl RootFs {
     /// (or the entry is in one of catalyst's own directories).
     pub fn entry_if_dir_exists(&mut self, rel: &[u8]) -> io::Result<Option<Resolved>> {
         let (dir, name) = split_rel(rel);
-        match self.dir_canon(dir) {
-            Ok(Some(canon_dir)) => {
-                let canon = join_rel(&canon_dir, name);
-                if db::is_reserved(&canon) {
-                    return Ok(None);
+        // a directory resolved before: its path is not copied once more
+        let canon = match self.dir_cache.get(dir) {
+            Some(canon_dir) => {
+                let c = join_rel(canon_dir, name);
+                if self.off_device && self.off_dirs.contains(dir) {
+                    self.off_dirty = true;
                 }
-                Ok(Some(Resolved { host: self.host(&canon), canon }))
+                c
             }
-            Ok(None) => Ok(None),
-            Err(_) => Ok(None),
+            None => match self.dir_canon(dir) {
+                Ok(Some(canon_dir)) => join_rel(&canon_dir, name),
+                Ok(None) | Err(_) => return Ok(None),
+            },
+        };
+        if db::is_reserved(&canon) {
+            return Ok(None);
         }
+        Ok(Some(Resolved { host: self.host(&canon), canon }))
+    }
+
+    /// The canonical path of directory `rel_dir`, if it exists as one.
+    pub fn dir_if_exists(&mut self, rel_dir: &[u8]) -> Option<Vec<u8>> {
+        self.dir_canon(rel_dir).ok().flatten()
+    }
+
+    /// Where directory `rel_dir` is, or will be once [`RootFs::ensure_dir`]
+    /// has made it: the canonical path of the part of it that exists, and
+    /// the rest as written (a missing directory is made as a real one under
+    /// the last existing one; a symlink on the way, dangling or not, is
+    /// followed, as `ensure_dir` follows it). `planned` remembers the
+    /// answers for the directories that do not exist yet.
+    pub fn dir_planned(&mut self, rel_dir: &[u8], planned: &mut HashMap<Vec<u8>, Vec<u8>>) -> io::Result<Vec<u8>> {
+        if let Some(c) = planned.get(rel_dir) {
+            return Ok(c.clone());
+        }
+        if let Some(c) = self.dir_canon(rel_dir)? {
+            return Ok(c);
+        }
+        let (parent, name) = split_rel(rel_dir);
+        let canon = if name.is_empty() || name == b"." || name == b".." {
+            self.resolve(rel_dir, true)?.canon
+        } else {
+            let pc = self.dir_planned(parent, planned)?;
+            let here = join_rel(&pc, name);
+            match fs::symlink_metadata(self.host(&here)) {
+                // a symlink that leads nowhere yet: the directory is made where it points
+                Ok(m) if m.file_type().is_symlink() => self.resolve(rel_dir, true)?.canon,
+                _ => here,
+            }
+        };
+        planned.insert(rel_dir.to_vec(), canon.clone());
+        Ok(canon)
     }
 
     /// Forgets cached directories: after directories were removed, and
@@ -214,6 +404,7 @@ impl RootFs {
     /// symlink).
     pub fn forget(&mut self) {
         self.dir_cache.clear();
+        self.off_dirs.clear();
     }
 
     /// Reads a small regular file of the root, resolved inside the root
@@ -263,6 +454,17 @@ impl RootFs {
 /// wrong mode would stay wrong). A temporary left by an interrupted run is
 /// removed. Returns false if the directory was already there.
 fn make_dir_atomic(host: &Path, mode: u32, uid: u32, gid: u32) -> io::Result<bool> {
+    // The usual directory (root:root 0755 under a root:root directory) is
+    // what one plain mkdir makes, and then that one call is the atomic way:
+    // the temporary name, the descriptor and the rename below cost five
+    // calls more, for each of the 1,250 directories of a big install.
+    if plain_mkdir_is_exact(host, mode, uid, gid) {
+        return match fs::DirBuilder::new().mode(mode).create(host) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e),
+        };
+    }
     let tmp = tmp_name(host);
     match fs::symlink_metadata(&tmp) {
         Ok(m) if m.is_dir() => fs::remove_dir(&tmp)?,
@@ -299,6 +501,27 @@ fn make_dir_atomic(host: &Path, mode: u32, uid: u32, gid: u32) -> io::Result<boo
             }
         }
     }
+}
+
+/// Whether a plain `mkdir(host, mode)` gives exactly this mode and owner,
+/// whatever the file system's rules for a new entry's group are: no bit of
+/// the mode is taken by the umask or is a write bit for others or a set-id
+/// or sticky bit; the directory above is a real one, not setgid (its bit
+/// would be inherited) and without a default ACL (which the new directory
+/// would inherit, mode included); and, for root, the owner wanted is the one the
+/// process runs as and the group wanted is both the process's and that of
+/// the directory above (so it comes out right whether the new entry takes
+/// the one or the other). Otherwise the directory is made the long way.
+fn plain_mkdir_is_exact(host: &Path, mode: u32, uid: u32, gid: u32) -> bool {
+    if mode & !0o755 != 0 || sys::umask_at_start() & mode != 0 {
+        return false;
+    }
+    let Some(parent) = host.parent() else { return false };
+    let Ok(pm) = fs::symlink_metadata(parent) else { return false };
+    if !pm.is_dir() || pm.mode() & 0o2000 != 0 || sys::has_default_acl(parent) {
+        return false;
+    }
+    !sys::is_root() || (unsafe { libc::geteuid() == uid && libc::getegid() == gid } && pm.gid() == gid)
 }
 
 /// Refuses a path whose canonical form is in one of catalyst's own directories
@@ -362,6 +585,55 @@ mod tests {
         let mut r = r;
         assert_eq!(r.ensure_dir(b"abs/x/y", 0o700, 0, 0).unwrap(), b"usr/bin/x/y");
         assert!(base.join("usr/bin/x/y").is_dir());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A plain mkdir is taken for exact only where it is: the umask takes
+    /// no bit of the mode, the mode has none a mkdir is not trusted with,
+    /// and the directory above passes on neither a set-group-id bit nor a
+    /// default ACL.
+    #[test]
+    fn a_plain_mkdir_is_taken_only_where_it_is_exact() {
+        sys::note_umask();
+        let base = std::env::temp_dir().join(format!("catalyst-mkdir-exact-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::DirBuilder::new().mode(0o755).create(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).unwrap();
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let exact = |parent: &Path, mode: u32| plain_mkdir_is_exact(&parent.join("new"), mode, uid, gid);
+        // under an ordinary directory: when the umask takes no bit of the
+        // mode and, for root, the groups agree
+        let plain = sys::umask_at_start() & 0o755 == 0 && (!sys::is_root() || fs::metadata(&base).unwrap().gid() == gid);
+        assert_eq!(exact(&base, 0o755), plain);
+        assert_eq!(exact(&base, 0o700), sys::umask_at_start() & 0o700 == 0 && plain);
+        // modes a plain mkdir is not trusted with
+        assert!(!exact(&base, 0o775) && !exact(&base, 0o757) && !exact(&base, 0o1755) && !exact(&base, 0o2755));
+        // a set-group-id directory above: the new one would inherit the bit
+        let sg = base.join("setgid");
+        fs::DirBuilder::new().mode(0o755).create(&sg).unwrap();
+        fs::set_permissions(&sg, fs::Permissions::from_mode(0o2755)).unwrap();
+        assert!(!exact(&sg, 0o755));
+        // a default ACL above (user::rwx, group::r-x, other::r-x): the new
+        // one's mode would come from it; skipped where the file system has
+        // no ACLs
+        let acl = base.join("acl");
+        fs::DirBuilder::new().mode(0o755).create(&acl).unwrap();
+        let mut blob = vec![2u8, 0, 0, 0];
+        for (tag, perm) in [(1u16, 7u16), (4, 5), (0x20, 5)] {
+            blob.extend(tag.to_le_bytes());
+            blob.extend(perm.to_le_bytes());
+            blob.extend(u32::MAX.to_le_bytes());
+        }
+        assert!(!sys::has_default_acl(&base));
+        if sys::set_xattr(&acl, b"system.posix_acl_default", &blob).is_ok() {
+            assert!(sys::has_default_acl(&acl) && !exact(&acl, 0o755));
+        } else {
+            eprintln!("no default ACL could be set here: that part is not tested");
+        }
+        // nothing above, or a file
+        assert!(!exact(&base.join("missing"), 0o755));
+        fs::write(base.join("file"), b"").unwrap();
+        assert!(!exact(&base.join("file"), 0o755));
         fs::remove_dir_all(&base).unwrap();
     }
 }

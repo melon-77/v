@@ -101,15 +101,28 @@ fn parse_public_pem(pem: &[u8]) -> Result<PKey<Public>> {
 /// whose decoder machinery takes 0.3 ms to start (of every run); anything
 /// else (`None`) is left to that reader.
 fn pkcs1_of_plain_pem(pem: &[u8]) -> Option<Vec<u8>> {
-    let t = std::str::from_utf8(pem).ok()?.trim_start();
+    // Only the form `openssl` itself writes is read here: the BEGIN line
+    // first, base64 in lines of 64 characters (the last one may be shorter),
+    // the END line. OpenSSL's reader refuses some files a lenient decoder
+    // would take (a blank inside a line, an empty line in the middle); a
+    // file in any other form is left to it, so that a file is a key here
+    // exactly when it is one there (and for apk).
+    let t = std::str::from_utf8(pem).ok()?;
     let (label, rest) = if let Some(r) = t.strip_prefix("-----BEGIN PUBLIC KEY-----") {
         ("PUBLIC KEY", r)
     } else {
         ("RSA PUBLIC KEY", t.strip_prefix("-----BEGIN RSA PUBLIC KEY-----")?)
     };
+    let rest = rest.strip_prefix("\r\n").or_else(|| rest.strip_prefix('\n'))?;
     let (b64, tail) = rest.split_once(format!("-----END {label}-----").as_str())?;
-    if !tail.trim().is_empty() {
+    if !tail.trim().is_empty() || !b64.ends_with('\n') {
         return None;
+    }
+    let lines: Vec<&str> = b64.lines().collect();
+    let whole = |l: &str| !l.is_empty() && l.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='));
+    match lines.split_last() {
+        Some((last, before)) if whole(last) && last.len() <= 64 && before.iter().all(|l| l.len() == 64 && whole(l)) => {}
+        _ => return None,
     }
     let der = base64_decode(b64)?;
     if label == "RSA PUBLIC KEY" {
@@ -152,8 +165,10 @@ fn canonical_rsa_id(der: &[u8]) -> Option<([u8; 16], u32)> {
     let n = if n[0] == 0 { &n[1..] } else { n };
     let e = if e[0] == 0 { &e[1..] } else { e };
     let bits = n.len() as u32 * 8 - n[0].leading_zeros();
-    // Require a plausible RSA key (>= 512 bits, odd modulus, odd exponent >= 3);
-    // anything unusual falls back to OpenSSL's full validator.
+    // The short way is only for a key of the usual shape (512 bits or more,
+    // an odd modulus, an odd exponent of 3 or more). Any other key goes to
+    // OpenSSL, as every key did before, and is accepted or refused there as
+    // it always was: this is not a check of a key's strength.
     if bits < 512 || (n[n.len() - 1] & 1) == 0 || (e[e.len() - 1] & 1) == 0 || e == [1] {
         return None;
     }

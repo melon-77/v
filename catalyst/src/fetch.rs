@@ -161,7 +161,13 @@ impl Http {
                 return Err(Error::Integrity(format!("{url}: got {total} bytes, the index says {n}")));
             }
         }
-        f.sync_all()?;
+        // No fsync here (there was one, a device flush of 4 to 5 ms for
+        // every file fetched): a package goes to disk with the syncfs
+        // before the switch, and a file a power cut leaves cut short in the
+        // cache is found out when it is read (it does not verify, is
+        // removed, and is fetched again). The repository index comes
+        // through here too: its caller syncs it before it replaces the
+        // cached one (repo.rs).
         Ok(total)
     }
 }

@@ -786,130 +786,399 @@ fn text(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-/// The owner's rule of 2026-11-23: an add of new packages only is not
-/// synced. A power cut can then leave the package being added incomplete,
-/// and nothing else: after the reboot it is found and removed, the rest of
-/// the tree is as it was, and adding it again works.
+/// The owner's "one sync" (2026-11-23): a change is put on disk by one
+/// syncfs, before the switch, and ends without another, whether it adds,
+/// replaces or removes; with `--sync` its journal's name is fsync'ed and
+/// it ends with a syncfs too. A file under etc/ arrives as a copy of its
+/// own, whole, and the world is in order. After each light change the
+/// lookup index (put in place by renames) is the one a rebuild writes.
+/// (libsensors is a small package with a file under etc/.)
 #[test]
-fn an_add_damaged_by_a_power_cut_is_removed_and_nothing_else_is() {
+fn a_change_takes_one_sync_and_with_sync_asked_for_it_ends_with_one_too() {
+    use std::os::unix::fs::MetadataExt;
     if repo().is_none() {
         return;
     }
-    let root = fresh_root("power-cut");
-    let mark = root.join("var/lib/catalyst/unsynced");
-    let world = root.join("var/lib/catalyst/world");
-    let boot = |b: &'static str| [("CATALYST_BOOT_ID", b), ("CATALYST_PROF", "1")];
-    let out = oct_real(&root, &boot("boot-1"), &["--initdb", "add", "nano"]);
+    let root = fresh_root("one-sync");
+    let env = [("CATALYST_PROF", "1")];
+    let state = root.join("var/lib/catalyst");
+    let snap = || {
+        let mut v: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut dirs = vec![state.join("index")];
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else {
+                    v.push((p.strip_prefix(&state).unwrap().to_string_lossy().into_owned(), std::fs::read(&p).unwrap()));
+                }
+            }
+        }
+        v.sort();
+        v
+    };
+    // the index as the change left it is whole (its state is there) and is
+    // byte for byte what `oct fix` rebuilds from the records
+    let index_is_a_rebuild = |after: &str| {
+        let left = snap();
+        assert!(left.iter().any(|(n, _)| n == "index/state"), "{after}: no index state");
+        assert!(!left.iter().any(|(n, _)| n.starts_with("index/next")), "{after}: index/next left");
+        assert!(oct_real(&root, &[], &["fix"]).status.success());
+        assert!(left == snap(), "{after}: the index differs from the one oct fix rebuilds");
+    };
+    // the first install makes the tree's directory symlinks (lib64 and the
+    // like): the lookup index is then rebuilt at the end of the switch, and
+    // a switch that writes the index at its end ends with a syncfs
+    let out = oct_real(&root, &env, &["--initdb", "add", "tree"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("this add is not synced") && !text(&out.stderr).contains("syncfs"));
-    assert!(std::fs::read_to_string(&mark).unwrap().contains("\nboot boot-1\n"));
-    // a reboot with everything on disk: nothing to do but a new mark, which
-    // lists what is installed before the next add
-    let before = live_tree(&root);
-    let out = oct_real(&root, &boot("boot-2"), &["add", "tree"]);
+    let e = text(&out.stderr);
+    assert!(e.contains("syncfs before the switch") && e.contains("final syncfs") && !e.contains("name fsync'ed"), "{e}");
+    for left in ["unsynced", "world.new", "journal", "journal.new"] {
+        assert!(!state.join(left).exists(), "{left}");
+    }
+    // from here on the index of after each change is staged before the one
+    // syncfs and put in place by renames
+    let out = oct_real(&root, &env, &["add", "libsensors"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).contains("1 to install"), "{}", text(&out.stdout));
-    assert!(!text(&out.stdout).contains("went down"), "{}", text(&out.stdout));
-    let m = std::fs::read_to_string(&mark).unwrap();
-    assert!(m.contains("\nboot boot-2\n") && m.contains("\nhad nano ") && !m.contains("had tree "), "{m}");
-    assert_eq!(std::fs::read_to_string(&world).unwrap(), "nano\ntree\n");
-    // the power cut: tree's program comes back empty (one inode, in
-    // Programs and in the live tree)
-    let bin = root.join("usr/bin/tree");
-    assert!(bin.metadata().unwrap().len() > 0);
-    std::fs::OpenOptions::new().write(true).open(root.join("Programs/tree/Current/usr/bin/tree")).unwrap().set_len(0).unwrap();
-    assert_eq!(bin.metadata().unwrap().len(), 0);
-    let out = oct_real(&root, &boot("boot-3"), &["fix"]);
+    let e = text(&out.stderr);
+    assert!(e.contains("index: staged") && !e.contains("final syncfs") && !e.contains("name fsync'ed"), "{e}");
+    assert_eq!(std::fs::read_to_string(state.join("world")).unwrap(), "libsensors\ntree\n");
+    index_is_a_rebuild("add libsensors");
+    // its file under etc/: a copy (its own inode, one link), whole
+    let (live, own) = (root.join("etc/sensors3.conf"), root.join("Programs/libsensors/Current/etc/sensors3.conf"));
+    assert_eq!(std::fs::read(&live).unwrap(), std::fs::read(&own).unwrap());
+    assert!(!std::fs::read(&live).unwrap().is_empty());
+    let (lm, om) = (live.metadata().unwrap(), own.metadata().unwrap());
+    assert!(lm.ino() != om.ino() && lm.nlink() == 1 && lm.mode() == om.mode() && lm.mtime() == om.mtime());
+    assert!(!root.join("Programs/libsensors/Current/.catalyst/staged").exists());
+    // the version is open for reading once the switch is done
+    assert_eq!(root.join("Programs/libsensors/Current/").metadata().unwrap().mode() & 0o777, 0o755);
+    // every file of the package is in the live tree as the same inode
+    for f in ["usr/bin/tree"] {
+        let (a, b) = (root.join(f).metadata().unwrap(), root.join("Programs/tree/Current").join(f).metadata().unwrap());
+        assert!(a.ino() == b.ino() && a.nlink() == 2, "{f}");
+    }
+    // something is where a package puts a file: replaced, still one sync
+    std::fs::write(root.join("usr/bin/less"), b"mine").unwrap();
+    let out = oct_real(&root, &env, &["add", "less"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).contains("tree-") && text(&out.stdout).contains("removed"), "{}", text(&out.stdout));
-    assert!(!root.join("Programs/tree").exists() && !bin.exists() && !mark.exists());
-    assert_eq!(live_tree(&root), before);
-    assert!(root.join("usr/bin/nano").metadata().unwrap().len() > 0);
-    // the world still names it: adding it again works, and it is whole
-    let out = oct_real(&root, &boot("boot-3"), &["add", "tree"]);
+    assert!(!text(&out.stderr).contains("final syncfs"), "{}", text(&out.stderr));
+    assert!(root.join("usr/bin/less").metadata().unwrap().len() > 4);
+    assert_eq!(root.join("usr/bin/less").metadata().unwrap().ino(), root.join("Programs/less/Current/usr/bin/less").metadata().unwrap().ino());
+    // a removal: one sync as well
+    let out = oct_real(&root, &env, &["del", "tree"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(bin.metadata().unwrap().len() > 0);
+    let e = text(&out.stderr);
+    assert!(e.contains("syncfs before the switch") && e.contains("index: staged") && !e.contains("final syncfs"), "{e}");
+    assert!(!root.join("usr/bin/tree").exists() && !root.join("Programs/tree").exists());
+    assert_eq!(std::fs::read_to_string(state.join("world")).unwrap(), "less\nlibsensors\n");
+    index_is_a_rebuild("del tree");
+    // --sync: the journal's name fsync'ed, and on disk when the command returns
+    for args in [&["--sync", "add", "tree"][..], &["--sync", "del", "tree"]] {
+        let out = oct_real(&root, &env, args);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let e = text(&out.stderr);
+        assert!(e.contains("syncfs before the switch") && e.contains("name fsync'ed") && e.contains("final syncfs"), "{args:?}: {e}");
+        assert!(!e.contains("index: staged"), "{args:?}: {e}");
+    }
+    for left in ["world.new", "journal", "journal.new", "dirty", "index/next"] {
+        assert!(!state.join(left).exists(), "{left}");
+    }
+    index_is_a_rebuild("the changes with --sync");
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// An unsynced add killed in its switch, with tree's files placed and its
-/// `Current` not yet set. In the same boot the next run finishes it, as it
-/// would a synced one. After a reboot it is finished only when what it
-/// installs is whole; a short file, or a journal that did not reach the
-/// disk, and it is undone: the placed files go, the tree is as before.
+/// A removal stopped at each stage: before its journal is in effect the
+/// package is untouched and the next run throws the plan away; from the
+/// journal on, `oct recover` finishes it. With nothing left, `recover` does
+/// nothing (and does not even lock the root).
 #[test]
-fn an_unsynced_add_cut_in_its_switch_is_finished_only_when_whole() {
+fn a_removal_cut_before_its_journal_is_discarded_and_after_it_is_finished_by_recover() {
     if repo().is_none() {
         return;
     }
-    for (i, case) in ["same boot", "reboot, whole", "reboot, short", "reboot, journal lost"].into_iter().enumerate() {
-        let root = fresh_root(&format!("cut-switch-{i}"));
-        assert!(oct_real(&root, &[("CATALYST_BOOT_ID", "boot-1")], &["--initdb", "add", "nano"]).status.success());
+    let cuts = [("synced", false), ("journal", true), ("removed", true), ("world", true), ("triggers", true)];
+    for (i, (at, finished)) in cuts.into_iter().enumerate() {
+        let root = fresh_root(&format!("cut-del-{i}"));
+        let state = root.join("var/lib/catalyst");
+        assert!(oct_real(&root, &[], &["--initdb", "add", "tree", "libsensors"]).status.success());
+        let out = oct_real(&root, &[], &["recover"]);
+        assert!(out.status.success() && text(&out.stdout).contains("nothing to finish"), "{}", text(&out.stdout));
         let before = live_tree(&root);
-        let out = oct_real(&root, &[("CATALYST_BOOT_ID", "boot-1"), ("CATALYST_CRASH_AT", "placed:tree")], &["add", "tree"]);
-        assert!(!out.status.success(), "{case}");
-        let journal = root.join("var/lib/catalyst/journal");
-        assert!(std::fs::read_to_string(&journal).unwrap().contains("\nunsynced\n"), "{case}");
-        let bin = root.join("usr/bin/tree");
-        assert!(bin.exists() && !root.join("Programs/tree/Current").exists(), "{case}");
-        match case {
-            "reboot, short" => {
-                let v = std::fs::read_dir(root.join("Programs/tree")).unwrap().flatten().next().unwrap().path();
-                std::fs::OpenOptions::new().write(true).open(v.join("usr/bin/tree")).unwrap().set_len(0).unwrap();
-            }
-            "reboot, journal lost" => std::fs::write(&journal, b"").unwrap(),
-            _ => {}
+        let out = oct_real(&root, &[("CATALYST_CRASH_AT", at)], &["del", "libsensors"]);
+        assert!(!out.status.success(), "{at}");
+        if !finished {
+            assert!(state.join("journal.new").exists() && !state.join("journal").exists(), "{at}");
+            assert_eq!(live_tree(&root), before, "{at}: nothing is removed before the journal");
         }
-        let next = if case == "same boot" { "boot-1" } else { "boot-2" };
-        let out = oct_real(&root, &[("CATALYST_BOOT_ID", next)], &["fix"]);
-        assert!(out.status.success(), "{case}: {}", text(&out.stderr));
-        assert!(!journal.exists(), "{case}");
-        if case == "same boot" || case == "reboot, whole" {
-            assert!(root.join("Programs/tree/Current").exists() && bin.metadata().unwrap().len() > 0, "{case}");
-            assert!(std::fs::read_to_string(root.join("var/lib/catalyst/world")).unwrap().contains("tree"), "{case}");
+        if finished {
+            // the change was asked for with --no-scripts (oct_real passes
+            // it): its journal says so, for whoever finishes it
+            assert!(std::fs::read_to_string(state.join("journal")).unwrap().contains("\nno-scripts\n"), "{at}");
+        }
+        let out = oct_real(&root, &[], &["--simulate", "recover"]);
+        assert!(out.status.success() && text(&out.stdout).contains("would finish"), "{at}: {}", text(&out.stdout));
+        let out = oct_real(&root, &[], &["recover"]);
+        assert!(out.status.success(), "{at}: {}", text(&out.stderr));
+        for left in ["journal", "journal.new", "world.new", "dirty", "index/next"] {
+            assert!(!state.join(left).exists(), "{at}: {left}");
+        }
+        let world = std::fs::read_to_string(state.join("world")).unwrap();
+        if finished {
+            assert!(!root.join("Programs/libsensors").exists() && !root.join("etc/sensors3.conf").exists(), "{at}");
+            assert_eq!(world, "tree\n", "{at}");
         } else {
-            assert!(text(&out.stdout).contains("cut short"), "{case}: {}", text(&out.stdout));
-            assert!(!root.join("Programs/tree").exists() && !bin.exists(), "{case}");
-            assert_eq!(live_tree(&root), before, "{case}");
+            assert_eq!(live_tree(&root), before, "{at}");
+            assert_eq!(world, "libsensors\ntree\n", "{at}");
         }
-        // and the root takes changes again
-        let out = oct_real(&root, &[("CATALYST_BOOT_ID", next)], &["add", "tree"]);
-        assert!(out.status.success(), "{case}: {}", text(&out.stderr));
-        assert!(bin.metadata().unwrap().len() > 0, "{case}");
+        assert!(root.join("usr/bin/tree").exists(), "{at}");
+        let out = oct_real(&root, &[], &["fix"]);
+        assert!(out.status.success() && text(&out.stdout).contains(" 0 repaired"), "{at}: {}", text(&out.stdout));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
 
-/// What is synced: an add that has to replace something that is there
-/// (from that point on), and every change that is not an add. The world is
-/// appended to by an unsynced add and written sorted by a synced change.
+/// An add stopped at each stage. Before its journal is in effect nothing was
+/// placed, and the next run throws away what it had prepared: the tree and
+/// the world are as before. From the journal on, the next run finishes it.
 #[test]
-fn an_add_is_synced_once_it_replaces_something_and_other_changes_always() {
+fn an_add_cut_before_its_journal_is_discarded_and_after_it_is_finished() {
     if repo().is_none() {
         return;
     }
-    let root = fresh_root("sync-rule");
-    let env = [("CATALYST_BOOT_ID", "boot-1"), ("CATALYST_PROF", "1")];
-    let world = root.join("var/lib/catalyst/world");
-    let out = oct_real(&root, &env, &["--initdb", "add", "tree"]);
+    let cuts = [("synced", false), ("journal", true), ("placed:libsensors", true), ("world", true)];
+    for (i, (at, finished)) in cuts.into_iter().enumerate() {
+        let root = fresh_root(&format!("cut-add-{i}"));
+        let state = root.join("var/lib/catalyst");
+        assert!(oct_real(&root, &[], &["--initdb", "add", "tree"]).status.success());
+        let before = live_tree(&root);
+        let out = oct_real(&root, &[("CATALYST_CRASH_AT", at)], &["add", "libsensors"]);
+        assert!(!out.status.success(), "{at}");
+        // what the switch will put in place by a rename is there before it
+        // begins (synced with the journal): the copy for etc/, the world;
+        // and the new version is root's alone until its owners are final
+        use std::os::unix::fs::MetadataExt;
+        let mut waiting: Vec<u64> = Vec::new();
+        if at == "journal" {
+            let ver = std::fs::read_dir(root.join("Programs/libsensors")).unwrap().flatten().next().unwrap().path();
+            assert_eq!(ver.metadata().unwrap().mode() & 0o777, 0o700, "the new version before the switch");
+            for e in std::fs::read_dir(ver.join(".catalyst/staged")).unwrap().flatten() {
+                waiting.push(e.metadata().unwrap().ino());
+            }
+            waiting.push(state.join("world.new").metadata().unwrap().ino());
+            assert_eq!(waiting.len(), 2, "one staged copy and the world");
+        }
+        if finished {
+            assert!(state.join("journal").exists(), "{at}");
+        } else {
+            assert!(state.join("journal.new").exists() && state.join("world.new").exists() && !state.join("journal").exists());
+            assert_eq!(live_tree(&root), before, "{at}: nothing is placed before the journal");
+        }
+        let out = oct_real(&root, &[], &["fix"]);
+        assert!(out.status.success(), "{at}: {}", text(&out.stderr));
+        for left in ["journal", "journal.new", "world.new", "index/next"] {
+            assert!(!state.join(left).exists(), "{at}: {left}");
+        }
+        let world = std::fs::read_to_string(state.join("world")).unwrap();
+        let conf = root.join("etc/sensors3.conf");
+        if finished {
+            assert!(root.join("Programs/libsensors/Current").exists(), "{at}");
+            assert_eq!(std::fs::read(&conf).unwrap(), std::fs::read(root.join("Programs/libsensors/Current/etc/sensors3.conf")).unwrap(), "{at}");
+            assert!(!std::fs::read(&conf).unwrap().is_empty(), "{at}");
+            assert_eq!(world, "libsensors\ntree\n", "{at}");
+            assert_eq!(root.join("Programs/libsensors/Current/").metadata().unwrap().mode() & 0o777, 0o755, "{at}");
+            if at == "journal" {
+                // renamed into place, not written again
+                assert_eq!(vec![conf.metadata().unwrap().ino(), state.join("world").metadata().unwrap().ino()], waiting);
+            }
+        } else {
+            assert!(!root.join("Programs/libsensors").exists() && !conf.exists(), "{at}");
+            assert_eq!(live_tree(&root), before, "{at}");
+            assert_eq!(world, "tree\n", "{at}");
+            let out = oct_real(&root, &[], &["add", "libsensors"]);
+            assert!(out.status.success(), "{at}: {}", text(&out.stderr));
+            assert!(conf.metadata().unwrap().len() > 0, "{at}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Every file of the files of package `name`'s current version is in the
+/// live tree as the same inode (a symlink with the same target, a directory
+/// as a directory); how many entries were looked at.
+fn placed_whole(root: &std::path::Path, name: &str) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    fn walk(ver: &std::path::Path, dir: &std::path::Path, root: &std::path::Path, n: &mut usize) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            let rel = p.strip_prefix(ver).unwrap();
+            if rel.starts_with(".catalyst") || rel.starts_with("etc") {
+                continue;
+            }
+            let live = root.join(rel);
+            let (m, lm) = (p.symlink_metadata().unwrap(), live.symlink_metadata().unwrap_or_else(|e| panic!("{}: {e}", live.display())));
+            *n += 1;
+            if m.is_dir() {
+                assert!(lm.is_dir(), "{}", live.display());
+                walk(ver, &p, root, n);
+            } else if m.file_type().is_symlink() {
+                assert_eq!(std::fs::read_link(&p).unwrap(), std::fs::read_link(&live).unwrap(), "{}", live.display());
+            } else {
+                assert_eq!((m.dev(), m.ino()), (lm.dev(), lm.ino()), "{}", live.display());
+            }
+        }
+    }
+    let ver = std::fs::canonicalize(root.join("Programs").join(name).join("Current")).unwrap();
+    let mut n = 0;
+    walk(&ver, &ver, root, &mut n);
+    n
+}
+
+/// Every file of the lookup index, by its path in there.
+fn index_files(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, base, out);
+            } else {
+                out.insert(p.strip_prefix(base).unwrap().to_string_lossy().into_owned(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    let base = root.join("var/lib/catalyst/index");
+    let mut out = Default::default();
+    walk(&base, &base, &mut out);
+    out
+}
+
+/// An add killed after some of a package's files were linked (the hook
+/// `link:N` places them one by one and stops after N): the package is half
+/// placed. The next run finishes it: every file of the package is in the
+/// live tree, nothing is left over, and the lookup index the recovery
+/// leaves is the one `oct fix` rebuilds.
+#[test]
+fn an_add_cut_among_its_links_is_finished_and_its_index_is_a_rebuild() {
+    if repo().is_none() {
+        return;
+    }
+    for n in [1, 5] {
+        let root = fresh_root(&format!("cut-link-{n}"));
+        let state = root.join("var/lib/catalyst");
+        assert!(oct_real(&root, &[], &["--initdb", "add", "tree"]).status.success());
+        let before = live_tree(&root);
+        let hook = format!("link:{n}");
+        let out = oct_real(&root, &[("CATALYST_CRASH_AT", hook.as_str())], &["add", "nano"]);
+        assert!(!out.status.success(), "{hook}");
+        assert!(state.join("journal").exists(), "{hook}");
+        assert!(live_tree(&root) != before, "{hook}: something of the package is placed");
+        let out = oct_real(&root, &[], &["recover"]);
+        assert!(out.status.success(), "{hook}: {}", text(&out.stderr));
+        for left in ["journal", "journal.new", "world.new", "dirty", "index/next"] {
+            assert!(!state.join(left).exists(), "{hook}: {left}");
+        }
+        assert!(placed_whole(&root, "nano") > n, "{hook}");
+        let after = live_tree(&root);
+        // the index as the recovery left it, against a rebuild
+        let index = index_files(&root);
+        assert!(index.contains_key("state"), "{hook}: the index is in use after the recovery");
+        let out = oct_real(&root, &[], &["fix"]);
+        assert!(out.status.success(), "{hook}: {}", text(&out.stderr));
+        assert!(index_files(&root) == index, "{hook}: the index after the recovery is not the one a rebuild writes");
+        assert!(live_tree(&root) == after, "{hook}: `oct fix` found something to change after the recovery");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// A package with entries in a directory that is another file system (as a
+/// mounted /boot is): nothing orders that file system against the journal's,
+/// so the switch is a full one. The journal's name is fsync'ed before the
+/// first entry goes there, the other file system is synced before the mark
+/// that records the work, and the switch ends with a syncfs; the files
+/// arrive there as whole copies. Needs root, and a place where it may mount.
+#[test]
+fn a_change_on_two_file_systems_is_a_full_switch_and_syncs_the_other_one() {
+    use std::process::Command;
+    if repo().is_none() || !Command::new("id").arg("-u").output().map_or(false, |o| o.stdout == b"0\n") {
+        return;
+    }
+    let root = fresh_root("two-fs");
+    assert!(oct_real(&root, &[], &["--initdb", "add", "tree"]).status.success());
+    let dir = root.join("usr/share/nano");
+    std::fs::create_dir_all(&dir).unwrap();
+    struct Mounted(std::path::PathBuf);
+    impl Drop for Mounted {
+        fn drop(&mut self) {
+            let _ = Command::new("umount").arg("-l").arg(&self.0).status();
+        }
+    }
+    if !Command::new("mount").args(["-t", "tmpfs", "-o", "size=16m", "none"]).arg(&dir).status().map_or(false, |s| s.success()) {
+        let _ = std::fs::remove_dir_all(&root);
+        return;
+    }
+    let mounted = Mounted(dir.clone());
+    for (cmd, there) in [("add", true), ("del", false)] {
+        let out = oct_real(&root, &[("CATALYST_PROF", "1")], &[cmd, "nano"]);
+        let prof = text(&out.stderr);
+        assert!(out.status.success(), "{cmd}: {prof}");
+        let at = |label: &str| prof.find(label).unwrap_or_else(|| panic!("{cmd}: no '{label}' in\n{prof}"));
+        let (hardened, other, end) = (at("switch: hardened"), at("other file systems synced"), at("switch: final syncfs"));
+        assert!(hardened < other && other < end, "{cmd}: {prof}");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(!names.is_empty(), there, "{cmd}: {names:?}");
+        for name in &names {
+            let (p, ours) = (dir.join(name), root.join("Programs/nano/Current/usr/share/nano").join(name));
+            if p.is_file() {
+                assert!(std::fs::read(&p).unwrap() == std::fs::read(&ours).unwrap(), "{cmd}: {}", p.display());
+            }
+        }
+        assert!(!root.join("var/lib/catalyst/journal").exists(), "{cmd}");
+    }
+    drop(mounted);
+    let _ = std::fs::remove_dir_all(&root);
+    eprintln!("two file systems: add and del were tested");
+}
+
+/// A file the admin already has under etc/ is kept, and the package's
+/// version is put beside it, whole.
+#[test]
+fn a_local_file_under_etc_is_kept_and_the_new_one_put_beside_it() {
+    if repo().is_none() {
+        return;
+    }
+    let root = fresh_root("etc-kept");
+    assert!(oct_real(&root, &[], &["--initdb", "add", "tree"]).status.success());
+    std::fs::create_dir_all(root.join("etc")).unwrap();
+    std::fs::write(root.join("etc/sensors3.conf"), b"# mine\n").unwrap();
+    let out = oct_real(&root, &[], &["add", "libsensors"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("this add is not synced") && !text(&out.stderr).contains("syncfs"));
-    let out = oct_real(&root, &env, &["add", "nano"]);
+    assert_eq!(std::fs::read(root.join("etc/sensors3.conf")).unwrap(), b"# mine\n");
+    assert_eq!(
+        std::fs::read(root.join("etc/sensors3.conf.catalyst-new")).unwrap(),
+        std::fs::read(root.join("Programs/libsensors/Current/etc/sensors3.conf")).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The mark an earlier catalyst left for adds it did not sync is removed
+/// with a note. Nothing is checked and nothing is uninstalled, whatever the
+/// admin did to the package's files since.
+#[test]
+fn a_mark_of_unsynced_adds_is_retired_and_nothing_is_uninstalled() {
+    if repo().is_none() {
+        return;
+    }
+    let root = fresh_root("legacy-mark");
+    assert!(oct_real(&root, &[], &["--initdb", "add", "tree"]).status.success());
+    let mark = root.join("var/lib/catalyst/unsynced");
+    std::fs::write(&mark, "catalyst-unsynced 1\nboot some-other-boot\nend\n").unwrap();
+    std::fs::remove_file(root.join("usr/bin/tree")).unwrap();
+    let out = oct_real(&root, &[], &["add", "nano"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("this add is not synced") && !text(&out.stderr).contains("syncfs"));
-    assert_eq!(std::fs::read_to_string(&world).unwrap(), "tree\nnano\n", "appended");
-    // something is where the package puts a file: synced before it is
-    // replaced, and a synced switch from there on (the world is rewritten)
-    std::fs::write(root.join("usr/bin/less"), b"mine").unwrap();
-    let out = oct_real(&root, &env, &["add", "less"]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("this add is not synced") && text(&out.stderr).contains("switch: final syncfs"));
-    assert!(root.join("usr/bin/less").metadata().unwrap().len() > 4);
-    assert_eq!(std::fs::read_to_string(&world).unwrap(), "less\nnano\ntree\n");
-    let out = oct_real(&root, &env, &["del", "tree"]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stderr).contains("this change is synced") && text(&out.stderr).contains("switch: final syncfs"));
-    assert_eq!(std::fs::read_to_string(&world).unwrap(), "less\nnano\n");
+    assert!(text(&out.stderr).contains("without a sync") && text(&out.stderr).contains("tree-"), "{}", text(&out.stderr));
+    assert!(!mark.exists());
+    assert!(root.join("Programs/tree/Current").exists(), "not uninstalled");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1013,6 +1282,59 @@ fn add_uses_a_cached_index_for_four_hours() {
     std::fs::OpenOptions::new().write(true).open(&cached[0]).unwrap().set_modified(old).unwrap();
     run(&["add", "less"]);
     assert_eq!(asked("Packages.adb"), 1, "an index older than four hours is fetched again");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A cached index that is new enough but can't be used (here: damaged) does
+/// not stop an add: the server is asked, as for an old one. And a run that
+/// changes nothing (`--simulate`) leaves the cached index as it is, also
+/// when it has fetched a newer one to plan with.
+#[test]
+fn an_unusable_cached_index_makes_add_ask_the_server_and_simulate_leaves_the_cache_alone() {
+    if repo().is_none() {
+        return;
+    }
+    let (port, log) = serve("");
+    let url = format!("http://127.0.0.1:{port}/x86_64/Packages.adb");
+    let root = fresh_root("index-unusable");
+    let asked = |what: &str| {
+        let mut l = log.lock().unwrap();
+        let n = l.iter().filter(|p| p.contains(what)).count();
+        l.clear();
+        n
+    };
+    let run = |args: &[&str]| {
+        let out = oct_url(&root, &url, args);
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+    };
+    run(&["--initdb", "add", "tree"]);
+    assert_eq!(asked("Packages.adb"), 1, "nothing cached yet");
+    let cache = root.join("var/cache/catalyst");
+    let names = || {
+        let mut v: Vec<String> = std::fs::read_dir(&cache).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    };
+    let cached = cache.join(names().into_iter().find(|n| n.starts_with("Packages.")).unwrap());
+    let good = std::fs::read(&cached).unwrap();
+    let mut bad = good.clone();
+    let n = bad.len();
+    bad[n / 2] ^= 0xff;
+    std::fs::write(&cached, &bad).unwrap();
+    run(&["add", "nano"]);
+    assert!(root.join("usr/bin/nano").exists());
+    assert_eq!(asked("Packages.adb"), 1, "the cached index was unusable: the server is asked");
+    assert!(std::fs::read(&cached).unwrap() == good, "and the cached index is whole again");
+    // five hours later: --simulate asks the server, and writes nothing
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 3600);
+    std::fs::OpenOptions::new().write(true).open(&cached).unwrap().set_modified(old).unwrap();
+    let files = names();
+    run(&["--simulate", "add", "less"]);
+    assert_eq!(asked("Packages.adb"), 1, "an old cached index: simulate asks the server too");
+    assert!(!root.join("usr/bin/less").exists());
+    let m = std::fs::metadata(&cached).unwrap().modified().unwrap();
+    assert!(old.duration_since(m).map_or(true, |d| d.as_secs() < 2) && m.duration_since(old).map_or(true, |d| d.as_secs() < 2), "the cached index was replaced");
+    assert_eq!(names(), files, "simulate left files in the cache");
     let _ = std::fs::remove_dir_all(&root);
 }
 

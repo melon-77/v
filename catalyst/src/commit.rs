@@ -66,13 +66,12 @@ pub struct SwitchOptions {
     pub crash_at: Option<String>,
     /// Print each script's output and the steps.
     pub verbose: bool,
-    /// The journal was put in effect without a `syncfs` (an add that is
-    /// not synced, [`crate::unsynced`]). Such a switch only makes new
-    /// names: before it replaces anything that is there, and before the
-    /// first script runs, it calls `syncfs` and is an ordinary, synced
-    /// switch from there on. One that never needs to ends without a
-    /// `syncfs`.
-    pub unsynced: bool,
+    /// A light switch (every change without `--sync`): its journal was
+    /// renamed into place after the `syncfs` without an fsync of its
+    /// directory (`PendingJournal::commit_named`), and it ends without a
+    /// `syncfs`. Before a script runs it fsyncs the journal's directory and
+    /// is a full switch from there on (`Switch::harden`).
+    pub light: bool,
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +154,45 @@ pub fn ownership(pkgs: &[PkgState]) -> (Ownership, Vec<String>) {
     (own, conflicts)
 }
 
+/// The folder, inside a version's `.catalyst`, of the copies made for the
+/// live tree before the switch ([`stage_copies`]).
+const STAGED: &str = "staged";
+
+/// Where the copy of entry `path` for the live tree waits.
+fn staged_copy(vdir: &Path, path: &[u8]) -> PathBuf {
+    let h = crate::digest::hex(&crate::digest::sha256(path));
+    vdir.join(db::META_DIR).join(STAGED).join(&h[..32])
+}
+
+/// Makes, inside each new version, the copies of its regular files under
+/// `etc/` that the switch will put in the live tree (they are copies there,
+/// not hard links, so that an admin's edit leaves the package's own file
+/// alone). Called before the syncfs that precedes the switch: the copies
+/// are then whole on disk, and the switch only renames them
+/// ([`Switch::place_copy`]).
+pub fn stage_copies(root: &Path, news: &[&PkgState]) -> io::Result<()> {
+    let ids = IdMap::load(root);
+    let chown = sys::is_root();
+    for p in news {
+        let dir = p.dir.join(db::META_DIR).join(STAGED);
+        let mut made = false;
+        for r in p.recs.iter().filter(|r| is_etc(&r.path) && r.is_regular()) {
+            if !made {
+                match fs::create_dir(&dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e),
+                }
+                made = true;
+            }
+            let src = p.dir.join(OsStr::from_bytes(&r.path));
+            let owner = (ids.uid(r.user.as_deref()), ids.gid(r.group.as_deref()));
+            copy_file_atomic(&src, &staged_copy(&p.dir, &r.path), r, chown, owner, false, false)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn is_etc(path: &[u8]) -> bool {
     path.starts_with(b"etc/")
 }
@@ -228,7 +266,9 @@ fn copy_file_atomic(
         } else {
             r_perm?;
         }
-        let t = UNIX_EPOCH + Duration::from_secs(r.mtime);
+        let t = UNIX_EPOCH
+            .checked_add(Duration::from_secs(r.mtime))
+            .ok_or_else(|| other(format!("/{}: its time cannot be represented", r.path_lossy())))?;
         let r_time = o.set_times(FileTimes::new().set_accessed(t).set_modified(t));
         if tolerate_nonposix {
             ignore_nonposix(r_time)?;
@@ -290,6 +330,88 @@ fn other(m: String) -> io::Error {
     io::Error::new(io::ErrorKind::Other, m)
 }
 
+/// `syncfs` of the root's file system, and of the one that holds catalyst's
+/// state or `Programs` where that is another one.
+pub fn sync_root(root: &Path) -> io::Result<()> {
+    let f = File::open(root)?;
+    sys::sync_fs(&f)?;
+    let dev = f.metadata()?.dev();
+    // the state directory's last: when the journal and its marks are on
+    // disk, what they record is
+    for d in [Db::programs(root), Db::state(root)] {
+        if let Ok(g) = File::open(&d) {
+            if g.metadata().map_or(false, |m| m.dev() != dev) {
+                sys::sync_fs(&g)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What [`link_into_place`] did.
+enum Linked {
+    Placed,
+    /// it was there already
+    Unchanged,
+    /// the two are on different file systems: a copy has to be made
+    CrossDev,
+}
+
+/// Whether the switch puts this entry in the live tree as one hard link (a
+/// regular file or hard link outside `etc/` and `boot/`, a device node, a
+/// FIFO), which [`link_into_place`] does without the rest of the switch.
+fn plain_link(r: &FileRec) -> bool {
+    match &r.kind {
+        RecKind::Dir | RecKind::File(FileKind::Symlink(_)) => false,
+        RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) => !is_etc(&r.path) && !is_boot(&r.path),
+        _ => true,
+    }
+}
+
+/// Puts `src` (in Programs) at `dst` (`canon` in the root) as a hard link.
+/// A new name, the usual case of an install, is one call: the link itself
+/// tells whether something is there. If something is: nothing to do when it
+/// is that inode already (or, on another file system, a regular file with
+/// the same content); otherwise the link is made beside it and renamed over
+/// it. Uses nothing of the switch, so that many can be made at once.
+fn link_into_place(src: &Path, r: &FileRec, dst: &Path, canon: &[u8]) -> io::Result<Linked> {
+    match fs::hard_link(src, dst) {
+        Ok(()) => return Ok(Linked::Placed),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => return Ok(Linked::CrossDev),
+        Err(e) => return Err(e),
+    }
+    match fs::symlink_metadata(dst) {
+        Ok(dm) => {
+            let sm = fs::symlink_metadata(src)?;
+            if dm.dev() == sm.dev() && dm.ino() == sm.ino() {
+                return Ok(Linked::Unchanged);
+            }
+            if dm.is_dir() {
+                return Err(other(format!("/{} is a directory", String::from_utf8_lossy(canon))));
+            }
+            if dm.dev() != sm.dev() && dm.is_file() && r.is_regular() && same_content(dst, src, r) {
+                return Ok(Linked::Unchanged);
+            }
+        }
+        // gone again since the link was tried: the rename below makes it
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let tmp = rootfs::tmp_name(dst);
+    let _ = fs::remove_file(&tmp);
+    match fs::hard_link(src, &tmp) {
+        Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => return Ok(Linked::CrossDev),
+        Err(e) => return Err(e),
+    }
+    if let Err(e) = fs::rename(&tmp, dst) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(Linked::Placed)
+}
+
 /// A script put off until all packages are placed (its interpreter was
 /// not there yet).
 struct Deferred {
@@ -319,8 +441,29 @@ struct Switch<'a> {
     chown: bool,
     dev_checked: bool,
     deferred: Vec<Deferred>,
-    /// Nothing of this switch has been synced so far ([`SwitchOptions::unsynced`]).
-    unsynced: bool,
+    /// Still a light switch ([`SwitchOptions::light`]): the journal's name
+    /// has not been put on disk, and no final `syncfs` is due.
+    light: bool,
+    /// How many threads at most link new entries, remove old ones, and
+    /// delete the old versions' trees ([`sys::name_threads`]: it depends on
+    /// the file system).
+    link_threads: usize,
+    unlink_threads: usize,
+    tree_threads: usize,
+    /// The root directory or `Programs` is on another file system than the
+    /// state directory, where the journal is: everything the switch does
+    /// there is unordered against the journal.
+    split: bool,
+    /// The usual mounts under `boot` were noted for the scripts.
+    boot_noted: bool,
+    /// For `CATALYST_PROF`: the time old entries took, to decide which may
+    /// go and to remove them; and new ones, to work out their places (and
+    /// make their directories), to link them, and for the rest of a package.
+    t_decide: std::time::Duration,
+    t_unlink: std::time::Duration,
+    t_places: std::time::Duration,
+    t_links: std::time::Duration,
+    t_owners: std::time::Duration,
 }
 
 impl<'a> Switch<'a> {
@@ -351,52 +494,35 @@ impl<'a> Switch<'a> {
         }
     }
 
-    /// Hard link `src` (in Programs) to `dst`; nothing to do if `dst` is
-    /// already that inode (or, across filesystems, a regular file with the
-    /// same content). Falls back to an atomic synced copy on `EXDEV`.
+    /// Hard link `src` (in Programs) to `dst` ([`link_into_place`]), with
+    /// the copy made here when the two are on different file systems.
     fn place_link(&mut self, src: &Path, r: &FileRec, dst: &Resolved) -> io::Result<()> {
-        match fs::symlink_metadata(&dst.host) {
-            Ok(dm) => {
-                let sm = fs::symlink_metadata(src)?;
-                if dm.dev() == sm.dev() && dm.ino() == sm.ino() {
-                    self.rep.unchanged += 1;
-                    return Ok(());
-                }
-                if dm.is_dir() {
-                    return Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon))));
-                }
-                if dm.dev() != sm.dev() && dm.is_file() && r.is_regular() && same_content(&dst.host, src, r) {
-                    self.rep.unchanged += 1;
-                    return Ok(());
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::hard_link(src, &dst.host) {
-                Ok(()) => {
-                    self.file_placed();
-                    return Ok(());
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => {
-                    return self.copy_cross_dev(src, &dst.host, r);
-                }
-                Err(e) => return Err(e),
-            },
-            Err(e) => return Err(e),
+        let done = link_into_place(src, r, &dst.host, &dst.canon)?;
+        self.linked(done, src, r, &dst.host)
+    }
+
+    /// What follows a [`link_into_place`]: the counts, and the copy across
+    /// file systems.
+    fn linked(&mut self, done: Linked, src: &Path, r: &FileRec, host: &Path) -> io::Result<()> {
+        match done {
+            Linked::Placed => self.file_placed(),
+            Linked::Unchanged => self.rep.unchanged += 1,
+            Linked::CrossDev => return self.copy_cross_dev(src, host, r),
         }
-        let tmp = rootfs::tmp_name(&dst.host);
-        let _ = fs::remove_file(&tmp);
-        match fs::hard_link(src, &tmp) {
-            Ok(()) => {}
-            Err(e) if e.raw_os_error() == Some(libc::EXDEV) && r.is_regular() => {
-                return self.copy_cross_dev(src, &dst.host, r);
-            }
-            Err(e) => return Err(e),
-        }
-        if let Err(e) = fs::rename(&tmp, &dst.host) {
-            let _ = fs::remove_file(&tmp);
-            return Err(e);
-        }
-        self.file_placed();
+        Ok(())
+    }
+
+    /// The part of [`Switch::place`] that looks at the tree's directories,
+    /// for an entry that is one hard link ([`plain_link`]): its directory is
+    /// made sure of, its place worked out, and the link itself is left for
+    /// later (`links`), to be made on several threads.
+    fn link_later(&mut self, p: &PkgState, ri: usize, links: &mut Vec<(usize, PathBuf, Resolved)>) -> io::Result<()> {
+        let r = &p.recs[ri];
+        let (dir, _) = rootfs::split_rel(&r.path);
+        self.ensure_dir(dir, 0o755, 0, 0)?;
+        let dst = self.fs.entry(&r.path)?;
+        self.off_device_guard()?;
+        links.push((ri, p.dir.join(OsStr::from_bytes(&r.path)), dst));
         Ok(())
     }
 
@@ -498,11 +624,38 @@ impl<'a> Switch<'a> {
         Ok(())
     }
 
-    /// Copies `src` to `dst` (through a temporary name) with the record's
-    /// mode, owner and mtime.
-    fn copy_to(&mut self, src: &Path, dst: &Path, r: &FileRec) -> io::Result<()> {
-        let owner = self.owner_ids(r);
-        copy_file_atomic(src, dst, r, self.chown, owner, false, false)?;
+    /// Puts at `dst` the copy of `src` that is meant for the live tree. It
+    /// was made, with the record's mode and mtime and its owner as far as
+    /// the root knew the name then, before the syncfs
+    /// that preceded the switch ([`stage_copies`]), so it is whole on disk
+    /// and one rename puts it in place: a name under `etc/` never reaches
+    /// the disk before its content. Where there is no such copy (a re-run
+    /// that already used it for another name, a version unpacked by an older
+    /// catalyst, `etc/` on another file system), it is copied now, with an
+    /// fsync of the file and of its directory.
+    fn place_copy(&mut self, p: &PkgState, src: &Path, dst: &Path, r: &FileRec) -> io::Result<()> {
+        let staged = staged_copy(&p.dir, &r.path);
+        // The copy got its owner before the switch. A pre-install script
+        // may have added the user since: owner and mode are set again,
+        // through the copy's descriptor, when they are not what the ids
+        // give now (never in a switch without scripts: nothing is written
+        // then).
+        if self.chown {
+            if let Ok(f) = sys::open_regular_nofollow(&staged) {
+                let (u, g) = self.owner_ids(r);
+                if f.metadata().map_or(false, |m| m.uid() != u || m.gid() != g) {
+                    fchown(&f, Some(u), Some(g))?;
+                    f.set_permissions(fs::Permissions::from_mode(r.mode & 0o7777))?;
+                }
+            }
+        }
+        if fs::rename(&staged, dst).is_err() {
+            // no copy waits (see above): made now, with an fsync of the file
+            // and of its directory, so not before the journal's name
+            self.harden().map_err(|e| other(e.to_string()))?;
+            let owner = self.owner_ids(r);
+            copy_file_atomic(src, dst, r, self.chown, owner, true, false)?;
+        }
         self.file_placed();
         Ok(())
     }
@@ -510,6 +663,8 @@ impl<'a> Switch<'a> {
     /// Copies `src` to `dst` on another filesystem (e.g. FAT32 `/boot`),
     /// syncing the file before rename and tolerating non-POSIX metadata errors.
     fn copy_cross_dev(&mut self, src: &Path, dst: &Path, r: &FileRec) -> io::Result<()> {
+        // the copy is fsync'ed, file and directory: not before the journal's name
+        self.harden().map_err(|e| other(e.to_string()))?;
         let owner = self.owner_ids(r);
         copy_file_atomic(src, dst, r, self.chown, owner, true, true)?;
         self.file_placed();
@@ -532,10 +687,10 @@ impl<'a> Switch<'a> {
     }
 
     /// The `etc/` rule: a copy, unless the admin changed the live file.
-    fn place_etc(&mut self, src: &Path, r: &FileRec, old: Option<&FileRec>, dst: &Resolved) -> io::Result<()> {
+    fn place_etc(&mut self, p: &PkgState, src: &Path, r: &FileRec, old: Option<&FileRec>, dst: &Resolved) -> io::Result<()> {
         let alg = Alg::from_len(r.hash.len());
         match fs::symlink_metadata(&dst.host) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => self.copy_to(src, &dst.host, r),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self.place_copy(p, src, &dst.host, r),
             Err(e) => Err(e),
             Ok(m) if m.is_dir() => Err(other(format!("/{} is a directory", String::from_utf8_lossy(&dst.canon)))),
             Ok(m) if m.is_file() => {
@@ -549,14 +704,14 @@ impl<'a> Switch<'a> {
                 }
                 let pristine = old.map_or(false, |o| o.is_regular() && live.as_deref() == Some(&o.hash[..]));
                 if pristine || alg.is_none() {
-                    self.copy_to(src, &dst.host, r)
+                    self.place_copy(p, src, &dst.host, r)
                 } else {
                     let mut n = dst.host.as_os_str().to_os_string();
                     n.push(".catalyst-new");
                     let newp = PathBuf::from(n);
                     let already = alg.map_or(false, |a| hash_file(&newp, a).map_or(false, |h| h == r.hash));
                     if !already {
-                        self.copy_to(src, &newp, r)?;
+                        self.place_copy(p, src, &newp, r)?;
                     }
                     let msg = format!("/{} was changed locally; kept, new version in /{}.catalyst-new", String::from_utf8_lossy(&dst.canon), String::from_utf8_lossy(&dst.canon));
                     println!("  {msg}");
@@ -565,29 +720,25 @@ impl<'a> Switch<'a> {
                 }
             }
             // a symlink or other node where the package now has a file
-            Ok(_) => self.copy_to(src, &dst.host, r),
+            Ok(_) => self.place_copy(p, src, &dst.host, r),
         }
     }
 
     fn place(&mut self, p: &PkgState, r: &FileRec, old: Option<&FileRec>) -> io::Result<()> {
         if let RecKind::Dir = r.kind {
             let (u, g) = self.owner_ids(r);
-            self.fs.ensure_dir(&r.path, r.mode, if self.chown { u } else { 0 }, if self.chown { g } else { 0 })?;
+            self.ensure_dir(&r.path, r.mode, if self.chown { u } else { 0 }, if self.chown { g } else { 0 })?;
             return Ok(());
         }
         let (dir, _) = rootfs::split_rel(&r.path);
-        self.fs.ensure_dir(dir, 0o755, 0, 0)?;
+        self.ensure_dir(dir, 0o755, 0, 0)?;
         let dst = self.fs.entry(&r.path)?;
-        // a switch that is not synced only makes new names: before it
-        // replaces anything that is there, it becomes a synced one
-        if self.unsynced && fs::symlink_metadata(&dst.host).is_ok() {
-            self.sync().map_err(|e| other(e.to_string()))?;
-        }
+        self.off_device_guard()?;
         let src = p.dir.join(OsStr::from_bytes(&r.path));
         match &r.kind {
             RecKind::File(FileKind::Symlink(t)) => self.place_symlink(t, r, old, &dst),
             RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if is_etc(&r.path) => {
-                self.place_etc(&src, r, old, &dst)
+                self.place_etc(p, &src, r, old, &dst)
             }
             RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if is_boot(&r.path) => {
                 self.place_boot(&src, r, &dst)
@@ -639,6 +790,12 @@ impl<'a> Switch<'a> {
                     }
                 }
             }
+            // a script can change anything in the root: a light switch
+            // becomes a full one before the first one runs
+            if let Err(e) = self.harden() {
+                self.err(format!("{name}-{version}.{typ}: not run: {e}"));
+                return;
+            }
             if !self.dev_checked {
                 self.dev_checked = true;
                 if let Err(e) = ensure_dev_nodes(&mut self.fs) {
@@ -646,28 +803,30 @@ impl<'a> Switch<'a> {
                 }
                 self.fs.forget();
             }
-            // a script can change anything in the root: a switch that is
-            // not synced becomes a synced one before the first one runs
-            if self.unsynced {
-                if let Err(e) = self.sync() {
-                    self.err(format!("{name}-{version}.{typ}: not run: {e}"));
-                    return;
-                }
-            }
+            self.note_boot();
             self.rep.scripts += 1;
             if let Err(e) = run_script(&self.root, name, version, typ, &body, args) {
                 self.err(format!("{name}-{version}.{typ}: {e}"));
             }
+            // whatever it wrote on another file system the switch knows of
+            // goes to disk before its mark
+            self.fs.touch_others();
             // the script may have changed the tree (e.g. replaced /var/run
             // by a symlink): directories are resolved afresh from now on
             self.fs.forget();
         }
-        // a script that ran is marked durably; one skipped by --no-scripts
-        // needs no fsync (losing that mark only repeats the skip)
-        if let Err(e) = self.j.mark_with(key, !self.opts.no_scripts) {
+        // A script that ran is marked durably, so that a re-run does not run
+        // it again; one skipped by --no-scripts needs none of that. Durably
+        // means a syncfs, not an fsync of the journal alone: on btrfs and
+        // f2fs that would put on disk this mark and the "placed:" marks
+        // before it without the placing they record.
+        if let Err(e) = self.mark(key) {
             eprintln!("oct: warning: journal: {e}");
         }
         if !self.opts.no_scripts {
+            if let Err(e) = self.sync() {
+                eprintln!("oct: warning: syncfs after {name}-{version}.{typ}: {e}");
+            }
             // a script may have added users or groups
             self.ids = IdMap::load(&self.root);
         }
@@ -806,8 +965,8 @@ fn final_canon(rfs: &mut RootFs, pkgs: &[PkgState]) -> HashSet<Vec<u8>> {
 /// lookup that fails keeps the entry.
 fn in_index(lookup: Option<(&crate::index::Index, &HashSet<String>)>, path: &[u8], dir: bool) -> bool {
     let Some((ix, changed)) = lookup else { return false };
-    let r = if dir { ix.dir_claimants(path) } else { ix.canon_claimants(path) };
-    r.map_or(true, |v| v.iter().any(|n| !changed.contains(n)))
+    let r = if dir { ix.dir_of_another(path, changed) } else { ix.place_of_another(path, changed) };
+    r.unwrap_or(true)
 }
 
 impl<'a> Switch<'a> {
@@ -824,6 +983,7 @@ impl<'a> Switch<'a> {
         lookup: Option<(&crate::index::Index, &HashSet<String>)>,
         modified: &mut HashSet<Vec<u8>>,
     ) {
+        let t_start = std::time::Instant::now();
         let mut dirs: BTreeSet<(usize, Vec<u8>)> = BTreeSet::new();
         // Which entries may go is decided here, on this thread (the lookups
         // share their caches). What follows for each of them, two lstat and
@@ -854,6 +1014,12 @@ impl<'a> Switch<'a> {
             Nothing,
             Failed(io::Error),
         }
+        if let Err(e) = self.off_device_guard() {
+            self.err(format!("{}: its entries are left: {e}", o.meta.nv()));
+            return;
+        }
+        self.t_decide += t_start.elapsed();
+        let t_start = std::time::Instant::now();
         let odir = &o.dir;
         let one = |(r, host): &(&FileRec, PathBuf)| -> Result<Gone> {
             let Ok(m) = fs::symlink_metadata(host) else { return Ok(Gone::Nothing) };
@@ -884,7 +1050,7 @@ impl<'a> Switch<'a> {
                 Err(err) => Gone::Failed(err),
             })
         };
-        let done = match crate::index::on_threads(&may_go, one) {
+        let done = match crate::index::on_threads_most(&may_go, self.unlink_threads, one) {
             Ok(d) => d,
             Err(e) => {
                 self.err(format!("{}: removing its entries: {e}", o.meta.nv()));
@@ -908,23 +1074,99 @@ impl<'a> Switch<'a> {
             if keep.contains(&e.canon) || in_index(lookup, &e.canon, false) {
                 continue;
             }
-            if let Ok(m) = fs::symlink_metadata(&e.host) {
-                if m.is_dir() && fs::remove_dir(&e.host).is_ok() {
-                    modified.insert(parent_dir(&d));
-                }
+            if self.off_device_guard().is_err() {
+                break;
+            }
+            // rmdir removes an empty directory and nothing else (a symlink
+            // or a file in its place is an error): no lstat is needed first
+            if fs::remove_dir(&e.host).is_ok() {
+                modified.insert(parent_dir(&d));
             }
         }
         self.fs.forget();
+        self.t_unlink += t_start.elapsed();
     }
 
-    /// `syncfs`: everything so far is on disk, the journal included, so a
-    /// switch that was not synced is a synced one from here on.
+    /// `syncfs`: everything so far is on disk, the journal and its name
+    /// included. A light switch that synced once is a full one: it ends with
+    /// a `syncfs` too.
     fn sync(&mut self) -> Result<()> {
-        sys::sync_fs(&File::open(&self.root)?)?;
-        self.unsynced = false;
-        // Everything previously added unsynced in this boot is now durable on disk.
-        crate::unsynced::remove(&self.root);
+        if self.fs.sync_others()? > 0 {
+            crate::prof::mark("  other file systems synced");
+        }
+        sync_root(&self.root)?;
+        self.light = false;
+        self.fs.hold = false;
         Ok(())
+    }
+
+    /// Appends a done mark to the journal. What it records may have been
+    /// done on another file system than the journal's (a mounted `/boot`,
+    /// a separate `/var/log`; with `split`, all of it), and no file system
+    /// keeps an order with another: that one is put on disk first, so that
+    /// the mark is never on disk without the work. A recovery skips what a
+    /// mark records.
+    fn mark(&mut self, key: &str) -> Result<()> {
+        if (self.split || self.fs.off_dirty) && self.fs.sync_others()? > 0 {
+            crate::prof::mark("  other file systems synced");
+        }
+        self.j.mark_with(key, false)
+    }
+
+    /// Notes the file systems of `boot`, `boot/efi` and `efi` where they
+    /// are mounts of their own: a kernel's or a boot loader's script writes
+    /// there without the package having an entry there, and what it wrote
+    /// goes to disk before the script's mark like anything else.
+    fn note_boot(&mut self) {
+        if self.boot_noted {
+            return;
+        }
+        self.boot_noted = true;
+        for d in [&b"boot"[..], b"boot/efi", b"efi"] {
+            if let Ok(r) = self.fs.resolve(d, true) {
+                self.fs.note_dir(&r.host);
+            }
+        }
+    }
+
+    /// Makes a light switch a full one: the journal's name is put on disk
+    /// (an fsync of its directory), and the switch will end with a
+    /// `syncfs`. Called before anything that the file system does not keep
+    /// in order behind the journal's rename: a script (it may do anything,
+    /// an fsync of its own included, which can put what it wrote on disk
+    /// ahead of what was done before it), a copy that the switch itself
+    /// fsyncs (under `boot/`, or onto another file system), and anything
+    /// done on another file system than the journal's (a mounted `/boot`).
+    fn harden(&mut self) -> Result<()> {
+        if self.light {
+            File::open(Db::state(&self.root))?.sync_all()?;
+            self.light = false;
+            crate::prof::mark("  switch: hardened (the journal's name fsync'ed)");
+        }
+        self.fs.hold = false;
+        Ok(())
+    }
+
+    /// [`Switch::harden`] once a directory on another file system than the
+    /// journal's has been met (`RootFs::off_device`), before anything is
+    /// done there.
+    fn off_device_guard(&mut self) -> io::Result<()> {
+        if self.light && self.fs.off_device {
+            self.harden().map_err(|e| other(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// `RootFs::ensure_dir`; a directory that would be made on another
+    /// file system than the journal's is made after [`Switch::harden`].
+    fn ensure_dir(&mut self, rel: &[u8], mode: u32, uid: u32, gid: u32) -> io::Result<Vec<u8>> {
+        match self.fs.ensure_dir(rel, mode, uid, gid) {
+            Err(e) if rootfs::is_off_device(&e) => {
+                self.harden().map_err(|e| other(e.to_string()))?;
+                self.fs.ensure_dir(rel, mode, uid, gid)
+            }
+            r => r,
+        }
     }
 }
 
@@ -950,8 +1192,11 @@ pub fn switch(
     opts: &SwitchOptions,
     index: Option<&crate::index::Index>,
     pool: Vec<PkgState>,
+    staged: Option<crate::index::Staged>,
 ) -> Result<Report> {
     let plan = j.plan.clone();
+    // a change asked for without scripts is finished without them too
+    let opts = &SwitchOptions { no_scripts: opts.no_scripts || plan.no_scripts, ..opts.clone() };
     let programs = Db::programs(root);
     // records the caller read a moment ago (to check the change) are not
     // read again: for a big package that is thousands of lines each time
@@ -1028,8 +1273,28 @@ pub fn switch(
         chown: sys::is_root(),
         dev_checked: false,
         deferred: Vec::new(),
-        unsynced: opts.unsynced,
+        light: opts.light,
+        link_threads: sys::name_threads(&Db::programs(root), sys::NameWork::Link),
+        unlink_threads: sys::name_threads(&Db::programs(root), sys::NameWork::Unlink),
+        tree_threads: sys::name_threads(&Db::programs(root), sys::NameWork::Trees),
+        split: false,
+        boot_noted: false,
+        t_decide: Default::default(),
+        t_unlink: Default::default(),
+        t_places: Default::default(),
+        t_links: Default::default(),
+        t_owners: Default::default(),
     };
+    s.fs.hold = s.light;
+    // Where the root directory or Programs is not on the journal's file
+    // system, nothing orders the journal against what the switch does: it
+    // is a full switch from the start, and every mark waits for those file
+    // systems (Switch::mark).
+    let (root_off, programs_off) = (s.fs.note_dir(root), s.fs.note_dir(&Db::programs(root)));
+    s.split = root_off || programs_off;
+    if s.split {
+        s.harden()?;
+    }
     s.crash("start");
 
     // directories whose content changes (for triggers): as apk marks them
@@ -1057,20 +1322,97 @@ pub fn switch(
         let post_key = format!("{post}:{name}");
         s.script_deferrable(&format!("{pre}:{name}"), p, pre, &args);
         if !s.j.is_done(&placed) {
-            unpack::fix_owners(&p.dir, &p.recs, &s.ids);
+            let t_start = std::time::Instant::now();
+            if !(plan.closed_versions && owners_final(&p.dir)) {
+                unpack::fix_owners(&p.dir, &p.recs, &s.ids);
+            }
+            s.t_owners += t_start.elapsed();
+            let t_start = std::time::Instant::now();
             let old_map: HashMap<&[u8], &FileRec> = olds
                 .get(&name)
                 .map(|o| o.recs.iter().map(|r| (r.path.as_slice(), r)).collect())
                 .unwrap_or_default();
+            // The entries that are one hard link each (nearly all of a
+            // package) have their directories and places worked out here,
+            // one after another, and are linked on several threads when
+            // there are many: Cataclysm's 8,500 took 130 ms one by one.
+            // Under the test hook that stops after a given number of files
+            // (`link:N`) they are placed one by one, so that the number is
+            // exact.
+            let mut links: Vec<(usize, PathBuf, Resolved)> = Vec::new();
+            let mut aliased = false;
+            let on_threads = !opts.crash_at.as_deref().map_or(false, |c| c.starts_with("link:"));
             for (ri, r) in p.recs.iter().enumerate() {
                 if !r.is_dir() && own.owner.get(&r.path) != Some(&(i, ri)) {
                     continue; // another package owns this path
                 }
-                let old = old_map.get(r.path.as_slice()).copied();
-                if let Err(e) = s.place(p, r, old) {
+                let res = if on_threads && plain_link(r) {
+                    let res = s.link_later(p, ri, &mut links);
+                    // reached through a directory symlink (`lib/x` where
+                    // `lib` leads to `usr/lib`): another entry of the
+                    // package may be meant for the same place
+                    if res.is_ok() && links.last().map_or(false, |l| l.0 == ri && l.2.canon != r.path) {
+                        aliased = true;
+                    }
+                    res
+                } else {
+                    s.place(p, r, old_map.get(r.path.as_slice()).copied())
+                };
+                if let Err(e) = res {
                     s.err(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy()));
                 }
             }
+            s.t_places += t_start.elapsed();
+            let t_start = std::time::Instant::now();
+            // Two entries for one place (a package that lists both `lib/x`
+            // and `usr/lib/x`) must not be linked by two threads at once:
+            // they would share the temporary name, and which of them stays
+            // would be chance. The later ones wait and are placed after the
+            // others, one by one, so the last in the record stays, as when
+            // everything is placed one by one.
+            let mut late: Vec<(usize, PathBuf, Resolved)> = Vec::new();
+            if aliased {
+                let again: Vec<bool> = {
+                    let mut seen: HashSet<&[u8]> = HashSet::with_capacity(links.len());
+                    links.iter().map(|l| !seen.insert(l.2.canon.as_slice())).collect()
+                };
+                if again.contains(&true) {
+                    let mut first = Vec::with_capacity(links.len());
+                    for (l, a) in std::mem::take(&mut links).into_iter().zip(again) {
+                        if a {
+                            late.push(l)
+                        } else {
+                            first.push(l)
+                        }
+                    }
+                    links = first;
+                }
+            }
+            let made = crate::index::on_threads_most(&links, s.link_threads, |(ri, src, dst)| {
+                Ok(link_into_place(src, &p.recs[*ri], &dst.host, &dst.canon))
+            });
+            match made {
+                Ok(made) => {
+                    for ((ri, src, dst), done) in links.iter().zip(made) {
+                        let r = &p.recs[*ri];
+                        if let Err(e) = done.and_then(|d| s.linked(d, src, r, &dst.host)) {
+                            s.err(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy()));
+                        }
+                    }
+                }
+                Err(e) => s.err(format!("{}: placing its files: {e}", p.meta.nv())),
+            }
+            for (ri, src, dst) in &late {
+                let r = &p.recs[*ri];
+                let done = link_into_place(src, r, &dst.host, &dst.canon);
+                if let Err(e) = done.and_then(|d| s.linked(d, src, r, &dst.host)) {
+                    s.err(format!("{}: /{}: {e}", p.meta.nv(), r.path_lossy()));
+                }
+            }
+            s.t_links += t_start.elapsed();
+            // the copies made for the live tree that no entry needed (another
+            // package owns the path, or the live file was up to date)
+            let _ = fs::remove_dir_all(p.dir.join(db::META_DIR).join(STAGED));
             s.crash(&format!("placed:{name}"));
             if let Some(o) = olds.get(&name) {
                 if keep.is_none() {
@@ -1079,11 +1421,20 @@ pub fn switch(
                 s.remove_old(o, &own, keep.as_ref().unwrap(), lookup, &mut modified);
             }
             db::set_current(root, &name, p.meta.version())?;
+            // A version with nothing in it for anyone but root has no
+            // owner pass to wait for, and nobody else could rearrange it:
+            // it is opened as soon as it is current, so that other users'
+            // `oct list` and `oct info` can read its record while the rest
+            // of the switch runs. Any other version stays closed until
+            // step 4.
+            if roots_alone(&p.recs) {
+                open_version(&p.dir);
+            }
             let runs_post = !opts.no_scripts && !s.j.is_done(&post_key) && db::read_script(&p.dir, post).is_some();
+            s.mark(&placed)?;
             if runs_post {
                 s.sync()?;
             }
-            s.j.mark_with(&placed, false)?;
         }
         // the old version is no longer in the live tree: close its
         // directory, so that its set-id programs cannot be run through
@@ -1096,6 +1447,9 @@ pub fn switch(
     s.run_deferred();
     s.crash("placed");
     crate::prof::mark("switch: placed");
+    crate::prof::part("  new entries: owners checked", s.t_owners);
+    crate::prof::part("  new entries: directories made, places worked out", s.t_places);
+    crate::prof::part("  new entries: linked", s.t_links);
 
     // 2. removed packages
     for op in &plan.ops {
@@ -1115,10 +1469,10 @@ pub fn switch(
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
+            s.mark(&key)?;
             if o.map_or(false, |o| db::read_script(&o.dir, "post-deinstall").is_some()) && !opts.no_scripts {
                 s.sync()?;
             }
-            s.j.mark_with(&key, false)?;
         }
         if let Some(o) = o {
             lock_old_version(&o.dir);
@@ -1129,24 +1483,33 @@ pub fn switch(
     }
     s.crash("removed");
     crate::prof::mark("switch: removed");
+    crate::prof::part("  old entries: deciding which may go", s.t_decide);
+    crate::prof::part("  old entries: lstat, unlink, rmdir", s.t_unlink);
 
     // 3. the world
     let world: Vec<crate::adb::Dependency> =
         plan.world.iter().filter_map(|w| crate::adb::Dependency::parse(w).ok()).collect();
-    // without an fsync of its own: on a big change that would commit the
-    // metadata of every entry placed so far, which the final syncfs does
-    // anyway; a crash before that redoes this step from the journal
-    if s.unsynced {
-        db::write_world_unsynced(root, &world)?;
-    } else {
-        db::write_replace(&Db::state(root).join("world"), db::format_world(&world).as_bytes())?;
-    }
+    // its new content went to disk as world.new with the journal, before
+    // the switch: the rename puts nothing in place that is not whole
+    db::switch_world(root, &world)?;
     s.crash("world");
 
     // 4. owners once more, now that all files (etc/passwd too) are in place
     s.ids = IdMap::load(root);
     for p in pkgs.iter().skip(first_new) {
-        unpack::fix_owners(&p.dir, &p.recs, &s.ids);
+        // A version that is open already had this done, by an earlier run
+        // of this switch that did not reach its end: other users can enter
+        // it by now, and it is not gone through by path again.
+        if !(plan.closed_versions && owners_final(&p.dir)) {
+            unpack::fix_owners(&p.dir, &p.recs, &s.ids);
+        }
+        // Until here the new version was for root only (unpack makes it
+        // 0700): owners and modes are set by path in there, and a package
+        // may hold a directory that belongs to its own user. Now it is
+        // opened for reading, as an installed version is.
+        if let Ok(d) = sys::open_dir_nofollow(&p.dir) {
+            let _ = d.set_permissions(fs::Permissions::from_mode(0o755));
+        }
         for r in p.recs.iter().filter(|r| is_etc(&r.path) && r.is_regular()) {
             let special = |x: &Option<String>| x.as_deref().map_or(false, |x| x != "root");
             if !special(&r.user) && !special(&r.group) {
@@ -1201,7 +1564,7 @@ pub fn switch(
         }
         for d in more {
             if !installed_dirs.contains(&d)
-                && ix.dir_claimants(&d).map_or(true, |v| v.iter().any(|n| !chg.contains(n)))
+                && ix.dir_of_another(&d, chg).unwrap_or(true)
             {
                 installed_dirs.insert(d);
             }
@@ -1242,9 +1605,9 @@ pub fn switch(
     s.crash("triggers");
     crate::prof::mark("switch: triggers");
 
-    // the index: the changed packages' entries replaced (before the final
-    // syncfs, so a crash is covered by the journal), or all of it rebuilt
-    // from the records when it couldn't be used
+    // the index: the changed packages' entries replaced, or all of it
+    // rebuilt from the records when it couldn't be used
+    let mut index_written = false;
     {
         // borrowed, not copied: on 244 packages copying them took 0.3 ms
         let mut metas: BTreeMap<String, &PkgMeta> = installed
@@ -1255,30 +1618,41 @@ pub fn switch(
         for p in &pkgs[first_new..] {
             metas.insert(p.meta.name().to_string(), &p.meta);
         }
-        let res = match index {
-            Some(ix) if !full => {
+        // A switch that is still light writes nothing here: the index of
+        // after the change was written before the switch's one syncfs and
+        // is put in place by renames. Any other way of bringing the index
+        // up to date writes files now, so the switch then ends with a
+        // syncfs: a `state` on disk never describes files that are not.
+        let res = match (index, &staged) {
+            (Some(_), Some(st)) if !full && s.light => crate::index::commit_staged(root, st),
+            (Some(ix), _) if !full => {
+                index_written = true;
                 let o: Vec<&PkgState> = olds.values().collect();
                 let n: Vec<&PkgState> = pkgs[first_new..].iter().collect();
                 crate::index::update(root, ix, &changed_names, &o, &n, &metas, &mut s.fs)
             }
-            _ => crate::index::rebuild(root, &pkgs, false),
+            _ => {
+                index_written = true;
+                crate::index::rebuild(root, &pkgs, false)
+            }
         };
         if let Err(e) = res {
             eprintln!("oct: warning: index: {e}; the next run rebuilds it");
             crate::index::invalidate(root);
         }
+        crate::index::discard_staged(root);
     }
 
     crate::prof::mark("switch: index");
     // 6. durable, then forget the journal and the old versions. A switch
-    // that stayed unsynced (it only made new names and ran no script) ends
-    // without a syncfs: what a power cut takes of it, the next run finds
-    // and removes (crate::unsynced)
-    if !s.unsynced {
+    // that stayed light (no --sync, and it ran no script) ends without a
+    // syncfs: its journal and everything that names went to disk before it
+    // began, so the next run finishes whatever a power cut takes of it.
+    if !s.light || index_written {
         s.sync()?;
         crate::prof::mark("switch: final syncfs");
     }
-    let Switch { j, rep, .. } = s;
+    let Switch { j, rep, tree_threads, .. } = s;
     j.remove(root)?;
     let mut trees: Vec<PathBuf> = Vec::new();
     for op in &plan.ops {
@@ -1302,21 +1676,34 @@ pub fn switch(
             Op::Install { .. } => {}
         }
     }
-    remove_trees(&trees)?;
+    // from about 2,000 entries on, directory by directory on several threads
+    let big = olds.values().map(|o| o.recs.len()).sum::<usize>() >= 2000;
+    remove_trees(&trees, big, tree_threads)?;
     Ok(rep)
 }
 
-/// Deletes directory trees (the old versions of a change), each with
-/// `fs::remove_dir_all`, several at a time when there are several.
+/// Deletes directory trees (the old versions of a change).
 ///
-/// Only whole trees go to the threads. `remove_dir_all` walks a tree
-/// through directory descriptors and follows no symlink, so a directory
-/// that is swapped for a symlink while root deletes it (a package may have
-/// a directory its own user can write) cannot lead the deletion anywhere
-/// else. A walk by path, which an earlier version did here to spread the
-/// files of one tree over the threads, has no such protection.
-fn remove_trees(roots: &[PathBuf]) -> io::Result<()> {
-    let threads = roots.len().min(std::thread::available_parallelism().map_or(4, |n| n.get())).min(8);
+/// A small change deletes each tree with `fs::remove_dir_all`, several
+/// trees at a time; only whole trees go to the threads then.
+/// `remove_dir_all` walks a tree through directory descriptors and follows
+/// no symlink, so a directory that is swapped for a symlink while root
+/// deletes it (a package may have a directory its own user can write)
+/// cannot lead the deletion anywhere else. A big change (`big`, with two
+/// CPUs or more) goes to [`remove_trees_by_directory`], which walks by
+/// path only inside directories that nobody else can change and leaves
+/// every other directory to `remove_dir_all`. A walk by path without that
+/// rule, which an earlier version did here, has no such protection.
+///
+/// `most` is the number of threads the file system makes worthwhile
+/// ([`sys::name_threads`]): with 1, as on Btrfs and XFS, the trees are
+/// deleted one after another on this thread.
+fn remove_trees(roots: &[PathBuf], big: bool, most: usize) -> io::Result<()> {
+    let cpus = std::thread::available_parallelism().map_or(4, |n| n.get()).min(most);
+    if big && cpus >= 2 {
+        return remove_trees_by_directory(roots, cpus.min(8));
+    }
+    let threads = roots.len().min(cpus).min(8);
     if threads < 2 {
         return roots.iter().try_for_each(fs::remove_dir_all);
     }
@@ -1337,6 +1724,125 @@ fn remove_trees(roots: &[PathBuf]) -> io::Result<()> {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Deletes big trees on several threads, each thread one directory at a
+/// time (removing an entry takes its directory's lock, so two threads in one
+/// directory would only wait for each other; Cataclysm's 7,700 files in 820
+/// directories took 60 ms on one thread).
+///
+/// A directory is listed, and its entries removed, by path only while
+/// nobody but the user catalyst runs as can have changed what is at that
+/// path: the directory, and every directory above it up to the tree's root,
+/// belongs to that user and no one else may write to it. A directory that
+/// another user may write to (a package's directory that belongs to its own
+/// user, or one with mode 1777) is deleted with `fs::remove_dir_all`, which
+/// walks through descriptors and follows no symlink, so whatever that user
+/// swaps in while it is deleted leads the deletion nowhere else.
+fn remove_trees_by_directory(roots: &[PathBuf], threads: usize) -> io::Result<()> {
+    use std::sync::{Condvar, Mutex};
+    let me = unsafe { libc::geteuid() };
+    let private = move |m: &fs::Metadata| m.is_dir() && m.uid() == me && m.mode() & 0o022 == 0;
+    struct Work {
+        /// private directories still to be emptied
+        dirs: Vec<PathBuf>,
+        /// threads emptying one now
+        busy: usize,
+        /// the emptied ones, removed themselves at the end
+        emptied: Vec<PathBuf>,
+        err: Option<io::Error>,
+    }
+    let mut dirs = Vec::new();
+    for r in roots {
+        match fs::symlink_metadata(r) {
+            Ok(m) if private(&m) => dirs.push(r.clone()),
+            _ => fs::remove_dir_all(r)?,
+        }
+    }
+    // the entries of one private directory removed; its private
+    // directories are returned for the queue
+    let empty = move |dir: &Path| -> io::Result<Vec<PathBuf>> {
+        let mut sub = Vec::new();
+        for e in fs::read_dir(dir)? {
+            let e = e?;
+            let p = e.path();
+            if !e.file_type()?.is_dir() {
+                fs::remove_file(&p)?;
+                continue;
+            }
+            match fs::symlink_metadata(&p) {
+                Ok(m) if private(&m) => sub.push(p),
+                _ => fs::remove_dir_all(&p)?,
+            }
+        }
+        Ok(sub)
+    };
+    let work = Mutex::new(Work { dirs, busy: 0, emptied: Vec::new(), err: None });
+    let wake = Condvar::new();
+    std::thread::scope(|sc| {
+        for _ in 0..threads.max(1) {
+            sc.spawn(|| loop {
+                let dir = {
+                    let mut w = work.lock().unwrap();
+                    loop {
+                        if w.err.is_some() {
+                            return;
+                        }
+                        if let Some(d) = w.dirs.pop() {
+                            w.busy += 1;
+                            break d;
+                        }
+                        if w.busy == 0 {
+                            // nothing queued and nobody who could queue more
+                            wake.notify_all();
+                            return;
+                        }
+                        w = wake.wait(w).unwrap();
+                    }
+                };
+                let res = empty(&dir);
+                let mut w = work.lock().unwrap();
+                w.busy -= 1;
+                match res {
+                    Ok(sub) => {
+                        w.dirs.extend(sub);
+                        w.emptied.push(dir);
+                    }
+                    Err(e) => {
+                        w.err.get_or_insert(e);
+                    }
+                }
+                wake.notify_all();
+            });
+        }
+    });
+    let Work { mut emptied, err, .. } = work.into_inner().unwrap();
+    if let Some(e) = err {
+        return Err(e);
+    }
+    // the deepest first: a path comes before every path it starts with
+    emptied.sort_by(|a, b| b.as_os_str().len().cmp(&a.as_os_str().len()));
+    emptied.iter().try_for_each(fs::remove_dir)
+}
+
+/// Whether nothing in these records is for anyone but root: no entry has
+/// another owner or group, and no directory lets group or others write.
+fn roots_alone(recs: &[FileRec]) -> bool {
+    let special = |x: &Option<String>| x.as_deref().map_or(false, |x| x != "root");
+    recs.iter().all(|r| !special(&r.user) && !special(&r.group) && !(r.is_dir() && r.mode & 0o022 != 0))
+}
+
+/// Opens a new version's directory for reading (mode 0755).
+fn open_version(dir: &Path) {
+    if let Ok(d) = sys::open_dir_nofollow(dir) {
+        let _ = d.set_permissions(fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Whether a new version's directory is open to other users already
+/// (anything but mode 0700): then its entries have their final owners.
+fn owners_final(dir: &Path) -> bool {
+    sys::open_dir_nofollow(dir).and_then(|d| d.metadata()).map_or(false, |m| m.mode() & 0o077 != 0)
 }
 
 /// Makes an old version directory accessible to root only (mode 0700).
@@ -1770,21 +2276,81 @@ mod tests {
             symlink(&outside, root.join("d0/link-out")).unwrap();
             fs::create_dir_all(root.join("empty/deeper")).unwrap();
         }
-        remove_trees(&[a.clone(), b.clone()]).unwrap();
+        remove_trees(&[a.clone(), b.clone()], false, usize::MAX).unwrap();
         assert!(!a.exists() && !b.exists());
         assert!(outside.join("keep").exists());
-        remove_trees(&[]).unwrap();
+        remove_trees(&[], false, usize::MAX).unwrap();
         // one tree (no threads), and a tree that is itself a symlink: the
         // link goes, what it points at stays
         let c = base.join("c");
         fs::create_dir_all(c.join("x/y")).unwrap();
         fs::write(c.join("x/y/f"), b"data").unwrap();
-        remove_trees(&[c.clone()]).unwrap();
+        remove_trees(&[c.clone()], false, 1).unwrap();
         assert!(!c.exists());
         let l = base.join("l");
         symlink(&outside, &l).unwrap();
-        let _ = remove_trees(&[l.clone(), base.join("missing-is-an-error")]);
+        let _ = remove_trees(&[l.clone(), base.join("missing-is-an-error")], false, usize::MAX);
         assert!(outside.join("keep").exists());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// The same directory by directory on several threads: private
+    /// directories by path, a directory others may write to through
+    /// descriptors, and no symlink followed in either.
+    #[test]
+    fn big_trees_are_removed_directory_by_directory_and_no_symlink_is_followed() {
+        let base = std::env::temp_dir().join(format!("catalyst-rmtrees-dirs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let outside = base.join("outside");
+        fs::create_dir_all(outside.join("dir")).unwrap();
+        fs::write(outside.join("keep"), b"x").unwrap();
+        fs::write(outside.join("dir/keep"), b"x").unwrap();
+        // the directories meant to be private get their mode whatever the
+        // umask is (under 002 they would be group-writable, and the whole
+        // tree would go to remove_dir_all without the walk being run)
+        let mkdirs = |p: &Path| fs::DirBuilder::new().recursive(true).mode(0o755).create(p).unwrap();
+        let fill = |root: &Path| {
+            for d in 0..30 {
+                let dir = root.join(format!("d{d}/sub/deeper"));
+                mkdirs(&dir);
+                for f in 0..40 {
+                    fs::write(dir.join(format!("f{f}")), b"data").unwrap();
+                    fs::write(root.join(format!("d{d}/g{f}")), b"data").unwrap();
+                }
+            }
+            // in a private directory: a symlink to a directory outside
+            symlink(&outside, root.join("d0/link-out")).unwrap();
+            // a directory anyone may write to, holding files, a directory
+            // and such a symlink as well
+            let open = root.join("d1/open");
+            fs::create_dir_all(open.join("inner")).unwrap();
+            fs::write(open.join("inner/f"), b"data").unwrap();
+            fs::write(open.join("f"), b"data").unwrap();
+            symlink(outside.join("dir"), open.join("link-out")).unwrap();
+            fs::set_permissions(&open, fs::Permissions::from_mode(0o1777)).unwrap();
+            mkdirs(&root.join("empty/deeper"));
+        };
+        let (a, b, c) = (base.join("a"), base.join("b"), base.join("c"));
+        for r in [&a, &b, &c] {
+            fill(r);
+        }
+        // c itself is open to others: deleted through descriptors as a whole
+        fs::set_permissions(&c, fs::Permissions::from_mode(0o777)).unwrap();
+        for p in [&a, &b, &a.join("d0"), &a.join("d0/sub/deeper"), &a.join("empty/deeper")] {
+            assert_eq!(fs::symlink_metadata(p).unwrap().mode() & 0o022, 0, "{}", p.display());
+        }
+        remove_trees_by_directory(&[a.clone(), c.clone()], 4).unwrap();
+        assert!(!a.exists() && !c.exists() && b.exists());
+        remove_trees(&[b.clone()], true, usize::MAX).unwrap();
+        assert!(!b.exists());
+        assert!(outside.join("keep").exists() && outside.join("dir/keep").exists());
+        remove_trees_by_directory(&[], 4).unwrap();
+        // one thread, and a tree that is a symlink: the link goes, not its target
+        let l = base.join("l");
+        symlink(&outside, &l).unwrap();
+        remove_trees_by_directory(&[l.clone()], 1).unwrap();
+        assert!(fs::symlink_metadata(&l).is_err() && outside.join("keep").exists());
+        assert!(remove_trees_by_directory(&[base.join("missing-is-an-error")], 2).is_err());
         fs::remove_dir_all(&base).unwrap();
     }
 
