@@ -59,6 +59,10 @@ pub fn key(file: &[u8], index_url: &str, keys: &TrustedKeys, opts: &VerifyOption
         h.update(part);
     }
     h.update(&[opts.allow_untrusted as u8, opts.require_signature as u8, opts.expected_identity.is_some() as u8]);
+    if let Some(id) = &opts.expected_identity {
+        h.update(&(id.len() as u64).to_le_bytes());
+        h.update(id);
+    }
     h.finish()
 }
 

@@ -482,3 +482,180 @@ fn a_damaged_aliases_file_sends_the_change_to_every_record() {
     assert!(!root.join("usr/bin/onlyb").exists(), "pkgb's file was left behind");
     assert!(root.join("usr/share/shared.txt").exists());
 }
+
+fn oct_boot(root: &Path, boot: &str, args: &[&str]) -> std::process::Output {
+    Command::new(oct_bin())
+        .env("CATALYST_BOOT_ID", boot)
+        .arg("--root")
+        .arg(root)
+        .arg("--plain")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn seed_one_pkg(root: &Path, name: &str, ver: &str, files: &[(&str, &[u8])], link_live: bool) {
+    let d = root.join(format!("Programs/{name}/{ver}"));
+    fs::create_dir_all(d.join(".catalyst")).unwrap();
+    let mut dirs = std::collections::BTreeSet::new();
+    for (rel, _) in files {
+        let mut p = Path::new(rel).parent();
+        while let Some(par) = p {
+            if par.as_os_str().is_empty() {
+                break;
+            }
+            dirs.insert(par.to_string_lossy().into_owned());
+            p = par.parent();
+        }
+    }
+    let mut lines = String::new();
+    for dir in &dirs {
+        fs::create_dir_all(d.join(dir)).unwrap();
+        if link_live {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        lines.push_str(&format!("d\t0755\troot\troot\t0\t0\t-\t-\t-\t{dir}\n"));
+    }
+    for (rel, body) in files {
+        fs::write(d.join(rel), body).unwrap();
+        if link_live {
+            let live = root.join(rel);
+            let _ = fs::remove_file(&live);
+            if rel.starts_with("etc/") {
+                fs::write(&live, body).unwrap();
+            } else {
+                fs::hard_link(d.join(rel), &live).unwrap();
+            }
+        }
+        lines.push_str(&format!(
+            "f\t0644\troot\troot\t{}\t0\t{}\t-\t-\t{rel}\n",
+            body.len(),
+            sha256_hex(body)
+        ));
+    }
+    fs::write(d.join(".catalyst/files"), lines).unwrap();
+    fs::write(
+        d.join(".catalyst/info"),
+        format!(
+            "name: {name}\nversion: {ver}\narch: x86_64\norigin: {name}\nlicense: MIT\n\
+             description: test\nurl: https://example.org\ninstalled-size: 4096\n"
+        ),
+    )
+    .unwrap();
+    if link_live {
+        let cur = root.join(format!("Programs/{name}/Current"));
+        let _ = fs::remove_file(&cur);
+        symlink(ver, cur).unwrap();
+    }
+}
+
+#[test]
+fn synced_change_clears_unsynced_mark_so_later_reboot_keeps_synced_packages() {
+    let root = temp_root("synced-clears-unsynced");
+    fs::create_dir_all(root.join("var/lib/catalyst")).unwrap();
+    fs::create_dir_all(root.join("var/cache/catalyst")).unwrap();
+    fs::create_dir_all(root.join("etc/apk")).unwrap();
+    fs::write(root.join("etc/apk/arch"), "x86_64\n").unwrap();
+    fs::write(root.join("var/lib/catalyst/world"), "base\nsyncedpkg\nother\n").unwrap();
+    seed_one_pkg(&root, "base", "1.0-r0", &[("usr/bin/base", b"base\n")], true);
+    seed_one_pkg(&root, "syncedpkg", "2.0-r0", &[("usr/bin/crit", b"critical-v2\n")], true);
+    seed_one_pkg(&root, "other", "1.0-r0", &[("usr/bin/other", b"other\n")], true);
+    fs::write(
+        root.join("var/lib/catalyst/unsynced"),
+        "catalyst-unsynced 1\nboot boot-1111\nhad base 1.0-r0\nhad syncedpkg 1.0-r0\nhad other 1.0-r0\nend\n",
+    )
+    .unwrap();
+
+    // A synced transaction (`del`) flushes the root and must clear `unsynced`.
+    let out = oct_boot(&root, "boot-1111", &["--no-scripts", "del", "other"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!root.join("var/lib/catalyst/unsynced").exists(), "unsynced mark survived a synced del");
+
+    // Corrupt syncedpkg's record and reboot: it must NOT be silently uninstalled!
+    fs::write(root.join("Programs/syncedpkg/2.0-r0/.catalyst/files"), b"BROKEN\n").unwrap();
+    let _ = oct_boot(&root, "boot-2222", &["--no-scripts", "fix"]);
+    assert!(root.join("usr/bin/crit").exists(), "synced package was wrongly deleted after reboot");
+    assert!(root.join("Programs/syncedpkg/Current").exists());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn unsynced_reboot_keeps_synced_journal_when_unsynced_pkg_is_dropped() {
+    let root = temp_root("unsynced-keeps-synced-journal");
+    fs::create_dir_all(root.join("var/lib/catalyst")).unwrap();
+    fs::create_dir_all(root.join("var/cache/catalyst")).unwrap();
+    fs::create_dir_all(root.join("etc/apk")).unwrap();
+    fs::write(root.join("etc/apk/arch"), "x86_64\n").unwrap();
+    fs::write(root.join("var/lib/catalyst/world"), "base\ncore\nnano\n").unwrap();
+    seed_one_pkg(&root, "base", "1.0-r0", &[("usr/bin/base", b"base\n")], true);
+    seed_one_pkg(&root, "nano", "1.0-r0", &[("usr/bin/nano", b"nano-bin\n")], true);
+    seed_one_pkg(&root, "core", "1.0-r0", &[("usr/bin/core", b"core-v1\n")], true);
+    seed_one_pkg(&root, "core", "2.0-r0", &[("usr/bin/core", b"core-v2\n")], false);
+    fs::write(
+        root.join("var/lib/catalyst/unsynced"),
+        "catalyst-unsynced 1\nboot boot-1111\nhad base 1.0-r0\nhad core 1.0-r0\nend\n",
+    )
+    .unwrap();
+    // Damage unsynced `nano` AND leave a SYNCED upgrade journal for `core`.
+    fs::write(root.join("Programs/nano/1.0-r0/usr/bin/nano"), b"").unwrap();
+    fs::write(
+        root.join("var/lib/catalyst/journal"),
+        "catalyst-journal 1\nupgrade core 1.0-r0 2.0-r0\nworld base\nworld core\nworld nano\nend\n",
+    )
+    .unwrap();
+
+    let out = oct_boot(&root, "boot-2222", &["cache", "clean"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // Damaged unsynced `nano` was dropped, AND synced upgrade of `core` finished to 2.0-r0!
+    assert!(!root.join("Programs/nano/Current").exists());
+    assert_eq!(fs::read_link(root.join("Programs/core/Current")).unwrap().to_str(), Some("2.0-r0"));
+    assert_eq!(fs::read(root.join("usr/bin/core")).unwrap(), b"core-v2\n");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn unsynced_reboot_catches_zeroed_content_missing_live_and_zero_etc_copy() {
+    for case in ["zeroed-programs", "missing-live", "zero-etc"] {
+        let root = temp_root(&format!("unsynced-{case}"));
+        fs::create_dir_all(root.join("var/lib/catalyst")).unwrap();
+        fs::create_dir_all(root.join("var/cache/catalyst")).unwrap();
+        fs::create_dir_all(root.join("etc/apk")).unwrap();
+        fs::write(root.join("etc/apk/arch"), "x86_64\n").unwrap();
+        fs::write(root.join("var/lib/catalyst/world"), "base\nnano\n").unwrap();
+        seed_one_pkg(&root, "base", "1.0-r0", &[("usr/bin/base", b"base\n")], true);
+        seed_one_pkg(
+            &root,
+            "nano",
+            "1.0-r0",
+            &[("usr/bin/nano", b"real-nano-binary\n"), ("etc/nanorc", b"set linenumbers\n")],
+            true,
+        );
+        fs::write(
+            root.join("var/lib/catalyst/unsynced"),
+            "catalyst-unsynced 1\nboot boot-1111\nhad base 1.0-r0\nend\n",
+        )
+        .unwrap();
+
+        match case {
+            "zeroed-programs" => {
+                fs::write(root.join("Programs/nano/1.0-r0/usr/bin/nano"), vec![0u8; b"real-nano-binary\n".len()])
+                    .unwrap();
+            }
+            "missing-live" => {
+                fs::remove_file(root.join("usr/bin/nano")).unwrap();
+            }
+            "zero-etc" => {
+                fs::write(root.join("etc/nanorc"), b"").unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let out = oct_boot(&root, "boot-2222", &["cache", "clean"]);
+        assert!(out.status.success(), "{case}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(!root.join("Programs/nano/Current").exists(), "{case}: damaged nano was not removed");
+        assert!(!root.join("usr/bin/nano").exists(), "{case}: live nano still present");
+        assert!(!root.join("etc/nanorc").exists(), "{case}: live nanorc still present");
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+

@@ -880,6 +880,7 @@ impl<'a> Switch<'a> {
             }
             Ok(match fs::remove_file(host) {
                 Ok(()) => Gone::Removed,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Gone::Nothing,
                 Err(err) => Gone::Failed(err),
             })
         };
@@ -921,6 +922,8 @@ impl<'a> Switch<'a> {
     fn sync(&mut self) -> Result<()> {
         sys::sync_fs(&File::open(&self.root)?)?;
         self.unsynced = false;
+        // Everything previously added unsynced in this boot is now durable on disk.
+        crate::unsynced::remove(&self.root);
         Ok(())
     }
 }

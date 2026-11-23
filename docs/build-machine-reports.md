@@ -10,6 +10,37 @@ How this works:
 
 ---
 
+## 2026-11-23: cleanup & safety fixes after the aggressive optimization commits (`37c652d..ef805c0`)
+
+At the owner's request, audited the recent performance commits (`unsynced` adds, `idxcache`, fast PEM key reader, `needs_chown` skip, and parallel `remove_old`) and fixed 7 safety/correctness bugs directly on `testing` without regressing the speed wins (all 77 `cargo test --release` tests pass with 0 warnings, including 3 new regression tests in `catalyst/tests/engine_cmds.rs`).
+
+### Fixed
+
+1. **Stale `var/lib/catalyst/unsynced` mark survived synced transactions (`commit.rs`, `engine.rs`):**
+   - `unsynced` recorded `had = <packages>` on the first unsynced add of a boot, and **no synced transaction (`upgrade`, `del`, big `add`, `fix`) ever removed it**. After a reboot, `after_unsynced_stop()` treated every synced package upgraded or installed since that first add as an unsynced add — silently **uninstalling** a synced package if its record was damaged instead of letting N-1 / `oct fix` repair it.
+   - **Fix:** Clear `var/lib/catalyst/unsynced` after every full `syncfs()` (`Switch::sync()`, synced pre-switch `sync_fs` in `transact_at()`, and durable `index::rebuild` in `fix()`).
+2. **`after_unsynced_stop()` deleted a leftover synced journal when `drops` was non-empty (`engine.rs`):**
+   - `keep` required `drops.is_empty() && ...`, so if an earlier unsynced package was damaged AND a **synced** upgrade/removal journal (`!j.unsynced`) was interrupted, `after_unsynced_stop()` deleted the synced journal and `gc()` deleted its unpacked new version directory.
+   - **Fix:** Always keep synced journals (`!j.unsynced`), never drop their target versions, and defer `gc()` until `settle()` finishes replaying the synced journal.
+3. **`whole_version()` missed zero-filled blocks, bad hardlinks/symlinks, and missing/0-byte live-tree files (`engine.rs`):**
+   - `whole_version()` only checked `m.len() >= r.size` inside `Programs/<name>/<ver>/` — never verified `r.hash`, never checked symlink targets or hardlink sizes, and never checked the live tree (so a power cut leaving a 0-byte `etc/` copy, a missing live hardlink, or zero-filled blocks in `Programs/` passed as "whole" and deleted the `unsynced` mark).
+   - **Fix:** Verify exact size + `r.hash` for regular/hardlink entries and symlink targets in `whole_version()`, plus `live_whole()` for installed recent packages not pending in a leftover journal (checking live existence, non-zero `etc/` copies, and cross-device `/boot` hashes).
+4. **Unsynced reboot recovery skipped index invalidation when `whole` was empty (`engine.rs`):**
+   - If a power cut persisted an in-place bucket update while `Programs/<pkg>` and `index/state` stayed at their pre-add state, `after_unsynced_stop()` saw `whole = []`, left the index valid, and removed `unsynced`.
+   - **Fix:** Always invalidate and reload the lookup index inside `after_unsynced_stop()` (runs at most once after a reboot following unsynced adds).
+5. **`--simulate` and read-only `search`/`info` wrote `var/cache/catalyst/parsed-*` (`repo.rs`, `engine.rs`):**
+   - `repo::load()` called `idxcache::store()` unconditionally, mutating `var/cache/catalyst/` under `--simulate` and unlocked read-only queries. Also hashed `expected_identity` bytes in `idxcache::key()`.
+   - **Fix:** Added `repo::load_with_cache(..., write_cache)` and passed `save_freshness` from `load_repos()`.
+6. **`unpack.rs` `needs_chown` skip missed inherited `setgid` subdirs and non-zero `egid` (`unpack.rs`):**
+   - Skipping `fchown`/`lchown` for `(0, 0)` assumed `egid == 0`, non-setgid `dest`, and no unlisted ancestor under a setgid directory.
+   - **Fix:** Check `getegid() == 0` and non-setgid `gid == 0` on `dest`, and propagate/reset setgid in `ensure_parent()`.
+7. **Parallel `remove_old()` duplicate-host `NotFound` race & tiny RSA DER fast-path (`commit.rs`, `verify.rs`):**
+   - Treated `io::ErrorKind::NotFound` as `Gone::Nothing` in parallel `remove_old()` (if two records resolve to the same canonical host path across threads), and tightened `canonical_rsa_id()` to require `bits >= 512`, odd modulus, and odd exponent `>= 3` (falling back to OpenSSL for anything else).
+
+— **Gemini 4 Neon**
+
+---
+
 ## 2026-11-23: the network losses are fixed; big removals are 2.2x apk's time, down from 3.2x
 
 **After the report below, two of its three losses were worked on.** Same strict benchmark, all 34 cases run again:

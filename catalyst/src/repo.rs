@@ -376,6 +376,23 @@ pub fn load(
     fresh: &Freshness,
     cache_max_age: Option<std::time::Duration>,
 ) -> Result<Repo> {
+    load_with_cache(spec, arch, keys, opts, http, cache_dir, fresh, cache_max_age, true)
+}
+
+/// Like [`load`], but writes the parsed-index cache (`var/cache/catalyst/parsed-*`)
+/// only when `write_cache` is true (skipped under `--simulate` and read-only queries).
+#[allow(clippy::too_many_arguments)]
+pub fn load_with_cache(
+    spec: &str,
+    arch: &str,
+    keys: &TrustedKeys,
+    opts: &VerifyOptions,
+    http: Option<&Http>,
+    cache_dir: &Path,
+    fresh: &Freshness,
+    cache_max_age: Option<std::time::Duration>,
+    write_cache: bool,
+) -> Result<Repo> {
     let (index_url, base, default_spec) = locate(spec, arch);
     let remote = is_remote(&index_url);
     let at = |e: Error| prefix(e, &format!("{index_url}: "));
@@ -402,8 +419,10 @@ pub fn load(
         let (now, offer) = offer_of(&index, &index_url);
         fresh.check_offer(&index_url, &offer, &index, Some(now))?;
         crate::prof::mark("  repositories: freshness check");
-        idxcache::store(&cache_file, &key, &index, &trust, &offer);
-        crate::prof::mark("  repositories: cache written");
+        if write_cache {
+            idxcache::store(&cache_file, &key, &index, &trust, &offer);
+            crate::prof::mark("  repositories: cache written");
+        }
         Ok((index, trust, offer))
     };
     let mut stale = false;

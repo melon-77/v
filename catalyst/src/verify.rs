@@ -150,7 +150,13 @@ fn canonical_rsa_id(der: &[u8]) -> Option<([u8; 16], u32)> {
         }
     }
     let n = if n[0] == 0 { &n[1..] } else { n };
+    let e = if e[0] == 0 { &e[1..] } else { e };
     let bits = n.len() as u32 * 8 - n[0].leading_zeros();
+    // Require a plausible RSA key (>= 512 bits, odd modulus, odd exponent >= 3);
+    // anything unusual falls back to OpenSSL's full validator.
+    if bits < 512 || (n[n.len() - 1] & 1) == 0 || (e[e.len() - 1] & 1) == 0 || e == [1] {
+        return None;
+    }
     let mut id = [0u8; 16];
     id.copy_from_slice(&digest::sha512(der)[..16]);
     Some((id, bits))
@@ -711,7 +717,8 @@ mod tests {
         long.extend_from_slice(&[0x02, 0x01, 0x05, 0x02, 0x01, 0x03]);
         assert!(der_take(&long, 0x30).is_some() && canonical_rsa_id(&long).is_none());
         assert!(canonical_rsa_id(&[0x30, 0x07, 0x02, 0x02, 0x00, 0x05, 0x02, 0x01, 0x03]).is_none());
-        assert_eq!(canonical_rsa_id(&[0x30, 0x07, 0x02, 0x02, 0x00, 0x85, 0x02, 0x01, 0x03]).map(|x| x.1), Some(8));
+        // tiny (< 512-bit) bogus RSA sequence must fall back to OpenSSL rather than being accepted
+        assert!(canonical_rsa_id(&[0x30, 0x07, 0x02, 0x02, 0x00, 0x85, 0x02, 0x01, 0x03]).is_none());
         assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
         assert_eq!(base64_decode("TWE=").unwrap(), b"Ma");
         assert_eq!(base64_decode("TQ==").unwrap(), b"M");

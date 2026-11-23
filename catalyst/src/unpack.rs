@@ -112,19 +112,34 @@ fn path_of(base: &Path, rel: &[u8]) -> PathBuf {
     base.join(OsStr::from_bytes(rel))
 }
 
-fn ensure_parent(base: &Path, rel: &[u8], made: &mut HashSet<Vec<u8>>) -> io::Result<()> {
+fn ensure_parent(
+    base: &Path,
+    rel: &[u8],
+    made: &mut HashSet<Vec<u8>>,
+    setgid: &mut HashSet<Vec<u8>>,
+    chown: bool,
+) -> io::Result<()> {
     let Some(i) = rel.iter().rposition(|&c| c == b'/') else { return Ok(()) };
     let parent = &rel[..i];
     if made.contains(parent) {
         return Ok(());
     }
     // an ancestor the package does not list: 0755 root:root (§E4)
-    ensure_parent(base, parent, made)?;
+    ensure_parent(base, parent, made, setgid, chown)?;
     let p = path_of(base, parent);
-    match fs::DirBuilder::new().mode(0o755).create(&p) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+    let created = match fs::DirBuilder::new().mode(0o755).create(&p) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
         Err(e) => return Err(e),
+    };
+    let grandparent = crate::rootfs::split_rel(parent).0;
+    if setgid.contains(grandparent) {
+        if created && chown {
+            lchown(&p, Some(0), Some(0))?;
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+        } else {
+            setgid.insert(parent.to_vec());
+        }
     }
     made.insert(parent.to_vec());
     Ok(())
@@ -246,21 +261,27 @@ fn unpack_into(
         }
     }
     let chown = sys::is_root();
+    let root_egid_clean = chown && {
+        use std::os::unix::fs::MetadataExt;
+        (unsafe { libc::getegid() } == 0)
+            && fs::symlink_metadata(dest).map_or(false, |m| m.gid() == 0 && (m.mode() & 0o2000) == 0)
+    };
     let mut st = Stats::default();
     let mut made: HashSet<Vec<u8>> = HashSet::new();
     // directories made setgid: what is created in them takes their group,
     // so it needs its owner set even when that is root
     let mut setgid: HashSet<Vec<u8>> = HashSet::new();
-    // a new file is root's already when catalyst runs as root (outside a setgid directory)
+    // a new file is root:root already only when euid==0, egid==0, and neither
+    // the package root nor the file's parent directory is setgid
     let needs_chown = |rel: &[u8], uid: u32, gid: u32, setgid: &HashSet<Vec<u8>>| {
-        (uid, gid) != (0, 0) || setgid.contains(crate::rootfs::split_rel(rel).0)
+        !root_egid_clean || (uid, gid) != (0, 0) || setgid.contains(crate::rootfs::split_rel(rel).0)
     };
     // 64 KiB a write: a larger buffer costs page faults on every package
     let mut buf = vec![0u8; 64 * 1024];
     while let Some(mut e) = pr.next_entry()? {
         let rel = e.path.to_vec();
         let p = path_of(dest, &rel);
-        ensure_parent(dest, &rel, &mut made)?;
+        ensure_parent(dest, &rel, &mut made, &mut setgid, chown)?;
         st.entries += 1;
         if e.kind == EntryKind::Dir {
             let acl = &e.dir.acl;
@@ -273,6 +294,8 @@ fn unpack_into(
             apply_acl(&p, acl, ids, chown, false)?;
             if acl.mode & 0o2000 != 0 {
                 setgid.insert(rel.clone());
+            } else {
+                setgid.remove(&rel);
             }
             made.insert(rel);
             continue;
