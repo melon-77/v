@@ -48,8 +48,10 @@ pub fn dir(root: &Path) -> PathBuf {
 }
 
 /// The trash, checked (see the module's last paragraph); with `make`, made
-/// first if it is not there. `None`: there is none, or it is not to be used.
-fn base(root: &Path, make: bool) -> Option<PathBuf> {
+/// first if it is not there; with `clean`, a non-directory under its name is
+/// removed (false for read-only `--simulate` queries). `None`: there is none,
+/// or it is not to be used.
+fn base(root: &Path, make: bool, clean: bool) -> Option<PathBuf> {
     let state = Db::state(root);
     let b = dir(root);
     if make {
@@ -61,13 +63,23 @@ fn base(root: &Path, make: bool) -> Option<PathBuf> {
     }
     let m = fs::symlink_metadata(&b).ok()?;
     if !m.is_dir() {
-        // not ours: removed under this name, never followed
-        let _ = fs::remove_file(&b);
+        if clean {
+            // not ours: removed under this name, never followed
+            let _ = fs::remove_file(&b);
+        }
         return None;
     }
     let st = fs::symlink_metadata(&state).ok()?;
     let name = std::ffi::CStr::from_bytes_with_nul(b"trash\0").unwrap();
-    let mounted = File::open(&state).ok().and_then(|d| sys::is_mount_point(&d, name)) == Some(true);
+    let mounted = match File::open(&state).ok().and_then(|d| sys::is_mount_point(&d, name)) {
+        Some(v) => v,
+        // `openat2` unavailable (kernel < 5.6 or seccomp): fall back to
+        // mountinfo, failing closed if that cannot tell either.
+        None => match (fs::canonicalize(&b), sys::mounts()) {
+            (Ok(abs), Some(ms)) => sys::mounted_in_or_from(&ms, &abs),
+            _ => true,
+        },
+    };
     let ours = st.is_dir() && st.dev() == m.dev() && !mounted && m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o022 == 0;
     if !ours {
         eprintln!(
@@ -94,7 +106,7 @@ impl Entry {
     /// on the file system of `Programs` (a tree gets there by a rename), or
     /// it cannot be made. Nothing is left behind then.
     pub fn new(root: &Path) -> Option<Entry> {
-        let base = base(root, true)?;
+        let base = base(root, true, true)?;
         let made = (|| {
             let same = fs::metadata(Db::programs(root)).ok()?.dev() == fs::symlink_metadata(&base).ok()?.dev();
             if !same {
@@ -192,7 +204,7 @@ impl Drop for Entry {
 
 /// The names of the entries in the trash (for `--simulate`).
 pub fn entries(root: &Path) -> Vec<String> {
-    let Some(base) = base(root, false) else { return Vec::new() };
+    let Some(base) = base(root, false, false) else { return Vec::new() };
     let mut v: Vec<String> =
         fs::read_dir(base).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
     v.sort();
@@ -246,6 +258,27 @@ fn orphan_link(link: &Path) -> bool {
     gone(link.with_extension("unchecked")) && gone(link.with_extension("stuck"))
 }
 
+/// Restores `u` to canonical relative path `rel` inside `root` without
+/// following any symlink in any ancestor component (walked with `openat` +
+/// `O_DIRECTORY | O_NOFOLLOW`, then `renameat2(RENAME_NOREPLACE)` into the
+/// opened parent descriptor). Refuses symlinks so recovery can never escape
+/// `root` or redirect into catalyst's own directories.
+fn restore_confined(root: &Path, u: &Path, rel: &[u8]) -> io::Result<()> {
+    let parts: Vec<&[u8]> = rel.split(|&c| c == b'/').collect();
+    let Some((leaf, parents)) = parts.split_last() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty restore path"));
+    };
+    let mut dir = sys::open_dir_nofollow(root)?;
+    for comp in parents {
+        let cname = std::ffi::CString::new(*comp)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in restore path"))?;
+        dir = sys::open_dir_at_nofollow(&dir, &cname)?;
+    }
+    let cname = std::ffi::CString::new(*leaf)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in restore path"))?;
+    sys::rename_noreplace_into(u, &dir, &cname)
+}
+
 /// Deals with the directories that a run moved out of the live tree and did
 /// not come to look through (it was killed, or the power went). For a run
 /// that holds the root's lock.
@@ -267,7 +300,7 @@ fn orphan_link(link: &Path) -> bool {
 /// that was to go back would stay out of the tree.
 pub fn settle_unchecked(root: &Path, restore: bool) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
-    let Some(base) = base(root, false) else { return Ok(()) };
+    let Some(base) = base(root, false, true) else { return Ok(()) };
     let mut first: Option<io::Error> = None;
     for e in fs::read_dir(&base)?.flatten() {
         let p = e.path();
@@ -317,7 +350,7 @@ pub fn settle_unchecked(root: &Path, restore: bool) -> io::Result<()> {
             });
             let back = match (&from, restore) {
                 (_, false) => Err(io::Error::new(io::ErrorKind::Other, "the change it belonged to is over")),
-                (Some(f), true) => sys::rename_noreplace(u, &root.join(f)).map(|()| f.clone()),
+                (Some(f), true) => restore_confined(root, u, f.as_os_str().as_bytes()).map(|()| f.clone()),
                 (None, true) => Err(io::Error::new(io::ErrorKind::NotFound, "nothing says where it was")),
             };
             match back {
@@ -348,7 +381,7 @@ pub fn settle_unchecked(root: &Path, restore: bool) -> io::Result<()> {
 /// directory of the live tree that is still to be looked through, or that
 /// could not be put back, is never deleted, and its entry stays with it.
 pub fn empty(root: &Path) -> io::Result<usize> {
-    let Some(base) = base(root, false) else { return Ok(0) };
+    let Some(base) = base(root, false, true) else { return Ok(0) };
     let most = sys::name_threads(&base, sys::NameWork::Trees);
     let mut n = 0;
     let mut first: Option<io::Error> = None;
@@ -600,11 +633,12 @@ mod tests {
         assert!(fs::symlink_metadata(dir(&root)).is_err(), "the link is gone");
         std::os::unix::fs::symlink(&elsewhere, dir(&root)).unwrap();
         assert!(entries(&root).is_empty());
-        std::os::unix::fs::symlink(&elsewhere, dir(&root)).unwrap();
+        assert!(fs::symlink_metadata(dir(&root)).is_ok(), "entries() for --simulate must not remove the link");
         let e = Entry::new(&root);
         assert!(e.is_none() && fs::symlink_metadata(dir(&root)).is_err());
         kept("an entry asked for with a symlink there");
         fs::write(dir(&root), b"").unwrap();
+        assert!(entries(&root).is_empty() && fs::symlink_metadata(dir(&root)).is_ok(), "entries() leaves a file untouched");
         assert_eq!(empty(&root).unwrap(), 0);
         assert!(fs::symlink_metadata(dir(&root)).is_err(), "a file under the name is removed");
         // a directory others may write to: not ours, left alone with what is in it
@@ -612,6 +646,37 @@ mod tests {
         fs::set_permissions(dir(&root), fs::Permissions::from_mode(0o777)).unwrap();
         assert_eq!(empty(&root).unwrap(), 0);
         assert!(dir(&root).join("x/0").exists() && Entry::new(&root).is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Recovery of an unchecked directory walks every ancestor with O_NOFOLLOW:
+    /// a parent component replaced by a symlink (pointing outside the root or
+    /// into catalyst's own state) is never followed; the directory becomes stuck.
+    #[test]
+    fn settle_unchecked_refuses_symlink_in_parent_path() {
+        let root = root("symlink-parent");
+        let outside = root.with_extension("outside");
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside).unwrap();
+        for (target, check_dst) in [
+            (outside.clone(), outside.join("escaped")),
+            (PathBuf::from("../var/lib/catalyst"), Db::state(&root).join("escaped")),
+        ] {
+            let _ = fs::remove_dir_all(root.join("usr"));
+            fs::create_dir_all(root.join("usr")).unwrap();
+            std::os::unix::fs::symlink(&target, root.join("usr/share")).unwrap();
+            let mut e = Entry::new(&root).expect("an entry");
+            let staging = root.join("tmp-src");
+            fs::create_dir_all(&staging).unwrap();
+            fs::write(staging.join("data"), b"keep").unwrap();
+            let u = e.take_unchecked(&staging, b"usr/share/escaped").unwrap();
+            drop(e);
+            settle_unchecked(&root, true).unwrap();
+            assert!(!check_dst.exists(), "must not follow parent symlink to {}", check_dst.display());
+            assert!(u.with_extension("stuck").join("data").exists(), "must stay stuck in trash");
+            fs::remove_dir_all(u.parent().unwrap()).unwrap();
+        }
+        fs::remove_dir_all(&outside).unwrap();
         fs::remove_dir_all(&root).unwrap();
     }
 }

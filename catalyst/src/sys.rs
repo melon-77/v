@@ -231,7 +231,24 @@ fn in_or_from(mounts: &[Mount], abs: &Path, id: u64) -> bool {
     // where it is inside its file system
     let Ok(rest) = abs.strip_prefix(&m.at) else { return true };
     let inside = m.root.join(rest);
-    mounts.iter().any(|x| x.dev == m.dev && x.id != m.id && x.root.starts_with(&inside))
+    mounts.iter().any(|x| {
+        if x.dev != m.dev || x.id == m.id {
+            return false;
+        }
+        if x.root.starts_with(&inside) {
+            return true;
+        }
+        // `x` is a bind mount of an ancestor of `abs`: `abs` is also visible
+        // at `x.at/<suffix>`, so any mount on or inside that view sits inside
+        // this directory as well.
+        if let Ok(suffix) = inside.strip_prefix(&x.root) {
+            let alias = x.at.join(suffix);
+            if mounts.iter().any(|y| y.at.starts_with(&alias)) {
+                return true;
+            }
+        }
+        false
+    })
 }
 
 /// What `statx` gives, as far as it is used here (256 bytes).
@@ -303,6 +320,21 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     const RENAME_NOREPLACE: c_uint = 1;
     let (f, t) = (cstr(from)?, cstr(to)?);
     let r = unsafe { libc::syscall(libc::SYS_renameat2, AT_FDCWD, f.as_ptr(), AT_FDCWD, t.as_ptr(), RENAME_NOREPLACE) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Like [`rename_noreplace`], placing `from` as `to_name` inside the already
+/// opened directory `to_dir` (immune to symlinks or path swaps above `to_dir`).
+pub fn rename_noreplace_into(from: &Path, to_dir: &std::fs::File, to_name: &std::ffi::CStr) -> io::Result<()> {
+    const RENAME_NOREPLACE: c_uint = 1;
+    let f = cstr(from)?;
+    let r = unsafe {
+        libc::syscall(libc::SYS_renameat2, AT_FDCWD, f.as_ptr(), to_dir.as_raw_fd(), to_name.as_ptr(), RENAME_NOREPLACE)
+    };
     if r == 0 {
         Ok(())
     } else {
@@ -492,6 +524,23 @@ pub fn open_dir_nofollow(p: &Path) -> io::Result<std::fs::File> {
         .open(p)
 }
 
+/// Opens a direct child directory `name` inside `parent` without following
+/// symlinks (`openat` with `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`).
+pub fn open_dir_at_nofollow(parent: &std::fs::File, name: &std::ffi::CStr) -> io::Result<std::fs::File> {
+    use std::os::unix::io::FromRawFd;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
 #[cfg(test)]
 mod mount_tests {
     use super::*;
@@ -511,9 +560,11 @@ mod mount_tests {
             95 35 8:3 / /hidden/data rw - ext4 /dev/sdc1 rw\n\
             96 35 8:4 / /hidden rw - ext4 /dev/sdd1 rw\n\
             97 35 8:4 /data/pkg/share /mnt/view rw - ext4 /dev/sdd1 rw\n\
+            98 35 0:30 /@/opt/parent /mnt/parent-view rw - btrfs /dev/sda2 rw\n\
+            99 98 0:55 / /mnt/parent-view/pkg/nested rw - tmpfs none rw\n\
             short line\n";
         let m = parse_mountinfo(text);
-        assert_eq!(m.len(), 10);
+        assert_eq!(m.len(), 12);
         assert_eq!(m[2], Mount { id: 90, dev: b"0:30".to_vec(), root: "/@/a b".into(), at: "/mnt/with space\ttab\\x".into() });
         // in the root mount (35)
         let no = |p: &str| !in_or_from(&m, Path::new(p), 35);
@@ -523,6 +574,9 @@ mod mount_tests {
         assert!(!no("/boot") && !no("/usr/share/app") && !no("/usr/share"));
         // it, or a directory in it, is the root of a mount somewhere else
         assert!(!no("/usr/share/shared/sub") && !no("/usr/share/shared") && no("/usr/share/shared/sub/deeper"));
+        // a mount placed inside an ancestor bind mount (/mnt/parent-view/pkg/nested)
+        // sits inside /opt/parent/pkg, while a sibling (/opt/parent/other) has none
+        assert!(!no("/opt/parent/pkg") && no("/opt/parent/other"));
         // A mount hidden under a later one on a directory above it (95
         // under 96): the directory is in 96, whatever the paths look like,
         // and there it is the root of the mount at /mnt/view.

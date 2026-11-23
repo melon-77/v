@@ -10,6 +10,51 @@ How this works:
 
 ---
 
+## 2026-11-23: Round 2 safety audit & cleanup on `catalyst` (`756c953..1294fbd`)
+
+Audited the five commits since `756c953` (one-sync protocol, `oct recover`, packed index v5, deferred trash deletion, and btrfs whole-directory rename removal) with code inspection and live black-box reproductions against `oct`, then fixed eight concrete safety/correctness issues while keeping all the performance gains intact:
+
+1. **`trash::settle_unchecked` followed parent symlinks out of `--root` and into reserved dirs (`catalyst/src/trash.rs`, `catalyst/src/sys.rs`) — live-reproduced & fixed.**
+   - *Bug:* `settle_unchecked` validated `N.from` textually (no `..`, leading `/`, or reserved prefix) and then called `sys::rename_noreplace(u, &root.join(f))`. If any ancestor directory of `f` inside `root` was replaced by a symlink (e.g. `usr/share -> /tmp/outside` or `usr/share -> ../var/lib/catalyst`), `oct --root R recover` followed it and moved `0.unchecked` outside `--root` or into `var/lib/catalyst`.
+   - *Fix:* Added `sys::open_dir_at_nofollow` (`openat` with `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`) and `sys::rename_noreplace_into` (`renameat2` with `RENAME_NOREPLACE` against an opened directory fd). `restore_confined()` walks every ancestor from `open_dir_nofollow(root)` without following symlinks and renames into the final parent fd; any symlink along the path fails cleanly and leaves the directory as `N.stuck`.
+
+2. **`oct --simulate empty-trash` deleted a non-directory `var/lib/catalyst/trash` (`catalyst/src/trash.rs`) — live-reproduced & fixed.**
+   - *Bug:* `trash::entries()` (used by `--simulate empty-trash`) called `base(root, false)`, which ran `fs::remove_file(&b)` whenever `var/lib/catalyst/trash` was a file or symlink (even `the_trash_is_used_only_as_a_directory_of_our_own` had a duplicate `symlink()` line that only succeeded because `entries()` deleted the first one).
+   - *Fix:* Added `clean: bool` to `trash::base()` and passed `clean = false` from `entries()` so `--simulate` never mutates the root.
+
+3. **`trash::base` failed open when `openat2` returned `None` (`catalyst/src/trash.rs`) — fixed.**
+   - *Bug:* Line 70 checked `is_mount_point(&d, name) == Some(true)`. When `openat2` is unavailable (`ENOSYS` on kernels < 5.6 or `EPERM` under container seccomp), `is_mount_point` returns `None`, so `mounted` evaluated to `false` — allowing a same-FS bind mount at `var/lib/catalyst/trash` to be emptied. Every other check in `sys.rs` and `commit.rs` fails closed.
+   - *Fix:* When `is_mount_point` returns `None`, fall back to `sys::mounted_in_or_from` via `/proc/self/mountinfo`, failing closed (`mounted = true`) if that cannot tell either.
+
+4. **`commit::roots_alone` treated `user: None` / `group: None` (`nobody`, 65534) as `root` (`catalyst/src/commit.rs`) — fixed.**
+   - *Bug:* In apk/catalyst (`adb/schema.rs`, `unpack.rs`), absent `user`/`group` (`None`) unpacks as UID/GID `65534` (`NOBODY`), not `root`. `roots_alone()` used `x.as_deref().map_or(false, |x| x != "root")`, returning `true` for `None` and opening `Programs/<name>/<ver>` to `0755` in step 1 while the switch was still running even when entries belonged to `nobody`.
+   - *Fix:* Require explicit `x.as_deref() == Some("root")` for both `user` and `group`.
+
+5. **Hardened `move_whole_dirs` / `whole_dir` / `list_moved` second-look, subvolume, and restore-fd checks (`catalyst/src/commit.rs`) — fixed.**
+   - `list_moved` silently mapped `e.file_type()` errors to `is_dir = false` instead of failing closed (`return false`).
+   - The second look did not re-check `sys::is_protected(p)`, so an entry marked immutable/append-only between look 1 and the rename could be accepted into trash where `empty-trash` could never delete it.
+   - Neither `whole_dir` nor `list_moved` checked `st_dev == parent_dev`, leaving unmounted Btrfs subvolumes (which cross `st_dev` without appearing in `mountinfo` or triggering `openat2(RESOLVE_NO_XDEV)`) eligible for moving into trash.
+   - `move_whole_dirs` now opens the parent directory with `open_dir_nofollow` and restores failed second-look directories via `rename_noreplace_into(&to, &above, &name)` instead of a path-based rename.
+
+6. **`rootfs::make_dir_atomic` fast path returned `Ok(false)` on `EEXIST` for a non-directory (`catalyst/src/rootfs.rs`) — fixed.**
+   - *Bug:* On `AlreadyExists`, the `plain_mkdir_is_exact` fast path returned `Ok(false)` without checking whether `host` is actually a directory (unlike the slow path). Also switched the slow path's fallback check from `host.is_dir()` (which follows symlinks) to `symlink_metadata(host).map_or(false, |m| m.is_dir())`.
+
+7. **`sys::in_or_from` missed mounts placed inside an ancestor bind mount (`catalyst/src/sys.rs`) — fixed.**
+   - *Bug:* If `/opt/parent` was bind-mounted at `/mnt/parent-view` and another filesystem was mounted at `/mnt/parent-view/pkg/nested`, `in_or_from` on `/opt/parent/pkg` only checked `x.root.starts_with(&inside)` and returned `false`.
+   - *Fix:* When `inside.starts_with(&x.root)` for another mount `x` of the same device, also check whether any mount sits at or under `x.at/<suffix>` (without falsely blocking siblings that have no nested mount).
+
+8. **`oct recover` missed standalone legacy `var/lib/catalyst/unsynced` marks, and `RECOVERY_ERRORS` wasn't reset at `settle()` entry (`catalyst/src/engine.rs`) — live-reproduced & fixed.**
+   - *Bug:* `oct recover` (and `--simulate recover`) omitted `"unsynced"` from its leftover state check, reporting `OK: nothing to finish` while leaving a legacy `unsynced` mark behind. `RECOVERY_ERRORS` also wasn't cleared when `settle()` began.
+   - *Fix:* Added `"unsynced"` to `engine::recover` and reset `RECOVERY_ERRORS` at the start of `settle()`.
+
+**Verification.**
+- `cargo build --release` and `cargo test --release`: **0 warnings**, **93/93 tests passed** (54 unit, 13 CLI `engine_cmds`, 26 `real_data`), including new unit and CLI regression tests for every fix above.
+- Re-ran the black-box reproduction harness against the rebuilt `oct`: symlink escapes out of `--root` and into `var/lib/catalyst` are blocked (`0.stuck`), `--simulate empty-trash` leaves non-dir `trash` untouched, and `oct recover` detects and retires legacy `unsynced`.
+
+— **Gemini 4 Neon**
+
+---
+
 ## 2026-11-23: on btrfs, whole directories of a removed package leave with one rename; no case slower than apk there
 
 **The owner's go-ahead.** After the entry below, removing a big package on btrfs was still slower than apk (203 ms against 177 ms). I had held back the one thing that would change that, because it is the first place where catalyst removes by directory instead of by checked entry. Shown the numbers and the risk, the owner: "go ahead with building that".

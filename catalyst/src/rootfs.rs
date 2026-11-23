@@ -461,7 +461,13 @@ fn make_dir_atomic(host: &Path, mode: u32, uid: u32, gid: u32) -> io::Result<boo
     if plain_mkdir_is_exact(host, mode, uid, gid) {
         return match fs::DirBuilder::new().mode(mode).create(host) {
             Ok(()) => Ok(true),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                if fs::symlink_metadata(host).map_or(false, |m| m.is_dir()) {
+                    Ok(false)
+                } else {
+                    Err(e)
+                }
+            }
             Err(e) => Err(e),
         };
     }
@@ -494,7 +500,7 @@ fn make_dir_atomic(host: &Path, mode: u32, uid: u32, gid: u32) -> io::Result<boo
         }
         Err(e) => {
             let _ = fs::remove_dir(&tmp);
-            if host.is_dir() {
+            if fs::symlink_metadata(host).map_or(false, |m| m.is_dir()) {
                 Ok(false)
             } else {
                 Err(e)
@@ -634,6 +640,12 @@ mod tests {
         assert!(!exact(&base.join("missing"), 0o755));
         fs::write(base.join("file"), b"").unwrap();
         assert!(!exact(&base.join("file"), 0o755));
+        // fast path must fail when host already exists as a file or symlink, not return Ok(false)
+        assert!(make_dir_atomic(&base.join("file"), 0o755, uid, gid).is_err());
+        symlink(&base, base.join("link-to-dir")).unwrap();
+        assert!(make_dir_atomic(&base.join("link-to-dir"), 0o755, uid, gid).is_err());
+        // existing real directory still returns Ok(false)
+        assert_eq!(make_dir_atomic(&sg, 0o755, uid, gid).unwrap(), false);
         fs::remove_dir_all(&base).unwrap();
     }
 }

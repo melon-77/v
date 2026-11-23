@@ -1203,11 +1203,14 @@ impl<'a> Switch<'a> {
             if sys::mounted_in_or_from(&mounts, &abs) || sys::is_protected(host) {
                 continue;
             }
-            let name = host.file_name().and_then(|n| std::ffi::CString::new(n.as_bytes()).ok());
-            let above = host.parent().and_then(|p| File::open(p).ok());
-            match (above, name) {
-                (Some(a), Some(n)) if sys::is_mount_point(&a, &n) == Some(false) => {}
-                _ => continue,
+            let Some(name) = host.file_name().and_then(|n| std::ffi::CString::new(n.as_bytes()).ok()) else {
+                continue;
+            };
+            let Some(above) = host.parent().and_then(|p| sys::open_dir_nofollow(p).ok()) else {
+                continue;
+            };
+            if sys::is_mount_point(&above, &name) != Some(false) {
+                continue;
             }
             // the directory that will be moved
             let Ok(before) = fs::symlink_metadata(host) else { continue };
@@ -1229,22 +1232,25 @@ impl<'a> Switch<'a> {
                 _ => {}
             }
             // The second look. It is the directory that was looked at;
-            // nothing is mounted in it now; and all that is in it was seen
-            // and is still the old version's own.
+            // nothing is mounted in it now; and all that is in it was seen,
+            // stays on the same device, is not protected, and is still the
+            // old version's own.
             let expected: HashSet<usize> = inside.iter().copied().collect();
             let mut found: Vec<(PathBuf, Vec<u8>, bool)> = Vec::new();
             let good = fs::symlink_metadata(&to).map_or(false, |m| m.is_dir() && m.dev() == before.dev() && m.ino() == before.ino())
-                && list_moved(&to, c, &mut found)
+                && list_moved(&to, c, before.dev(), &mut found)
                 && match (fs::canonicalize(&to), sys::mounts()) {
                     (Ok(now), Some(ms)) => !sys::mounted_in_or_from(&ms, &now),
                     _ => false,
                 }
                 && crate::index::on_threads(&found, |(p, canon, is_dir)| {
                     Ok(if *is_dir {
-                        cand.contains_key(canon.as_slice())
+                        cand.contains_key(canon.as_slice()) && !sys::is_protected(p)
                     } else {
                         match at.get(canon.as_slice()) {
-                            Some(&i) if expected.contains(&i) => matches!(still_ours(may_go[i].0, p, odir), Still::Ours),
+                            Some(&i) if expected.contains(&i) => {
+                                matches!(still_ours(may_go[i].0, p, odir), Still::Ours) && !sys::is_protected(p)
+                            }
                             _ => false,
                         }
                     })
@@ -1262,9 +1268,10 @@ impl<'a> Switch<'a> {
                 continue;
             }
             // Something in it is not what was seen: the whole directory goes
-            // back where it was, and its entries are removed one by one
+            // back where it was (into the exact parent directory descriptor
+            // opened before the move), and its entries are removed one by one
             // (which keeps what is not the package's, and says so).
-            match sys::rename_noreplace(&to, host) {
+            match sys::rename_noreplace_into(&to, &above, &name) {
                 Ok(()) => {
                     if let Some(t) = self.trash.as_mut() {
                         t.gave_back(&to);
@@ -2043,11 +2050,12 @@ fn remove_trees_by_directory(roots: &[PathBuf], threads: usize) -> io::Result<()
     emptied.iter().try_for_each(fs::remove_dir)
 }
 
-/// Whether nothing in these records is for anyone but root: no entry has
-/// another owner or group, and no directory lets group or others write.
+/// Whether nothing in these records is for anyone but root: every entry is
+/// explicitly owned by `root:root` (`None` unpacks as `nobody`, uid/gid 65534,
+/// not `root`), and no directory lets group or others write.
 fn roots_alone(recs: &[FileRec]) -> bool {
-    let special = |x: &Option<String>| x.as_deref().map_or(false, |x| x != "root");
-    recs.iter().all(|r| !special(&r.user) && !special(&r.group) && !(r.is_dir() && r.mode & 0o022 != 0))
+    let is_root = |x: &Option<String>| x.as_deref() == Some("root");
+    recs.iter().all(|r| is_root(&r.user) && is_root(&r.group) && !(r.is_dir() && r.mode & 0o022 != 0))
 }
 
 /// Opens a new version's directory for reading (mode 0755).
@@ -2110,7 +2118,8 @@ fn still_ours(r: &FileRec, host: &Path, odir: &Path) -> Still {
 /// directory at canonical place `c`, at any depth, if it holds nothing
 /// else: every file or link in it is one of them and still the old
 /// version's own, every directory in it is one that would be removed when
-/// empty, is no mount point, and is whole itself. `None` otherwise.
+/// empty, is on the same device (no unmounted btrfs subvolume), is no mount
+/// point, and is whole itself. `None` otherwise.
 fn whole_dir(
     c: &[u8],
     cand: &HashMap<Vec<u8>, (PathBuf, &[u8])>,
@@ -2124,6 +2133,7 @@ fn whole_dir(
     let found = (|| {
         let (host, _) = cand.get(c)?;
         let dir = sys::open_dir_nofollow(host).ok()?;
+        let parent_dev = dir.metadata().ok()?.dev();
         let mut inside = Vec::new();
         for e in fs::read_dir(host).ok()? {
             let e = e.ok()?;
@@ -2131,7 +2141,9 @@ fn whole_dir(
             let child = rootfs::join_rel(c, name.as_bytes());
             if e.file_type().ok()?.is_dir() {
                 let cname = std::ffi::CString::new(name.as_bytes()).ok()?;
-                if sys::is_mount_point(&dir, &cname) != Some(false) || sys::is_protected(&e.path()) {
+                let p = e.path();
+                let cm = fs::symlink_metadata(&p).ok()?;
+                if cm.dev() != parent_dev || sys::is_mount_point(&dir, &cname) != Some(false) || sys::is_protected(&p) {
                     return None;
                 }
                 inside.extend(whole_dir(&child, cand, at, still, memo)?);
@@ -2152,17 +2164,21 @@ fn whole_dir(
 /// Everything in the directory `dir` (a directory moved out of the live
 /// tree, where its canonical place was `canon`), at any depth: path now,
 /// canonical place before, whether it is a directory. `false` if some of it
-/// could not be listed.
-fn list_moved(dir: &Path, canon: &[u8], found: &mut Vec<(PathBuf, Vec<u8>, bool)>) -> bool {
+/// could not be listed or crossed onto another device (e.g. a subvolume).
+fn list_moved(dir: &Path, canon: &[u8], dev: u64, found: &mut Vec<(PathBuf, Vec<u8>, bool)>) -> bool {
     let Ok(rd) = fs::read_dir(dir) else { return false };
     let mut all = true;
     for e in rd {
         let Ok(e) = e else { return false };
+        let Ok(ft) = e.file_type() else { return false };
         let (p, c) = (e.path(), rootfs::join_rel(canon, e.file_name().as_bytes()));
-        let is_dir = e.file_type().map_or(false, |t| t.is_dir());
+        let is_dir = ft.is_dir();
         found.push((p.clone(), c.clone(), is_dir));
         if is_dir {
-            all &= list_moved(&p, &c, found);
+            if !fs::symlink_metadata(&p).map_or(false, |m| m.is_dir() && m.dev() == dev) {
+                return false;
+            }
+            all &= list_moved(&p, &c, dev, found);
         }
     }
     all
@@ -2727,5 +2743,31 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn roots_alone_rejects_nobody_and_non_root() {
+        let rec = |kind: RecKind, mode: u32, user: Option<&str>, group: Option<&str>| FileRec {
+            kind,
+            mode,
+            user: user.map(String::from),
+            group: group.map(String::from),
+            size: 0,
+            mtime: 0,
+            hash: vec![],
+            xattrs: vec![],
+            path: b"usr/share/x".to_vec(),
+        };
+        assert!(roots_alone(&[
+            rec(RecKind::Dir, 0o755, Some("root"), Some("root")),
+            rec(RecKind::File(FileKind::Regular), 0o644, Some("root"), Some("root")),
+        ]));
+        // None unpacks as uid/gid 65534 (nobody), not root
+        assert!(!roots_alone(&[rec(RecKind::Dir, 0o755, None, Some("root"))]));
+        assert!(!roots_alone(&[rec(RecKind::Dir, 0o755, Some("root"), None)]));
+        assert!(!roots_alone(&[rec(RecKind::File(FileKind::Regular), 0o644, None, None)]));
+        // other named users/groups or group/world-writable directories
+        assert!(!roots_alone(&[rec(RecKind::Dir, 0o755, Some("mail"), Some("root"))]));
+        assert!(!roots_alone(&[rec(RecKind::Dir, 0o775, Some("root"), Some("root"))]));
     }
 }

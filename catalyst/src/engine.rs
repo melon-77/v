@@ -118,6 +118,7 @@ pub fn recovery_errors() -> usize {
 /// Finishes a leftover journal, cleans up after an interrupted run, and
 /// rebuilds a missing or outdated index.
 fn settle(o: &Options, db: &mut Db) -> Result<usize> {
+    RECOVERY_ERRORS.store(0, std::sync::atomic::Ordering::Relaxed);
     let root = db.root.clone();
     let mut recovered = false;
     let mut errors = 0;
@@ -1135,7 +1136,7 @@ pub fn empty_trash(o: &Options) -> Result<bool> {
 pub fn recover(o: &Options) -> Result<bool> {
     let root = abs_root(o, false)?;
     let state = root.join(db::STATE_DIR);
-    let mut left: Vec<&str> = ["journal", "journal.new", "world.new", "dirty", "index.new", "index.old", "index/next", "trash"]
+    let mut left: Vec<&str> = ["journal", "journal.new", "world.new", "dirty", "unsynced", "index.new", "index.old", "index/next", "trash"]
         .into_iter()
         .filter(|n| *n != "trash" || crate::trash::has_work(&root))
         .filter(|n| fs::symlink_metadata(state.join(n)).is_ok())

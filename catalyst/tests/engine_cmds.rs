@@ -519,3 +519,44 @@ fn a_damaged_aliases_file_sends_the_change_to_every_record() {
     assert!(!root.join("usr/bin/onlyb").exists(), "pkgb's file was left behind");
     assert!(root.join("usr/share/shared.txt").exists());
 }
+
+#[test]
+fn recover_retires_legacy_unsynced_simulate_empty_trash_is_readonly_and_unchecked_stays_confined() {
+    // 1. oct recover detects and retires a standalone legacy unsynced mark
+    let root = temp_root("recover-unsynced-and-trash");
+    seed_shared(&root);
+    let mark = root.join("var/lib/catalyst/unsynced");
+    fs::write(&mark, "catalyst-unsynced 1\nboot other-boot\nend\n").unwrap();
+    let sim = oct_at(&root, &["--simulate", "recover"]);
+    assert!(sim.status.success());
+    assert!(String::from_utf8_lossy(&sim.stdout).contains("unsynced"), "{}", String::from_utf8_lossy(&sim.stdout));
+    assert!(mark.exists(), "--simulate recover must not remove unsynced");
+    let rec = oct_at(&root, &["recover"]);
+    assert!(rec.status.success(), "{}", String::from_utf8_lossy(&rec.stderr));
+    assert!(!mark.exists(), "recover must retire legacy unsynced mark");
+
+    // 2. oct --simulate empty-trash must never delete a non-directory at var/lib/catalyst/trash
+    let trash = root.join("var/lib/catalyst/trash");
+    fs::write(&trash, b"not a dir").unwrap();
+    let sim_et = oct_at(&root, &["--simulate", "empty-trash"]);
+    assert!(sim_et.status.success());
+    assert!(trash.exists(), "--simulate empty-trash must not delete var/lib/catalyst/trash");
+    fs::remove_file(&trash).unwrap();
+
+    // 3. oct recover must not follow a symlinked parent when restoring N.unchecked
+    let outside = root.with_extension("outside-cli");
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(&outside).unwrap();
+    fs::remove_dir_all(root.join("usr/share")).unwrap();
+    symlink(&outside, root.join("usr/share")).unwrap();
+    fs::write(root.join("var/lib/catalyst/journal"), "catalyst-journal 1\nend\n").unwrap();
+    let entry = trash.join("99999-1");
+    fs::create_dir_all(entry.join("0.unchecked")).unwrap();
+    fs::write(entry.join("0.unchecked/payload"), b"stay").unwrap();
+    symlink("usr/share/escaped", entry.join("0.from")).unwrap();
+    let rec2 = oct_at(&root, &["recover"]);
+    assert!(rec2.status.success(), "{}", String::from_utf8_lossy(&rec2.stderr));
+    assert!(!outside.join("escaped").exists(), "unchecked restore escaped --root via symlink");
+    assert!(entry.join("0.stuck/payload").exists(), "unrestorable dir must be marked stuck");
+    let _ = fs::remove_dir_all(&outside);
+}
