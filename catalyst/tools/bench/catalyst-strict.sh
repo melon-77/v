@@ -12,6 +12,7 @@
 #                   as it does on an installed system (under --root it would not)
 #   BDIR            where the roots are made (default /root/catalyst-test/benchab): a directory on the file
 #                   system to measure, see catalyst-strict-fs.sh
+#   COPY_TOOLS=0    run both tools from where they are instead of from fresh copies in BDIR/bin (see below)
 #   STRICT_OUT      where the results go (default /root/catalyst-test/strict)
 # Needs root (it drops the page cache for the cold runs), the built repository, the trusted keys in
 # /root/catalyst-test/keys/trusted and the list of the big system's packages in
@@ -29,6 +30,19 @@ JOBS=${JOBS:-nano cataclysm-dda-tiles}; SETS=${SETS:-base big}; CACHES=${CACHES:
 B=${BDIR:-/root/catalyst-test/benchab}; case $B in /root/catalyst-test/?*) ;; *) echo "BDIR must be under /root/catalyst-test"; exit 1;; esac
 grep -q " $B " /proc/mounts && { echo "$B is a mount point"; exit 1; }
 rm -rf --one-file-system $B; mkdir -p $B
+# Both tools are run from fresh copies on the file system that is measured, as an installed system has them. From
+# a cold cache a run reads its own program first, and where a build left that file on the disk is no property of
+# the tool: on 23 November 2026 catalyst's binary read in 15 ms from its build directory and in 7 ms as a fresh
+# copy, apk's in 7 ms and in 5.5. COPY_TOOLS=0 runs them from where they are, as the runs before that day did.
+# Each is one executable with all of its own code in it; the libraries they load (libssl and libcrypto both, libz
+# and libzstd apk, libgcc_s catalyst) stay where the system has them.
+BUILT=$OCT
+if [ "${COPY_TOOLS:-1}" = 1 ]; then
+  mkdir $B/bin; cp --reflink=never $APK $B/bin/apk; cp --reflink=never $OCT $B/bin/oct; sync
+  APK=$B/bin/apk; OCT=$B/bin/oct
+fi
+coldread(){ sync; echo 3 > /proc/sys/vm/drop_caches; python3 -I -c 'import sys, time
+t = time.monotonic(); open(sys.argv[1], "rb").read(); print("%.1f" % ((time.monotonic() - t) * 1000))' "$1"; }
 BIG="valence-base $(tr '\n' ' ' < /root/catalyst-test/bench2/big-set.txt)"
 run(){ local t=$1 r=$2; shift 2
   case $t in
@@ -40,7 +54,8 @@ wait_trash(){ local n=0; while [ -e "$1/var/lib/catalyst/trash" ]; do sleep 0.00
 has(){ if [ $1 = apk ]; then grep -qx "P:$3" $2/lib/apk/db/installed; else [ -e $2/Programs/$3/Current ]; fi; }
 OUT=$S/benchab-$LABEL.tsv
 printf 'set\tjob\tcache\ttool\trun\twall\twall_sync\n' > $OUT
-echo "benchab $LABEL: $RUNS runs; catalyst $(stat -c %y $OCT | cut -c1-19); $(date -u +%FT%TZ); load $(cut -d' ' -f1-3 /proc/loadavg); $(stat -f -c %T $B)"
+echo "benchab $LABEL: $RUNS runs; catalyst $(stat -c %y $BUILT | cut -c1-19); $(date -u +%FT%TZ); load $(cut -d' ' -f1-3 /proc/loadavg); $(stat -f -c %T $B)"
+echo "tools: $OCT, $(stat -c %s $OCT) bytes, read from a cold cache in $(coldread $OCT) ms; $APK, $(stat -c %s $APK) bytes, in $(coldread $APK) ms"
 for set in $SETS; do
   names=valence-base; [ $set = big ] && names=$BIG
   for t in apk cat; do R=$B/$set-$t; mkdir -p $R; run $t $R --initdb add $names > $B/prep.log 2>&1 || { echo "prep $set $t failed"; tail -n 3 $B/prep.log; exit 1; }; done

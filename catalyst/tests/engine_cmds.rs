@@ -560,3 +560,25 @@ fn recover_retires_legacy_unsynced_simulate_empty_trash_is_readonly_and_unchecke
     assert!(entry.join("0.stuck/payload").exists(), "unrestorable dir must be marked stuck");
     let _ = fs::remove_dir_all(&outside);
 }
+
+/// A removal fetches nothing and verifies nothing, so it reads no keys: it
+/// works where they cannot be read and says nothing about them. An `add`
+/// does read them, and stops there.
+#[test]
+fn a_removal_reads_no_keys() {
+    let root = temp_root("removal-plain");
+    seed_root(&root);
+    assert!(oct_at(&root, &["fix"]).status.success());
+    assert!(root.join("usr/bin/hello").exists());
+    let nowhere = root.join("no-such-keys");
+    let nowhere = nowhere.to_str().unwrap();
+    let out = oct_at(&root, &["--keys-dir", nowhere, "--repository", "/nonexistent/Packages.adb", "add", "hello"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no-such-keys"), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = oct_at(&root, &["--keys-dir", nowhere, "del", "hello"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("key"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!root.join("Programs/hello/Current").exists());
+    assert!(!root.join("usr/bin/hello").exists());
+    let _ = fs::remove_dir_all(&root);
+}

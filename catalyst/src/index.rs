@@ -576,7 +576,9 @@ pub(crate) fn on_threads_most<T: Sync, R: Send>(
     // cache, the 244 Current links of a big system take 0.8 ms here and
     // 1.5 ms on 16 threads. A cold cache (each item waits for the disk), or
     // thousands of items (the buckets of a big install), go to the threads.
-    // The time the items so far took tells which.
+    // The time the items so far took tells which. More threads than these
+    // for items that wait were tried (24, 48, 96 for the links of 39 and of
+    // 244 packages from a cold cache) and read nothing sooner.
     let t0 = std::time::Instant::now();
     let mut out = Vec::with_capacity(items.len());
     let mut i = 0;
@@ -706,6 +708,15 @@ fn segments_of<'a>(buckets: impl Iterator<Item = &'a u32>) -> Vec<u32> {
     v.sort_unstable();
     v.dedup();
     v
+}
+
+/// Asks the system for the segment files that a change with these records
+/// will read (`files` is the index's directory of them): [`updated`] reads
+/// the bucket of every path of the change. A hint ([`crate::warm`]), given
+/// while the package of the records is still being unpacked.
+pub fn ask_for(files: &crate::warm::Files, recs: &[FileRec]) {
+    let buckets: Vec<u32> = recs.iter().map(|r| bucket_of(&r.path)).collect();
+    files.ask(segments_of(buckets.iter()).into_iter().map(segment_name).collect());
 }
 
 fn read_aliases(dir: &Path, sum: &str) -> Result<HashMap<Vec<u8>, Vec<(Vec<u8>, String)>>> {

@@ -656,6 +656,8 @@ fn oct_real(root: &std::path::Path, env: &[(&str, &str)], args: &[&str]) -> std:
     let keys = std::env::var("CATALYST_KEYS").unwrap_or_else(|_| "/root/valence/keys/trusted".into());
     let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_oct"));
     c.args(["--root", root.to_str().unwrap(), "--repository", index.to_str().unwrap(), "--keys-dir", &keys, "--no-scripts", "--plain"]);
+    // what the tests look at on stderr must not depend on the caller's environment
+    c.env_remove("CATALYST_PROF").env_remove("CATALYST_HINTS");
     for (k, v) in env {
         c.env(k, v);
     }
@@ -1657,5 +1659,201 @@ fn a_redirecting_http_repository_is_followed() {
     assert!(root.join("usr/bin/tree").exists());
     let l = log.lock().unwrap().clone();
     assert!(l.iter().any(|p| p == "/moved/x86_64/Packages.adb") && l.iter().any(|p| p == "/x86_64/Packages.adb"), "{l:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// What is asked for ahead of a change (`catalyst::warm`) is what the
+/// change reads: the segments of the index named for a package's records
+/// are files that are there, and they are all the files of the index that
+/// name the package.
+#[test]
+fn the_segments_asked_for_ahead_are_the_ones_the_index_holds_the_package_in() {
+    if repo().is_none() {
+        return;
+    }
+    let root = fresh_root("hint-segments");
+    assert!(oct_real(&root, &[], &["--initdb", "add", "zstd-libs", "xz-libs"]).status.success());
+    let dir = root.join("var/lib/catalyst/index/files");
+    assert!(dir.is_dir(), "no index was built");
+    let ver = std::fs::read_link(root.join("Programs/xz-libs/Current")).unwrap();
+    let st = catalyst::commit::PkgState::load(&root.join("Programs/xz-libs").join(ver), false).unwrap();
+    assert!(st.recs.len() > 2);
+    let files = catalyst::warm::Files::new(dir.clone());
+    catalyst::index::ask_for(&files, &st.recs);
+    catalyst::warm::settle();
+    let asked = files.asked();
+    assert!(!asked.is_empty());
+    for name in &asked {
+        assert!(dir.join(name).is_file(), "segment {name} was asked for and is not there");
+    }
+    let mut naming = 0;
+    for (name, text) in index_files(&root) {
+        if let Some(seg) = name.strip_prefix("files/") {
+            if String::from_utf8_lossy(&text).contains("xz-libs") {
+                naming += 1;
+                assert!(asked.iter().any(|a| a == seg), "segment {seg} names xz-libs and was not asked for");
+            }
+        }
+    }
+    assert!(naming > 0, "no segment of the index names the package by its name");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Hints decide nothing: the same changes with them and without
+/// (`CATALYST_HINTS=0`) leave the same live tree and the same index.
+#[test]
+fn a_change_comes_out_the_same_with_hints_and_without() {
+    if repo().is_none() {
+        return;
+    }
+    let mut seen = Vec::new();
+    for hints in ["1", "0"] {
+        let root = fresh_root(&format!("hints-{hints}"));
+        let env = [("CATALYST_HINTS", hints)];
+        let steps: [&[&str]; 4] = [&["--initdb", "add", "zstd-libs", "xz-libs"], &["add", "tree"], &["del", "xz-libs"], &["upgrade"]];
+        let mut said = String::new();
+        for args in steps {
+            let out = oct_real(&root, &env, args);
+            assert!(out.status.success(), "{args:?} with hints {hints}: {}", String::from_utf8_lossy(&out.stderr));
+            // what a run says besides its result (warnings; a thread that
+            // panicked would say so here)
+            said.push_str(&String::from_utf8_lossy(&out.stderr));
+        }
+        assert!(!said.contains("panicked"), "{said}");
+        let mut live = live_names(&root);
+        live.sort();
+        assert!(live.iter().any(|l| l == "f usr/bin/tree"), "{live:?}");
+        // the versions that are there, the world, the freshness records
+        let mut versions = Vec::new();
+        for e in std::fs::read_dir(root.join("Programs")).unwrap().flatten() {
+            for v in std::fs::read_dir(e.path()).unwrap().flatten() {
+                let link = std::fs::read_link(v.path()).map(|t| t.to_string_lossy().into_owned()).unwrap_or_default();
+                versions.push(format!("{}/{} {link}", e.file_name().to_string_lossy(), v.file_name().to_string_lossy()));
+            }
+        }
+        versions.sort();
+        let world = std::fs::read_to_string(root.join("var/lib/catalyst/world")).unwrap();
+        let mut records: Vec<(String, String)> = std::fs::read_dir(root.join("var/lib/catalyst/indexes"))
+            .unwrap()
+            .flatten()
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read_to_string(e.path()).unwrap()))
+            .collect();
+        records.sort();
+        assert!(!records.is_empty());
+        seen.push((live, index_files(&root), said.replace(root.to_str().unwrap(), "ROOT"), versions, world, records));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    assert_eq!(seen[0].0, seen[1].0);
+    assert!(seen[0].1 == seen[1].1, "the index differs: {:?} against {:?}", seen[0].1.keys(), seen[1].1.keys());
+    assert_eq!(seen[0].2, seen[1].2);
+    assert_eq!(seen[0].3, seen[1].3);
+    assert_eq!(seen[0].4, seen[1].4);
+    assert_eq!(seen[0].5, seen[1].5);
+}
+
+/// With `CATALYST_HINTS=show` every hint is given where it is asked for
+/// and named on stderr. An `add` asks for the repository's index, the
+/// parsed copy of it, the keys, a freshness record, the first files of the
+/// index of installed files and, of that index's segments, only ones that
+/// hold a path of what it installs; a `del` asks for no keys and nothing of
+/// a repository. The same from what the root itself says (its own keys,
+/// its list of repositories), and nothing beside the freshness records is
+/// taken for one.
+#[test]
+fn a_run_asks_ahead_for_the_files_it_reads() {
+    let Some(repo) = repo() else { return };
+    let keys = std::env::var("CATALYST_KEYS").unwrap_or_else(|_| "/root/valence/keys/trusted".into());
+    let keys = keys.trim_end_matches('/').to_string();
+    let root = fresh_root("hints-shown");
+    assert!(oct_real(&root, &[], &["--initdb", "add", "zstd-libs", "xz-libs"]).status.success());
+    let hints = |out: &std::process::Output| -> Vec<String> {
+        String::from_utf8_lossy(&out.stderr).lines().filter_map(|l| l.strip_prefix("hint: ").map(String::from)).collect()
+    };
+    // as the run names its root: made absolute, nothing resolved
+    let r = std::env::current_dir().unwrap().join(&root).to_string_lossy().into_owned();
+    let segments = format!("{r}/var/lib/catalyst/index/files/");
+    let index = repo.join("Packages.adb").to_string_lossy().into_owned();
+    let packages = || -> std::collections::BTreeSet<String> {
+        std::fs::read_dir(root.join("Programs")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()
+    };
+    let in_root = |h: &[String], rel: &str| h.iter().any(|l| *l == format!("{r}/{rel}"));
+
+    let before = packages();
+    let out = oct_real(&root, &[("CATALYST_HINTS", "show")], &["add", "tree"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let new: Vec<String> = packages().difference(&before).cloned().collect();
+    assert!(new.iter().any(|n| n == "tree"), "{new:?}");
+    let h = hints(&out);
+    assert!(h.iter().any(|l| *l == index), "the repository's index: {h:?}");
+    assert!(h.iter().any(|l| l.starts_with(&format!("{r}/var/cache/catalyst/parsed-"))), "its parsed copy: {h:?}");
+    assert!(h.iter().any(|l| l.starts_with(&format!("{keys}/"))), "the keys: {h:?}");
+    assert!(in_root(&h, "var/lib/catalyst/index/state") && in_root(&h, "var/lib/catalyst/index/meta"), "the index of installed files: {h:?}");
+    let records = format!("{r}/var/lib/catalyst/indexes/");
+    assert!(h.iter().any(|l| l.starts_with(&records) && l.len() == records.len() + 64), "a freshness record: {h:?}");
+    // The segments asked for while the packages were unpacked are segments
+    // of their paths: told by what the index holds now, not by the function
+    // that asked. After the add each of them names one of the new packages.
+    let asked: Vec<&str> = h.iter().filter_map(|l| l.strip_prefix(segments.as_str())).collect();
+    assert!(!asked.is_empty(), "no segment of the index was asked for: {h:?}");
+    // (a line of a segment: a path, the packages that have it as a file,
+    // those that have it as a directory; names with spaces between)
+    for s in &asked {
+        let text = std::fs::read_to_string(root.join("var/lib/catalyst/index/files").join(s)).unwrap();
+        let names_a_new_one = text.lines().any(|line| {
+            let f: Vec<&str> = line.split('\t').collect();
+            f.len() == 3 && f[1..].iter().any(|names| names.split(' ').any(|n| new.iter().any(|p| p == n)))
+        });
+        assert!(names_a_new_one, "segment {s} was asked for and holds no path of {new:?}");
+    }
+    // every hint names a file that is there, inside the root, the repository or the keys
+    for l in &h {
+        assert!(std::path::Path::new(l).is_file(), "{l} was asked for and is no file");
+        assert!(l.starts_with(&format!("{r}/")) || *l == index || l.starts_with(&format!("{keys}/")), "{l}");
+    }
+
+    let out = oct_real(&root, &[("CATALYST_HINTS", "show")], &["del", "tree"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let h = hints(&out);
+    assert!(in_root(&h, "var/lib/catalyst/index/state"), "{h:?}");
+    assert!(h.iter().all(|l| l.starts_with(&format!("{r}/var/lib/catalyst/index/"))), "a removal asked for more than the index: {h:?}");
+
+    // The root's own keys and list of repositories, and decoys beside the
+    // freshness records: a name of another length, and a link under a name
+    // of the right one.
+    let etc = root.join("etc/apk");
+    std::fs::create_dir_all(etc.join("keys")).unwrap();
+    let mut own_keys = Vec::new();
+    for e in std::fs::read_dir(&keys).unwrap().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".pub") && e.file_type().unwrap().is_file() {
+            std::fs::copy(e.path(), etc.join("keys").join(&name)).unwrap();
+            own_keys.push(name);
+        }
+    }
+    assert!(!own_keys.is_empty(), "no public key in {keys}");
+    std::fs::write(etc.join("repositories"), format!("{index}\n")).unwrap();
+    let records = root.join("var/lib/catalyst/indexes");
+    std::fs::write(records.join("short"), b"x").unwrap();
+    let link = "l".repeat(64);
+    std::os::unix::fs::symlink(&index, records.join(&link)).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_oct"))
+        .args(["--root", root.to_str().unwrap(), "--no-scripts", "--plain", "add", "tree"])
+        .env_remove("CATALYST_PROF")
+        .env("CATALYST_HINTS", "show")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let h = hints(&out);
+    for k in &own_keys {
+        assert!(in_root(&h, &format!("etc/apk/keys/{k}")), "the root's key {k}: {h:?}");
+    }
+    assert!(h.iter().any(|l| *l == index), "the index its list of repositories names: {h:?}");
+    assert!(h.iter().any(|l| l.starts_with(&format!("{r}/var/cache/catalyst/parsed-"))), "{h:?}");
+    assert!(!in_root(&h, "var/lib/catalyst/indexes/short") && !in_root(&h, &format!("var/lib/catalyst/indexes/{link}")), "a decoy was taken for a freshness record: {h:?}");
+    assert!(root.join("usr/bin/tree").exists());
+
+    // and nothing is named unless that was asked for
+    let out = oct_real(&root, &[], &["del", "tree"]);
+    assert!(out.status.success() && hints(&out).is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }

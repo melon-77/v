@@ -91,6 +91,100 @@ pub fn arches(o: &Options, root: &Path) -> Vec<String> {
     }
 }
 
+/// Names to the system what a run is about to read, before the lock is
+/// taken and the database read, so that the disk fetches it meanwhile
+/// ([`crate::warm`]: a hint, nothing is decided by it). That is the first
+/// files of the index of installed files and, for a run that plans with
+/// the repositories (`repos`), their indexes, the parsed copies of those,
+/// the freshness records and the keys. `max_age` is the one the run will
+/// plan with ([`index_max_age`]): a remote repository's cached index is
+/// asked for only when the run will use it as it is.
+///
+/// Finding a file is a row of waits (a directory, its entry, the file).
+/// What is in the root, the keys and the repositories' files are in
+/// different places: each row runs on a thread of its own, started by the
+/// thread of hints, so that none waits behind another and the run's own
+/// thread starts none of them.
+fn hint_start(o: &Options, repos: bool, max_age: Option<std::time::Duration>) {
+    use crate::warm::{advise, beside, read_through};
+    if !crate::warm::enabled() {
+        return;
+    }
+    let Ok(root) = abs_root(o, false) else { return };
+    // catalyst's own places only where they are real directories, as the
+    // run itself insists before it uses them
+    fn own_places_are_real(root: &Path) -> bool {
+        Db::own_dirs(root).iter().all(|d| db::real_dir(d).is_ok())
+    }
+    let (r, keys_dir) = (root.clone(), o.keys_dir.clone());
+    crate::warm::later(move || {
+        if repos {
+            // the keys are what the run reads first
+            let r = r.clone();
+            beside(move || {
+                if own_places_are_real(&r) {
+                    match &keys_dir {
+                        Some(d) => TrustedKeys::hint_dir(d),
+                        None => TrustedKeys::hint_root(&r),
+                    }
+                }
+            });
+        }
+        beside(move || {
+            if !own_places_are_real(&r) {
+                return;
+            }
+            let ix = crate::index::dir(&r);
+            for f in ["state", "meta", "aliases"] {
+                advise(&ix.join(f));
+            }
+            if repos {
+                // the freshness records, as repo::Freshness::load takes
+                // them: files with a name of 64 characters, no link followed
+                if let Ok(rd) = fs::read_dir(r.join(db::STATE_DIR).join("indexes")) {
+                    for e in rd.flatten() {
+                        if e.file_name().len() == 64 && e.file_type().map_or(false, |t| t.is_file()) {
+                            advise(&e.path());
+                        }
+                    }
+                }
+            }
+        });
+    });
+    if !repos {
+        return;
+    }
+    // The names of a repository's files hold a hash of its address, and
+    // hashing is the cryptographic library's: they are worked out here, on
+    // the run's own thread, because the threads of hints make file system
+    // calls only (crate::warm says why). What is read for it, the root's
+    // architecture and its list of repositories, the run reads next anyway.
+    let cache = root.join(db::CACHE_DIR);
+    let arch = arches(o, &root).swap_remove(0);
+    let mut big: Vec<PathBuf> = Vec::new();
+    for s in repo_specs(o, &root).unwrap_or_default() {
+        big.extend(repo::files_read(&s, &arch, &cache, max_age));
+    }
+    if big.is_empty() {
+        return;
+    }
+    crate::warm::later(move || {
+        beside(move || {
+            if !own_places_are_real(&root) {
+                return;
+            }
+            // asked for all at once, so that they are fetched side by side,
+            // then read to their ends
+            for p in &big {
+                advise(p);
+            }
+            for p in &big {
+                read_through(p);
+            }
+        });
+    });
+}
+
 /// Opens a root: lock, recovery of an interrupted switch, cleanup.
 pub fn open(o: &Options) -> Result<Db> {
     let mut db = open_locked(o)?;
@@ -462,6 +556,7 @@ fn run_jobs(
     keys: &TrustedKeys,
     http: Option<&Http>,
     ids: &IdMap,
+    hints: Option<&crate::warm::Files>,
 ) -> Result<Vec<String>> {
     let n = jobs.len();
     let mut order: Vec<usize> = (0..n).collect();
@@ -517,7 +612,7 @@ fn run_jobs(
             }
         }
         progress.set_phase(i, Phase::Unpacking, None);
-        match unpack::unpack(root, &js.job, keys, ids, o.allow_untrusted, &mut |b| progress.advance(i, b)) {
+        match unpack::unpack(root, &js.job, keys, ids, o.allow_untrusted, hints, &mut |b| progress.advance(i, b)) {
             Ok(st) => {
                 warnings.lock().unwrap().extend(st.warnings.iter().map(|w| format!("{nv}: {w}")));
                 progress.finish_item(i, true, format!("{} entries, {}", st.entries, human(st.bytes)));
@@ -625,8 +720,14 @@ const INDEX_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(4 * 36
 
 /// Resolves `world` and carries out the changes.
 fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh: HashSet<String>, use_repos: bool) -> Result<bool> {
-    let max_age = (mode == Mode::Keep && !o.upgrade).then_some(INDEX_MAX_AGE);
-    transact_at(o, db, world, mode, fresh, use_repos, max_age)
+    transact_at(o, db, world, mode, fresh, use_repos, index_max_age(o, mode))
+}
+
+/// The age up to which a run in `mode` plans with a remote repository's
+/// cached index without asking the server ([`INDEX_MAX_AGE`] for an `add`
+/// without `-u`), or `None`: the server is asked.
+fn index_max_age(o: &Options, mode: Mode) -> Option<std::time::Duration> {
+    (mode == Mode::Keep && !o.upgrade).then_some(INDEX_MAX_AGE)
 }
 
 /// [`transact`] with the age up to which a cached index is used as it is
@@ -649,7 +750,14 @@ fn transact_at(
     }
     let root = db.root.clone();
     let arches = arches(o, &root);
-    let keys = load_keys(o, &root)?;
+    // A run that plans without the repositories (`del`) fetches nothing and
+    // verifies nothing: it reads no keys, does not wait for them, and does
+    // not fail where they cannot be read. It has nothing to unpack: without
+    // repositories every candidate is an installed package, and one that
+    // is not installed would be refused below ("not in any repository")
+    // before a job is made of it. The keys are not what would stop such a
+    // job: a package that matches its index entry needs none.
+    let keys = if use_repos { load_keys(o, &root)? } else { TrustedKeys::new() };
     crate::prof::mark("  keys loaded");
     let (repos, http, _) =
         if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate, max_age)? } else { (Vec::new(), None, 0) };
@@ -774,7 +882,10 @@ fn transact_at(
     let dirty = dirty_mark(&root);
     fs::write(&dirty, b"")?;
     let ids = IdMap::load(&root);
-    let warnings = match run_jobs(o, &root, &jobs, &keys, http.as_ref(), &ids) {
+    // what the check and the switch will read of the index of installed
+    // files is asked for while the packages are unpacked (crate::warm)
+    let hints = db.index.as_ref().map(|_| crate::warm::Files::new(crate::index::dir(&root).join("files")));
+    let warnings = match run_jobs(o, &root, &jobs, &keys, http.as_ref(), &ids, hints.as_ref()) {
         Ok(w) => w,
         Err(e) => {
             cleanup_new(&root, db, &ops);
@@ -1063,6 +1174,7 @@ fn parse_names(names: &[String]) -> Result<Vec<Dependency>> {
 /// newest version.
 pub fn add(o: &Options, names: &[String]) -> Result<bool> {
     let deps = parse_names(names)?;
+    hint_start(o, true, index_max_age(o, Mode::Keep));
     let mut db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let added: HashSet<String> = deps.iter().map(|d| d.name.clone()).collect();
     let fresh: HashSet<String> = if o.upgrade {
@@ -1077,6 +1189,7 @@ pub fn add(o: &Options, names: &[String]) -> Result<bool> {
 
 pub fn del(o: &Options, names: &[String]) -> Result<bool> {
     let deps = parse_names(names)?;
+    hint_start(o, false, None);
     let mut db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let gone: HashSet<String> = deps.iter().map(|d| d.name.clone()).collect();
     for n in &gone {
@@ -1098,6 +1211,7 @@ pub fn del(o: &Options, names: &[String]) -> Result<bool> {
 }
 
 pub fn upgrade(o: &Options) -> Result<bool> {
+    hint_start(o, true, index_max_age(o, Mode::Upgrade));
     let mut db = if o.simulate { open_readonly(o)? } else { open(o)? };
     let world = db.world.clone();
     transact(o, &mut db, world, Mode::Upgrade, HashSet::new(), true)

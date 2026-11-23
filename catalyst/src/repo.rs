@@ -269,6 +269,43 @@ fn url_key(index_url: &str) -> String {
     digest::hex(&digest::sha256(index_url.as_bytes()))
 }
 
+/// Where the index of a remote repository is kept once it was fetched.
+fn cached_index(cache_dir: &Path, index_url: &str) -> PathBuf {
+    cache_dir.join(format!("Packages.{}.adb", &url_key(index_url)[..8]))
+}
+
+/// Whether the cached copy `dest` of a remote index is used without asking
+/// the server: it is no older than `max_age` (`None`: the server is asked).
+fn cached_is_fresh(dest: &Path, max_age: Option<std::time::Duration>) -> bool {
+    max_age
+        .and_then(|max_age| {
+            let mtime = fs::metadata(dest).ok()?.modified().ok()?;
+            let age = std::time::SystemTime::now().duration_since(mtime).ok()?;
+            (age <= max_age).then_some(())
+        })
+        .is_some()
+}
+
+/// The files that loading `spec` reads from the disk: a local index and
+/// its parsed copy; for a remote one the cached index and its parsed copy
+/// when the cached index is used as it is (`max_age`, as for
+/// [`load_with_cache`]), and the parsed copy alone when the server is asked
+/// first (what it sends is looked up there). For a hint ([`crate::warm`]);
+/// [`load_with_cache`] finds them by the same functions.
+pub fn files_read(spec: &str, arch: &str, cache_dir: &Path, max_age: Option<std::time::Duration>) -> Vec<PathBuf> {
+    let (index_url, _, _) = locate(spec, arch);
+    let parsed = idxcache::path(cache_dir, &url_key(&index_url));
+    if !is_remote(&index_url) {
+        return vec![PathBuf::from(local_path(&index_url)), parsed];
+    }
+    let dest = cached_index(cache_dir, &index_url);
+    if cached_is_fresh(&dest, max_age) {
+        vec![dest, parsed]
+    } else {
+        vec![parsed]
+    }
+}
+
 impl Freshness {
     pub fn load(root: &Path, allow_rollback: bool) -> Freshness {
         let dir = root.join(db::STATE_DIR).join("indexes");
@@ -433,17 +470,12 @@ pub fn load_with_cache(
     let mut stale = false;
     let mut reused = false;
     let (index, trust, offer) = if remote {
-        let name = format!("Packages.{}.adb", &url_key(&index_url)[..8]);
-        let dest = cache_dir.join(name);
-        let cache_fresh = cache_max_age.and_then(|max_age| {
-            let mtime = fs::metadata(&dest).ok()?.modified().ok()?;
-            let age = std::time::SystemTime::now().duration_since(mtime).ok()?;
-            if age <= max_age { Some(()) } else { None }
-        });
+        let dest = cached_index(cache_dir, &index_url);
+        let cache_fresh = cached_is_fresh(&dest, cache_max_age);
         // A cached index that is new enough but cannot be used (it no longer
         // verifies with these keys, or is older than what was accepted
         // since) is no reason to stop: the server is asked, as for an old one.
-        let cached = if cache_fresh.is_some() { read(&dest).ok() } else { None };
+        let cached = if cache_fresh { read(&dest).ok() } else { None };
         if let Some(x) = cached {
             reused = true;
             x
@@ -665,5 +697,47 @@ mod tests {
         assert!(subst("${nope}", &p).is_err());
         assert!(subst("${name", &p).is_err());
         assert_eq!(subst("$name}", &p).unwrap(), "$name}");
+    }
+}
+
+#[cfg(test)]
+mod files_read_tests {
+    use super::*;
+
+    /// What is named for a hint is found as loading a repository finds its
+    /// files: by the same functions, and for a remote one by the same rule
+    /// of when its cached index is used as it is. (That a run asks for the
+    /// files it then reads is tested on a real repository.)
+    #[test]
+    fn the_files_named_for_a_hint_are_found_as_loading_finds_them() {
+        let cache = std::env::temp_dir().join(format!("catalyst-files-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&cache);
+        fs::create_dir_all(&cache).unwrap();
+        let four_hours = Some(std::time::Duration::from_secs(4 * 3600));
+        // a local index: where it is, and its parsed copy, whatever the age
+        let local = files_read("/some/where/Packages.adb", "x86_64", &cache, None);
+        assert_eq!(local.len(), 2);
+        assert_eq!(local[0], PathBuf::from("/some/where/Packages.adb"));
+        assert_eq!(local[1], idxcache::path(&cache, &url_key("/some/where/Packages.adb")));
+        assert_eq!(files_read("file:///some/where/Packages.adb", "x86_64", &cache, four_hours)[0], PathBuf::from("/some/where/Packages.adb"));
+        // a repository given by its directory: the index of the architecture
+        assert_eq!(files_read("/some/where", "x86_64", &cache, None)[0], PathBuf::from("/some/where/x86_64/Packages.adb"));
+        // a remote one of which nothing was fetched yet: the parsed copy alone
+        let url = "https://example.org/repo";
+        let index_url = "https://example.org/repo/x86_64/Packages.adb";
+        let parsed = idxcache::path(&cache, &url_key(index_url));
+        assert_eq!(files_read(url, "x86_64", &cache, four_hours), vec![parsed.clone()]);
+        // fetched a moment ago: the cached index too, where a cached index is used as it is
+        let dest = cached_index(&cache, index_url);
+        fs::write(&dest, b"x").unwrap();
+        assert!(cached_is_fresh(&dest, four_hours) && !cached_is_fresh(&dest, None));
+        assert_eq!(files_read(url, "x86_64", &cache, four_hours), vec![dest.clone(), parsed.clone()]);
+        assert_eq!(files_read(url, "x86_64", &cache, None), vec![parsed.clone()]);
+        // fetched five hours ago: the server is asked first
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 3600);
+        fs::File::options().write(true).open(&dest).unwrap().set_modified(old).unwrap();
+        assert!(!cached_is_fresh(&dest, four_hours));
+        assert_eq!(files_read(url, "x86_64", &cache, four_hours), vec![parsed]);
+        fs::remove_dir_all(&cache).unwrap();
     }
 }

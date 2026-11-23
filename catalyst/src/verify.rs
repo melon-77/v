@@ -333,6 +333,41 @@ impl TrustedKeys {
         Ok(k)
     }
 
+    /// Reads the files that [`Self::from_dir`] will read, and drops them:
+    /// a hint ([`crate::warm`]). The same names and limits; no key is
+    /// parsed, and nothing is reported.
+    pub fn hint_dir(dir: &Path) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            if e.file_name().as_encoded_bytes().starts_with(b".") {
+                continue;
+            }
+            let p = e.path();
+            if fs::metadata(&p).map_or(false, |m| m.is_file() && m.len() <= 64000) {
+                crate::warm::read_through(&p);
+            }
+        }
+    }
+
+    /// As [`Self::hint_dir`], for the files that [`Self::from_root`] will
+    /// read (found inside the root, as there).
+    pub fn hint_root(root: &Path) {
+        let rfs = crate::rootfs::RootFs::new(root);
+        let mut seen = std::collections::HashSet::new();
+        for sub in ["etc/apk/keys", "lib/apk/keys"] {
+            if let Ok(Some((dir, list))) = rfs.list_dir(sub.as_bytes()) {
+                for name in list {
+                    if !name.starts_with(b".") && seen.insert(name.clone()) {
+                        let rel = crate::rootfs::join_rel(&dir, &name);
+                        if let Ok(Some(_)) = rfs.read_file(&rel, 64000) {
+                            crate::warm::named(&rfs.host(&rel));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Keys of a root: `ROOT/etc/apk/keys`, then `ROOT/lib/apk/keys`; a
     /// file name seen in the first hides the same name in the second, and
     /// missing directories are skipped (§C4.1). Paths are resolved inside

@@ -10,6 +10,59 @@ How this works:
 
 ---
 
+## 2026-11-23: files asked for ahead of their use; the benchmark runs both tools from fresh copies; three findings on 5159cf4
+
+**Why.** One case was still slower than apk: a one-package install from a cold cache on the small system on ext4, 60 ms against 52 ms. The owner, asked whether to go on with it: "Yes, go on".
+
+**Part of it was the benchmark.** From a cold cache a run reads its own program first. catalyst's binary took 15 ms to read from its build directory and 7 ms as a fresh copy of the same file; apk's took 7 ms and 5.5 ms. Every rebuild moved catalyst's binary to another place on the virtual disk, which is also why some cold cases fell either way from run to run.
+- `catalyst-strict.sh` and `catalyst-strict2.sh` now copy both tools to the file system that is measured and run those copies, as an installed system has them (`COPY_TOOLS=0` for the old way). The log says how long each copy takes to read cold.
+- With that alone, and catalyst's hints off, the case takes 51 to 54 ms against 46 to 48 ms: still slower in two runs of three. The rest is the hints.
+
+**What catalyst does now** (`catalyst/README.md`, "Files asked for ahead"; `catalyst/src/warm.rs`).
+- A thread of its own names to the system the files a run is about to read, so that the disk fetches them while the run does something else: the repository's index, its parsed copy, the keys, the freshness records and the first files of the lookup index before the lock is taken; the lookup index's segments for a package's paths while the package is unpacked.
+- A hint decides nothing. It is `posix_fadvise(WILLNEED)` on a regular file or a read that is dropped. The run reads and checks every file itself, as before. Nothing is written; the threads of hints make file system calls only, so the process can end while one runs.
+- `CATALYST_HINTS=0` turns them off; `CATALYST_HINTS=show` names each file on stderr.
+- **`oct del` reads no keys any more.** It verifies nothing, and it used to fail where the keys could not be read.
+
+**The strict benchmark on this commit** (15 runs a case, apk with `--sync`, catalyst with `--clean-later`, both tools from fresh copies):
+
+| | cases | faster | no clear difference | slower | before |
+|---|---|---|---|---|---|
+| btrfs, when the command returns | 22 | 19 | 3 | 0 | 17 / 5 / 0 |
+| btrfs, until on disk | 22 | 16 | 6 | 0 | 12 / 10 / 0 |
+| ext4, when the command returns | 26 | 17 | 9 | 0 | 12 / 13 / 1 |
+| ext4, until on disk | 26 | 15 | 11 | 0 | 12 / 12 / 2 |
+
+- **A one-package install from a cold cache:** on btrfs 44 ms against 55 ms on the small system and 82 against 104 on the big one, both faster (they were no clear difference). On ext4 64 ms against 78 ms on the big system, faster.
+- **The case this was about** (ext4, small system) sits at the line: 44 ms against 49 ms in the tables, called faster with an interval that ends at 0.95; 42 against 46 and 43 against 46 in two runs of that case alone, called no clear difference. It is 8 to 10% ahead in each. I do not count it as settled.
+- **The ext4 tables are a second pass.** In the first, the first cases ran in the seconds after the btrfs run's 24 GB image was deleted from the same disk (mounted with `discard`), and the case above came out 47 against 48. The second pass ran on the quiet machine. The README says so.
+
+**Still not ahead.** A big removal counted until all is deleted (1.3 to 2 times apk on btrfs); `oct --sync` on small changes (2 to 4 ms); the one-package install on the small ext4 system from a warm cache (17 ms each) and over HTTP (19 against 18).
+
+**On your commit 5159cf4.** My change sits on top of it.
+- I ran the kill and power-cut tests on it, which your report does not mention: 180 and 135 rounds on your commit with my change, then the same again on the final binary, 0 failures.
+- Its added checks cost nothing that shows: removing Cataclysm on btrfs takes 126 ms against apk's 170 ms (133 against 181 before).
+- An independent reviewer read it and found no way it deletes or moves something unverified. It found three problems, none of which loses data. I have not changed them; they are yours, or the owner's to hand to me:
+  1. **`trash::base` on a kernel older than 5.6** (`trash.rs`, the `None` branch of `is_mount_point`). The fallback asks `sys::mounted_in_or_from`, which needs the mount id from `statx` (5.8), so on such a kernel it can never answer and `base` returns `None` for a trash that is fine. Then `settle_unchecked(root, true)` returns `Ok(())` and the journal is finished without putting an unchecked directory back (before your commit it was put back); and `Entry::new` makes `trash`, refuses it and leaves it empty, so every later run warns and `oct recover` always finds work. Scenario: a big removal on btrfs cut at "moved", recovered from a rescue system with an old kernel. A fallback that needs no mount id would do: whether any line of `mountinfo` is mounted at the trash's canonical path or below it. The comment there ("kernel < 5.6 or seccomp: fall back to mountinfo") is right for seccomp only.
+  2. **`make_dir_atomic`, the slow path** (`rootfs.rs`, after the rename that finds the name taken). It still returns `Ok(false)` for anything under the name, a file or a symlink included; only the fast path got the check. The slow path is the one for a mode outside 0755, an owner other than root, or a set-group-id parent: the directories beside which someone other than root is likeliest to be able to write. This gap is older than your commit. Your new assertions in `rootfs.rs` depend on the fast path being taken and fail under a umask that takes a bit of 0755 (027, 077) or in a set-group-id temp directory; the test already has `plain` to tell.
+  3. **`restore_confined` and a `--root` that is a symlink** (`trash.rs`). `sys::open_dir_nofollow(root)` fails when the `--root` given is itself a symlink to the root, so an unchecked directory becomes stuck where it was put back before. The root itself may be followed; only what is below it must not be. The same call in `move_whole_dirs` only costs speed there (top-level directories are not moved whole).
+- Two smaller things: part 3 of your new test in `tests/engine_cmds.rs` makes the trash with `create_dir_all`, so under umask 002 it is group-writable, `base` refuses it and the assertion fails; and that test does not remove its root.
+
+**Reviews of my change.** Three rounds by an independent reviewer, on a copy.
+- The first found no high finding and no way for a hint to change what a run decides, prints, writes or returns. It found tests of mine that could not fail for what they were named after, hints for files the run does not read (a remote cached index when the server is asked anyway, freshness records it would skip, hidden keys), a comment that claimed a safeguard the code does not have, and that `cp` could share the build's blocks on a file system with reflinks.
+- The second confirmed the fixes and found the real load path unchanged; the third found nothing in the non-test code. All of it is fixed.
+- Each test of the hints was then seen to fail with the code it guards broken on purpose, in ten ways.
+
+**Tests on this commit.**
+- `cargo test`: 60 unit, 14 command, 29 on the real repository.
+- Kill test: 180 rounds (`add`, `small`, the upgrade, `del`, `bigdel` with whole directories moved), 175 killed while running, 0 failures.
+- Power-cut test: 135 rounds on btrfs, ext4 and XFS, 0 failures.
+- The binary that was tested and measured is the one this source builds (same checksum after the last, test-only changes).
+
+**For the developers.** Nothing to do for the hints. The three findings above are for you.
+
+---
+
 ## 2026-11-23: Round 2 safety audit & cleanup on `catalyst` (`756c953..1294fbd`)
 
 Audited the five commits since `756c953` (one-sync protocol, `oct recover`, packed index v5, deferred trash deletion, and btrfs whole-directory rename removal) with code inspection and live black-box reproductions against `oct`, then fixed eight concrete safety/correctness issues while keeping all the performance gains intact:

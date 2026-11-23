@@ -25,6 +25,19 @@ CASES=${CASES:-del-nano del-cataclysm up-one up-all http-add-nano http25-add-nan
 B=${BDIR:-/root/catalyst-test/benchab2}; case $B in /root/catalyst-test/?*) ;; *) echo "BDIR must be under /root/catalyst-test"; exit 1;; esac
 grep -q " $B " /proc/mounts && { echo "$B is a mount point"; exit 1; }
 rm -rf --one-file-system $B; mkdir -p $B
+# Both tools are run from fresh copies on the file system that is measured, as an installed system has them. From
+# a cold cache a run reads its own program first, and where a build left that file on the disk is no property of
+# the tool: on 23 November 2026 catalyst's binary read in 15 ms from its build directory and in 7 ms as a fresh
+# copy, apk's in 7 ms and in 5.5. COPY_TOOLS=0 runs them from where they are, as the runs before that day did.
+# Each is one executable with all of its own code in it; the libraries they load (libssl and libcrypto both, libz
+# and libzstd apk, libgcc_s catalyst) stay where the system has them.
+BUILT=$OCT
+if [ "${COPY_TOOLS:-1}" = 1 ]; then
+  mkdir $B/bin; cp --reflink=never $APK $B/bin/apk; cp --reflink=never $OCT $B/bin/oct; sync
+  APK=$B/bin/apk; OCT=$B/bin/oct
+fi
+coldread(){ sync; echo 3 > /proc/sys/vm/drop_caches; python3 -I -c 'import sys, time
+t = time.monotonic(); open(sys.argv[1], "rb").read(); print("%.1f" % ((time.monotonic() - t) * 1000))' "$1"; }
 BIG="valence-base $(tr '\n' ' ' < /root/catalyst-test/bench2/big-set.txt)"
 H0=http://127.0.0.1:8097/x86_64/Packages.adb; H25=http://127.0.0.1:8098/x86_64/Packages.adb
 # apk / catalyst with repositories REPOS ("local", "up" = with the 9999-r0 one, or an http URL)
@@ -68,7 +81,8 @@ sleep 0.5;; esac
 OUT=$S/benchab-$LABEL.tsv
 printf 'set\tjob\tcache\ttool\trun\twall\twall_sync\twall_done\ttrash\n' > $OUT
 REQ=$B/requests.tsv; : > $REQ
-echo "benchab2 $LABEL: $RUNS runs; catalyst $(stat -c %y $OCT | cut -c1-19); $(date -u +%FT%TZ); load $(cut -d' ' -f1-3 /proc/loadavg); $(stat -f -c %T $B)"
+echo "benchab2 $LABEL: $RUNS runs; catalyst $(stat -c %y $BUILT | cut -c1-19); $(date -u +%FT%TZ); load $(cut -d' ' -f1-3 /proc/loadavg); $(stat -f -c %T $B)"
+echo "tools: $OCT, $(stat -c %s $OCT) bytes, read from a cold cache in $(coldread $OCT) ms; $APK, $(stat -c %s $APK) bytes, in $(coldread $APK) ms"
 
 # one timed operation of CASE by TOOL on ROOT; sets rc
 timed(){ local case=$1 t=$2 R=$3
@@ -137,8 +151,8 @@ for set in $SETS; do
     done
     # leave the roots as the next case expects them
     case $case in
-      del-nano) for t in apk cat; do run $t $B/$set-$t local del nano > /dev/null 2>&1; done;;
-      del-cataclysm) for t in apk cat; do run $t $B/$set-$t local del cataclysm-dda-tiles > /dev/null 2>&1; done;;
+      del-nano) for t in apk cat; do run $t $B/$set-$t local del nano > /dev/null 2>&1; done; wait_trash $B/$set-cat;;
+      del-cataclysm) for t in apk cat; do run $t $B/$set-$t local del cataclysm-dda-tiles > /dev/null 2>&1; done; wait_trash $B/$set-cat;;
       up-all) rm -rf --one-file-system $B/$set-apk-up $B/$set-cat-up;;
     esac
   done

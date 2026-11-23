@@ -25,6 +25,7 @@
 //! - [`engine`]: the `add`/`del`/`upgrade`/`list` transactions.
 //! - [`progress`], [`rootfs`], [`sys`]: display, in-root path resolution,
 //!   libc helpers.
+//! - [`warm`]: files asked for before they are read (hints only).
 
 pub mod adb;
 pub mod codec;
@@ -48,5 +49,6 @@ pub mod unpack;
 pub mod unsynced;
 pub mod verify;
 pub mod version;
+pub mod warm;
 
 pub use error::{Error, Result};

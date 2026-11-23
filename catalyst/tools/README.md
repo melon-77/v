@@ -16,4 +16,6 @@ paths at the top of each script say what they expect.
 - `bench/catalyst-strict.sh` (installs) and `bench/catalyst-strict2.sh` (removals, upgrades, an HTTP repository): the
   strict comparison with apk of ../README.md, 15 runs per tool and case in ABBA order, every run kept;
   `catalyst-strict-stats.py` gives the verdicts. `bench/catalyst-strict-fs.sh` runs them on a file system made for the
-  run (btrfs mounted as Valence mounts its root, ext4 or XFS).
+  run (btrfs mounted as Valence mounts its root, ext4 or XFS). Both tools are run from fresh copies in the directory of
+  the run, so that a cold start does not measure where a build left a binary on the disk (`COPY_TOOLS=0`: from where
+  they are).

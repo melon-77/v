@@ -618,6 +618,80 @@ directory and not by entry, and it is fenced in:
 ext4 and XFS unlink on several threads and keep the entry-by-entry way,
 which is as fast there.
 
+## Files asked for ahead
+
+From a cold cache a run waits for the disk at every file it opens, one
+after another, and most of those files are known well before they are
+read. catalyst names them to the system early, on threads of their own,
+so that the disk fetches them while the run does something else
+(`src/warm.rs`):
+
+- **before the lock is taken:** the first files of the lookup index and,
+  for a run that plans with the repositories, each repository's index,
+  the parsed copy of it, the freshness records and the keys;
+- **while a package is unpacked:** the segments of the lookup index that
+  its paths belong to. They are known as soon as the package's list of
+  files is read, well before the check and the switch look them up.
+
+A hint decides nothing. It is `posix_fadvise(POSIX_FADV_WILLNEED)` on a
+regular file, or a read whose result is dropped; the run reads every file
+itself a moment later and checks it then as it always did. A hint that
+fails, comes late, or names a file that is never read costs a little time
+on another thread and nothing else. What keeps it so:
+
+- **Only what the run reads.** The files are found by the functions the
+  run uses itself. A remote repository's cached index is asked for only
+  when the run will use it without asking the server.
+- **Only regular files, and nothing written.** Nothing else is opened (a
+  FIFO could wait, a device could do something). Nothing is made, written
+  or locked, and a file's time of last access is left as it was where the
+  system allows that.
+- **File system calls only.** The threads of hints call nothing in the
+  cryptographic library, which tidies up when the process ends. The one
+  thing a hint needs of it, the hash in a cache file's name, the run works
+  out first. So the process can end at any moment while a hint is under
+  way, and a hint that fails does not stop the ones after it.
+- **Off, and shown.** `CATALYST_HINTS=0` turns the hints off.
+  `CATALYST_HINTS=show` gives each hint where it is asked for and names
+  every file on stderr; the tests use it to check that a run asks for the
+  files it then reads, and for no others.
+
+What it gives, for `add nano` from a cold cache on the small system
+(ext4; milliseconds, medians of seven runs with `CATALYST_PROF=1`):
+
+| step | without hints | with |
+|---|---|---|
+| the keys | 1.8 | 0.1 |
+| the freshness records | 0.3 | 0.0 |
+| the repository's index, from its parsed copy | 5.9 | 1.6 |
+| the lookup index: the segments of the new paths | 3.1 | 0.2 |
+| all steps | 34.8 | 27.1 |
+
+The whole command against apk, in the strict comparison's runs with the
+hints turned off and with them (15 runs each; the two columns are
+different runs, which is why apk's times differ):
+
+| | hints off: apk, catalyst | verdict | with hints: apk, catalyst | verdict |
+|---|---|---|---|---|
+| ext4, 39 packages | 48 ms, 54 ms | no clear difference | 49 ms, 44 ms | faster (at the line, see The strict comparison) |
+| ext4, 244 packages | 85 ms, 86 ms | no clear difference | 78 ms, 64 ms | faster |
+| btrfs, 39 packages | 63 ms, 62 ms | no clear difference | 55 ms, 44 ms | faster |
+| btrfs, 244 packages | 92 ms, 87 ms | no clear difference | 104 ms, 82 ms | faster |
+
+(The first row with the hints off was 46 ms against 52 and 46 against 51
+in two more runs, both called slower.)
+
+Tried and not kept:
+- **More threads for the `Current` links:** 24, 48 and 96 threads read the
+  links of 39 and of 244 packages no sooner than 12. The disk served no
+  more reads at a time.
+- **A smaller binary** by a build with fat LTO: 10% smaller, and a cold
+  start no faster.
+
+Not asked for ahead: what a removal or an upgrade reads of the old version
+(its records, and the segments of its paths, which only the records
+name), the package files themselves, and the lists of users and groups.
+
 ## Trust and limits
 
 Trust works as in apk v3:
@@ -894,20 +968,36 @@ later). "Until on disk" includes whatever of that was deleted by then; a
 third time, in tables of its own, runs until all of it is deleted and on
 disk.
 
+**Where the tools are run from.** Both tools are copied to the file
+system that is measured and run from there, as an installed system has
+them. From a cold cache a run reads its own program first, and where a
+build happened to leave that file on the disk is no property of the tool:
+on this machine catalyst's binary read in 15 ms from its build directory
+and in 7 ms as a fresh copy, apk's in 7 ms and in 5.5, and every rebuild
+moved it. Until the evening of 23 November 2026 the cold rows of these
+tables had that in them. The one-package install from a cold cache on the
+small system, 60 ms against apk's 52 then, takes 51 to 54 ms against 46 to
+48 with both tools from fresh copies and nothing else changed (three runs
+with catalyst's hints turned off, see Files asked for ahead; slower in
+two of them, no clear difference in one). What the hints add is below.
+Each tool is one executable with all of its own code in it; the libraries
+they load (libssl and libcrypto both, libz and libzstd apk, libgcc_s
+catalyst) stay where the system has them.
+
 23 November 2026, the 39-package and the 244-package system,
 `--no-scripts`. First on ext4, in a VHDX under WSL2 (the machine's own
 disk); btrfs, which Valence's own root is, follows.
 
 | system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | until on disk: apk, catalyst | ratio (95% CI) | verdict |
 |---|---|---|---|---|---|---|---|---|---|
-| 39 | add nano | warm | 17 ms | 17 ms | 1.02 (0.97-1.08) | no clear difference | 22 ms, 22 ms | 1.01 (0.99-1.09) | no clear difference |
-| 39 | add nano | cold | 52 ms | 60 ms | 1.15 (1.10-1.21) | slower | 58 ms, 66 ms | 1.15 (1.10-1.20) | slower |
-| 244 | add nano | warm | 41 ms | 24 ms | 0.58 (0.56-0.60) | **faster** | 45 ms, 29 ms | 0.63 (0.62-0.67) | **faster** |
-| 244 | add nano | cold | 92 ms | 97 ms | 1.06 (0.99-1.11) | no clear difference | 98 ms, 103 ms | 1.05 (0.98-1.09) | no clear difference |
-| 39 | add Cataclysm | warm | 2.33 s | 814 ms | 0.35 (0.33-0.39) | **faster** | 2.34 s, 908 ms | 0.39 (0.37-0.43) | **faster** |
-| 39 | add Cataclysm | cold | 2.47 s | 1.13 s | 0.46 (0.43-0.48) | **faster** | 2.48 s, 1.22 s | 0.49 (0.47-0.52) | **faster** |
-| 244 | add Cataclysm | warm | 1.35 s | 768 ms | 0.57 (0.53-0.65) | **faster** | 1.36 s, 826 ms | 0.61 (0.58-0.69) | **faster** |
-| 244 | add Cataclysm | cold | 1.58 s | 906 ms | 0.57 (0.55-0.64) | **faster** | 1.59 s, 971 ms | 0.61 (0.58-0.68) | **faster** |
+| 39 | add nano | warm | 17 ms | 17 ms | 1.00 (0.97-1.05) | no clear difference | 21 ms, 22 ms | 1.06 (1.01-1.10) | no clear difference |
+| 39 | add nano | cold | 49 ms | 44 ms | 0.91 (0.85-0.95) | **faster** | 54 ms, 51 ms | 0.93 (0.88-0.98) | no clear difference |
+| 244 | add nano | warm | 42 ms | 22 ms | 0.54 (0.52-0.56) | **faster** | 45 ms, 27 ms | 0.60 (0.58-0.62) | **faster** |
+| 244 | add nano | cold | 78 ms | 64 ms | 0.82 (0.77-0.85) | **faster** | 84 ms, 70 ms | 0.83 (0.79-0.87) | **faster** |
+| 39 | add Cataclysm | warm | 2.08 s | 788 ms | 0.38 (0.35-0.43) | **faster** | 2.08 s, 834 ms | 0.40 (0.37-0.46) | **faster** |
+| 39 | add Cataclysm | cold | 2.35 s | 1.07 s | 0.45 (0.44-0.47) | **faster** | 2.36 s, 1.17 s | 0.50 (0.47-0.51) | **faster** |
+| 244 | add Cataclysm | warm | 1.45 s | 710 ms | 0.49 (0.45-0.54) | **faster** | 1.45 s, 785 ms | 0.54 (0.51-0.60) | **faster** |
+| 244 | add Cataclysm | cold | 1.46 s | 847 ms | 0.58 (0.56-0.62) | **faster** | 1.47 s, 915 ms | 0.62 (0.60-0.69) | **faster** |
 
 Removals, upgrades and a network repository. The upgrades use a second
 repository with 27 packages of valence-base rebuilt as a newer version;
@@ -919,32 +1009,38 @@ does:
 
 | system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | until on disk: apk, catalyst | ratio (95% CI) | verdict |
 |---|---|---|---|---|---|---|---|---|---|
-| 39 | remove nano | warm | 13 ms | 10 ms | 0.73 (0.71-0.75) | **faster** | 16 ms, 14 ms | 0.84 (0.79-0.85) | **faster** |
-| 39 | remove nano | cold | 49 ms | 52 ms | 1.08 (1.02-1.14) | no clear difference | 54 ms, 58 ms | 1.08 (1.03-1.13) | no clear difference |
-| 244 | remove nano | warm | 38 ms | 16 ms | 0.42 (0.40-0.44) | **faster** | 42 ms, 20 ms | 0.49 (0.46-0.51) | **faster** |
-| 244 | remove nano | cold | 83 ms | 74 ms | 0.90 (0.86-0.97) | no clear difference | 88 ms, 82 ms | 0.92 (0.88-0.99) | no clear difference |
-| 39 | remove Cataclysm | warm | 136 ms | 108 ms | 0.80 (0.73-0.87) | no clear difference | 145 ms, 136 ms | 0.94 (0.88-1.30) | no clear difference |
-| 39 | remove Cataclysm | cold | 240 ms | 246 ms | 1.02 (0.82-2.39) | no clear difference | 246 ms, 278 ms | 1.13 (0.90-2.47) | no clear difference |
-| 244 | remove Cataclysm | warm | 177 ms | 218 ms | 1.23 (1.03-1.49) | no clear difference | 182 ms, 262 ms | 1.44 (1.20-1.93) | slower |
-| 244 | remove Cataclysm | cold | 293 ms | 260 ms | 0.89 (0.72-1.82) | no clear difference | 298 ms, 282 ms | 0.95 (0.76-1.91) | no clear difference |
-| 39 | upgrade one package | warm | 73 ms | 66 ms | 0.91 (0.85-1.13) | no clear difference | 76 ms, 72 ms | 0.94 (0.88-1.15) | no clear difference |
-| 39 | upgrade one package | cold | 134 ms | 130 ms | 0.97 (0.89-1.03) | no clear difference | 140 ms, 137 ms | 0.98 (0.91-1.04) | no clear difference |
-| 244 | upgrade one package | warm | 112 ms | 82 ms | 0.73 (0.46-0.80) | **faster** | 118 ms, 91 ms | 0.77 (0.48-0.83) | **faster** |
-| 244 | upgrade one package | cold | 162 ms | 166 ms | 1.02 (0.99-1.09) | no clear difference | 168 ms, 174 ms | 1.03 (1.00-1.11) | no clear difference |
-| 39 | upgrade 27 packages | warm | 240 ms | 160 ms | 0.67 (0.49-0.71) | **faster** | 247 ms, 166 ms | 0.67 (0.49-0.72) | **faster** |
-| 39 | upgrade 27 packages | cold | 341 ms | 254 ms | 0.74 (0.71-0.77) | **faster** | 346 ms, 260 ms | 0.75 (0.72-0.78) | **faster** |
-| 39 | add nano over HTTP | warm | 18 ms | 18 ms | 1.03 (1.02-1.07) | no clear difference | 22 ms, 23 ms | 1.07 (1.05-1.10) | no clear difference |
-| 244 | add nano over HTTP | warm | 45 ms | 24 ms | 0.52 (0.50-0.54) | **faster** | 49 ms, 28 ms | 0.58 (0.55-0.60) | **faster** |
-| 39 | add nano over HTTP, +25 ms a request | warm | 45 ms | 45 ms | 1.01 (0.99-1.04) | no clear difference | 48 ms, 50 ms | 1.04 (1.01-1.04) | no clear difference |
-| 244 | add nano over HTTP, +25 ms a request | warm | 72 ms | 52 ms | 0.71 (0.71-0.74) | **faster** | 76 ms, 57 ms | 0.75 (0.73-0.77) | **faster** |
+| 39 | remove nano | warm | 13 ms | 9 ms | 0.72 (0.69-0.76) | **faster** | 16 ms, 13 ms | 0.80 (0.78-0.82) | **faster** |
+| 39 | remove nano | cold | 44 ms | 40 ms | 0.91 (0.82-0.98) | no clear difference | 51 ms, 46 ms | 0.90 (0.83-0.99) | no clear difference |
+| 244 | remove nano | warm | 38 ms | 15 ms | 0.41 (0.40-0.44) | **faster** | 41 ms, 20 ms | 0.49 (0.47-0.51) | **faster** |
+| 244 | remove nano | cold | 76 ms | 68 ms | 0.90 (0.83-0.94) | **faster** | 81 ms, 74 ms | 0.91 (0.84-0.95) | **faster** |
+| 39 | remove Cataclysm | warm | 134 ms | 120 ms | 0.90 (0.81-1.07) | no clear difference | 143 ms, 162 ms | 1.13 (1.01-1.48) | no clear difference |
+| 39 | remove Cataclysm | cold | 273 ms | 295 ms | 1.08 (0.68-2.57) | no clear difference | 279 ms, 321 ms | 1.15 (0.73-2.66) | no clear difference |
+| 244 | remove Cataclysm | warm | 169 ms | 188 ms | 1.11 (1.02-1.37) | no clear difference | 180 ms, 220 ms | 1.22 (1.12-1.56) | no clear difference |
+| 244 | remove Cataclysm | cold | 262 ms | 227 ms | 0.87 (0.77-1.85) | no clear difference | 268 ms, 250 ms | 0.93 (0.82-1.91) | no clear difference |
+| 39 | upgrade one package | warm | 71 ms | 64 ms | 0.90 (0.82-0.93) | **faster** | 75 ms, 69 ms | 0.92 (0.85-0.97) | no clear difference |
+| 39 | upgrade one package | cold | 115 ms | 102 ms | 0.89 (0.86-0.92) | **faster** | 122 ms, 110 ms | 0.91 (0.87-0.93) | **faster** |
+| 244 | upgrade one package | warm | 108 ms | 72 ms | 0.67 (0.42-0.79) | **faster** | 112 ms, 80 ms | 0.72 (0.44-0.84) | **faster** |
+| 244 | upgrade one package | cold | 153 ms | 138 ms | 0.91 (0.83-0.96) | no clear difference | 160 ms, 148 ms | 0.92 (0.86-0.98) | no clear difference |
+| 39 | upgrade 27 packages | warm | 242 ms | 155 ms | 0.64 (0.44-0.68) | **faster** | 250 ms, 161 ms | 0.65 (0.45-0.69) | **faster** |
+| 39 | upgrade 27 packages | cold | 352 ms | 266 ms | 0.76 (0.72-0.78) | **faster** | 358 ms, 274 ms | 0.76 (0.73-0.79) | **faster** |
+| 39 | add nano over HTTP | warm | 18 ms | 19 ms | 1.07 (1.01-1.09) | no clear difference | 22 ms, 23 ms | 1.07 (1.00-1.12) | no clear difference |
+| 244 | add nano over HTTP | warm | 42 ms | 23 ms | 0.55 (0.52-0.56) | **faster** | 46 ms, 28 ms | 0.61 (0.58-0.62) | **faster** |
+| 39 | add nano over HTTP, +25 ms a request | warm | 46 ms | 46 ms | 1.01 (1.00-1.03) | no clear difference | 50 ms, 51 ms | 1.03 (1.01-1.07) | no clear difference |
+| 244 | add nano over HTTP, +25 ms a request | warm | 68 ms | 51 ms | 0.75 (0.74-0.77) | **faster** | 72 ms, 56 ms | 0.77 (0.76-0.80) | **faster** |
 
-Of the 26 cases on ext4 catalyst is faster in 12, slower in 1, and in 13
-there is no clear difference. Until the change is on disk: faster in 12,
-slower in 2, no clear difference in 12. Three of these cases sit at the
-line and fall either way from run to run: the same code on ext4, run two
-hours earlier, came out faster in 15 (removing nano from a cold cache on
-both systems, and removing Cataclysm from a warm one on the small system,
-109 ms against 138).
+Of the 26 cases on ext4 catalyst is faster in 17, and in 9 there is no
+clear difference; it is slower in none. Until the change is on disk:
+faster in 15, no clear difference in 11.
+
+One of the 17 sits at the line: the one-package install from a cold cache
+on the small system. It is 8 to 10% ahead in every run on a quiet machine
+(44 ms against 49 here; 42 against 46 and 43 against 46 in two runs of
+that case alone), and the rule asks for an interval that ends below 0.95:
+this run's does, those two end at 0.95 and 0.97 and are no clear
+difference. A first pass of the ext4 tables the same evening had it at 47
+against 48. Its first cases ran in the seconds after the 24 GB image of
+the btrfs run had been deleted from this disk, which is mounted with
+`discard`; the tables here are from the pass after it.
 
 The removal of a big package once more, this time until catalyst has
 deleted the old version too and that is on disk (apk leaves nothing for
@@ -952,10 +1048,10 @@ later: its time is the one until on disk, with one more `sync`):
 
 | system | job | cache | apk, until on disk | catalyst, until all is deleted and on disk | ratio (95% CI) | verdict |
 |---|---|---|---|---|---|---|
-| 39 | remove Cataclysm | warm | 148 ms | 160 ms | 1.08 (0.99-1.43) | no clear difference |
-| 39 | remove Cataclysm | cold | 249 ms | 289 ms | 1.16 (0.94-2.56) | no clear difference |
-| 244 | remove Cataclysm | warm | 185 ms | 304 ms | 1.65 (1.29-1.98) | slower |
-| 244 | remove Cataclysm | cold | 301 ms | 290 ms | 0.96 (0.79-1.93) | no clear difference |
+| 39 | remove Cataclysm | warm | 147 ms | 187 ms | 1.27 (1.10-1.59) | slower |
+| 39 | remove Cataclysm | cold | 281 ms | 339 ms | 1.20 (0.76-2.74) | no clear difference |
+| 244 | remove Cataclysm | warm | 187 ms | 235 ms | 1.26 (1.18-1.59) | slower |
+| 244 | remove Cataclysm | cold | 271 ms | 263 ms | 0.97 (0.85-1.97) | no clear difference |
 
 **On btrfs**, in an image on the same disk, mounted as Valence mounts its
 root (`subvol=@,noatime,compress=zstd:1`), without the HTTP cases, which
@@ -965,100 +1061,97 @@ deleted later):
 
 | system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | until on disk: apk, catalyst | ratio (95% CI) | verdict |
 |---|---|---|---|---|---|---|---|---|---|
-| 39 | add nano | warm | 25 ms | 21 ms | 0.85 (0.77-0.88) | **faster** | 31 ms, 28 ms | 0.90 (0.85-0.96) | no clear difference |
-| 39 | add nano | cold | 58 ms | 56 ms | 0.97 (0.92-1.00) | no clear difference | 66 ms, 66 ms | 1.00 (0.97-1.03) | no clear difference |
-| 244 | add nano | warm | 54 ms | 30 ms | 0.55 (0.53-0.57) | **faster** | 60 ms, 38 ms | 0.64 (0.62-0.66) | **faster** |
-| 244 | add nano | cold | 111 ms | 105 ms | 0.95 (0.88-0.99) | no clear difference | 122 ms, 116 ms | 0.96 (0.92-1.04) | no clear difference |
-| 39 | add Cataclysm | warm | 2.19 s | 982 ms | 0.45 (0.41-0.46) | **faster** | 2.20 s, 1.10 s | 0.50 (0.44-0.54) | **faster** |
-| 39 | add Cataclysm | cold | 2.64 s | 1.31 s | 0.50 (0.46-0.54) | **faster** | 2.65 s, 1.39 s | 0.53 (0.50-0.59) | **faster** |
-| 244 | add Cataclysm | warm | 1.46 s | 940 ms | 0.64 (0.59-0.71) | **faster** | 1.47 s, 1.08 s | 0.74 (0.68-0.80) | **faster** |
-| 244 | add Cataclysm | cold | 1.90 s | 1.26 s | 0.66 (0.60-0.78) | **faster** | 1.91 s, 1.31 s | 0.68 (0.63-0.81) | **faster** |
-| 39 | remove nano | warm | 19 ms | 13 ms | 0.68 (0.66-0.73) | **faster** | 26 ms, 20 ms | 0.79 (0.74-0.85) | **faster** |
-| 39 | remove nano | cold | 66 ms | 55 ms | 0.84 (0.79-1.01) | no clear difference | 74 ms, 67 ms | 0.90 (0.85-1.06) | no clear difference |
-| 244 | remove nano | warm | 49 ms | 22 ms | 0.45 (0.43-0.47) | **faster** | 54 ms, 30 ms | 0.55 (0.53-0.58) | **faster** |
-| 244 | remove nano | cold | 102 ms | 87 ms | 0.85 (0.80-0.92) | **faster** | 110 ms, 98 ms | 0.89 (0.85-0.97) | no clear difference |
-| 39 | remove Cataclysm | warm | 181 ms | 133 ms | 0.74 (0.70-0.82) | **faster** | 201 ms, 181 ms | 0.90 (0.81-1.06) | no clear difference |
-| 39 | remove Cataclysm | cold | 391 ms | 268 ms | 0.68 (0.65-0.81) | **faster** | 402 ms, 296 ms | 0.74 (0.70-0.87) | **faster** |
-| 244 | remove Cataclysm | warm | 188 ms | 173 ms | 0.92 (0.79-1.02) | no clear difference | 202 ms, 209 ms | 1.04 (0.82-1.19) | no clear difference |
-| 244 | remove Cataclysm | cold | 436 ms | 327 ms | 0.75 (0.66-0.93) | **faster** | 445 ms, 364 ms | 0.82 (0.72-0.98) | no clear difference |
-| 39 | upgrade one package | warm | 108 ms | 93 ms | 0.86 (0.83-0.89) | **faster** | 114 ms, 102 ms | 0.89 (0.85-0.94) | **faster** |
-| 39 | upgrade one package | cold | 154 ms | 147 ms | 0.95 (0.93-0.97) | no clear difference | 163 ms, 159 ms | 0.97 (0.95-1.00) | no clear difference |
-| 244 | upgrade one package | warm | 192 ms | 113 ms | 0.59 (0.55-0.72) | **faster** | 215 ms, 134 ms | 0.62 (0.58-0.80) | **faster** |
-| 244 | upgrade one package | cold | 232 ms | 213 ms | 0.92 (0.90-0.95) | **faster** | 241 ms, 241 ms | 1.00 (0.98-1.03) | no clear difference |
-| 39 | upgrade 27 packages | warm | 395 ms | 253 ms | 0.64 (0.61-0.66) | **faster** | 401 ms, 273 ms | 0.68 (0.63-0.70) | **faster** |
-| 39 | upgrade 27 packages | cold | 486 ms | 343 ms | 0.71 (0.70-0.73) | **faster** | 493 ms, 367 ms | 0.74 (0.73-0.76) | **faster** |
+| 39 | add nano | warm | 25 ms | 22 ms | 0.85 (0.81-0.88) | **faster** | 31 ms, 28 ms | 0.93 (0.90-0.98) | no clear difference |
+| 39 | add nano | cold | 55 ms | 44 ms | 0.81 (0.77-0.84) | **faster** | 63 ms, 55 ms | 0.87 (0.82-0.89) | **faster** |
+| 244 | add nano | warm | 53 ms | 30 ms | 0.56 (0.54-0.60) | **faster** | 58 ms, 37 ms | 0.65 (0.62-0.68) | **faster** |
+| 244 | add nano | cold | 104 ms | 82 ms | 0.79 (0.75-0.83) | **faster** | 112 ms, 94 ms | 0.84 (0.79-0.88) | **faster** |
+| 39 | add Cataclysm | warm | 2.11 s | 947 ms | 0.45 (0.44-0.46) | **faster** | 2.12 s, 994 ms | 0.47 (0.45-0.48) | **faster** |
+| 39 | add Cataclysm | cold | 2.57 s | 1.26 s | 0.49 (0.45-0.51) | **faster** | 2.58 s, 1.40 s | 0.54 (0.49-0.56) | **faster** |
+| 244 | add Cataclysm | warm | 1.45 s | 918 ms | 0.63 (0.59-0.70) | **faster** | 1.46 s, 1.05 s | 0.72 (0.66-0.80) | **faster** |
+| 244 | add Cataclysm | cold | 1.53 s | 1.13 s | 0.73 (0.64-0.76) | **faster** | 1.54 s, 1.17 s | 0.76 (0.66-0.78) | **faster** |
+| 39 | remove nano | warm | 18 ms | 12 ms | 0.68 (0.65-0.73) | **faster** | 23 ms, 19 ms | 0.83 (0.79-0.86) | **faster** |
+| 39 | remove nano | cold | 47 ms | 39 ms | 0.83 (0.76-0.86) | **faster** | 54 ms, 48 ms | 0.89 (0.80-0.92) | **faster** |
+| 244 | remove nano | warm | 49 ms | 22 ms | 0.46 (0.42-0.47) | **faster** | 55 ms, 30 ms | 0.55 (0.53-0.58) | **faster** |
+| 244 | remove nano | cold | 99 ms | 81 ms | 0.82 (0.76-0.87) | **faster** | 108 ms, 94 ms | 0.87 (0.81-0.93) | **faster** |
+| 39 | remove Cataclysm | warm | 170 ms | 126 ms | 0.74 (0.69-0.81) | **faster** | 188 ms, 194 ms | 1.03 (0.84-1.62) | no clear difference |
+| 39 | remove Cataclysm | cold | 390 ms | 256 ms | 0.66 (0.60-1.08) | no clear difference | 400 ms, 283 ms | 0.71 (0.65-1.13) | no clear difference |
+| 244 | remove Cataclysm | warm | 183 ms | 176 ms | 0.96 (0.88-1.03) | no clear difference | 195 ms, 215 ms | 1.10 (1.01-1.34) | no clear difference |
+| 244 | remove Cataclysm | cold | 412 ms | 320 ms | 0.78 (0.64-0.93) | **faster** | 422 ms, 355 ms | 0.84 (0.71-0.99) | no clear difference |
+| 39 | upgrade one package | warm | 109 ms | 95 ms | 0.87 (0.78-0.96) | no clear difference | 114 ms, 107 ms | 0.93 (0.77-1.08) | no clear difference |
+| 39 | upgrade one package | cold | 145 ms | 124 ms | 0.85 (0.83-0.89) | **faster** | 153 ms, 135 ms | 0.88 (0.86-0.91) | **faster** |
+| 244 | upgrade one package | warm | 180 ms | 112 ms | 0.62 (0.58-0.74) | **faster** | 190 ms, 129 ms | 0.68 (0.62-0.83) | **faster** |
+| 244 | upgrade one package | cold | 217 ms | 179 ms | 0.82 (0.81-0.84) | **faster** | 227 ms, 206 ms | 0.90 (0.88-0.92) | **faster** |
+| 39 | upgrade 27 packages | warm | 391 ms | 253 ms | 0.65 (0.60-0.66) | **faster** | 399 ms, 273 ms | 0.68 (0.61-0.70) | **faster** |
+| 39 | upgrade 27 packages | cold | 473 ms | 318 ms | 0.67 (0.65-0.69) | **faster** | 481 ms, 340 ms | 0.71 (0.69-0.72) | **faster** |
 
-Of the 22 cases on btrfs catalyst is faster in 17, and in 5 there is no
+Of the 22 cases on btrfs catalyst is faster in 19, and in 3 there is no
 clear difference; it is slower in none. Until the change is on disk:
-faster in 12, no clear difference in 10. The removal of a big package
+faster in 16, no clear difference in 6. The removal of a big package
 until all is deleted and on disk:
 
 | system | job | cache | apk, until on disk | catalyst, until all is deleted and on disk | ratio (95% CI) | verdict |
 |---|---|---|---|---|---|---|
-| 39 | remove Cataclysm | warm | 203 ms | 394 ms | 1.94 (1.88-2.19) | slower |
-| 39 | remove Cataclysm | cold | 404 ms | 543 ms | 1.34 (1.26-1.55) | slower |
-| 244 | remove Cataclysm | warm | 204 ms | 412 ms | 2.02 (1.77-2.27) | slower |
-| 244 | remove Cataclysm | cold | 447 ms | 549 ms | 1.23 (1.10-1.40) | slower |
+| 39 | remove Cataclysm | warm | 190 ms | 389 ms | 2.05 (1.87-2.29) | slower |
+| 39 | remove Cataclysm | cold | 402 ms | 541 ms | 1.35 (1.18-1.82) | slower |
+| 244 | remove Cataclysm | warm | 197 ms | 406 ms | 2.06 (1.93-2.21) | slower |
+| 244 | remove Cataclysm | cold | 424 ms | 538 ms | 1.27 (1.09-1.57) | slower |
 
 Where it is not ahead, and why:
 - **A big removal counted to its end, on btrfs:** until everything is
-  deleted and on disk it takes 1.2 to 2 times apk's time. Every file has
-  two names, the directories that were moved are looked through twice,
-  and none of that is less work for being done after the command has
-  returned: it is later. When the command returns, the same removal is
-  faster than apk's in three of the four cases (133 ms against 181 on the
-  small system) and level in the fourth; before whole directories were
-  moved it was slower in two (203 ms against 177).
-- **Removing a big package on ext4:** level in all four cases when the
-  command returns in this run, and in one of them slower until it is on
-  disk and until all is deleted (the big system from a warm cache, 262 ms
-  against 182). These times vary more than any others here. On 22
-  November this removal took 175 ms on the small system (with three
-  flushes, 3,700 index files read and 37,000 `lstat` calls); it takes 108.
+  deleted and on disk it takes 1.3 to 2 times apk's time (389 ms against
+  190 on the small system). Every file has two names, the directories
+  that were moved are looked through twice, and none of that is less work
+  for being done after the command has returned: it is later. When the
+  command returns, the same removal is faster than apk's in two of the
+  four cases (126 ms against 170 on the small system), and in the other
+  two there is no clear difference (one of them 256 ms against 390, with
+  a few slow runs that widen its interval).
+- **Removing a big package on ext4:** no clear difference in all four
+  cases when the command returns and until it is on disk; until all is
+  deleted it is slower in two (187 ms against 147 on the small system from
+  a warm cache). These times vary more than any others here.
 - **A one-package install on the small system, ext4:** 17 ms against 17
-  from a warm cache (level), 60 ms against 52 from a cold one (slower).
-  catalyst itself starts faster than apk from a cold cache (15 ms against
-  22), but then reads more small files: the `Current` link of every
-  package, the files of the lookup index, a repository index and its
-  parsed copy where apk reads one file. On the big system the same install
-  is level cold and nearly twice as fast warm, because apk reads and
-  rewrites its whole database there. On btrfs it is faster warm on both
-  systems and level cold.
-- **The same install over HTTP on the small system:** level; the request
-  is the same for both.
-- **Upgrading one package on ext4:** level in three of the four cases. On
-  btrfs it is faster in three and level in one.
+  from a warm cache, and from a cold one at the line (above). What it
+  still reads one after another there is the `Current` link of every
+  package, 39 small reads that no hint shortens: with 24, 48 or 96 threads
+  the disk served no more of them at a time than with 12. On the big
+  system the same install is faster warm and cold (22 ms against 42; 64
+  against 78), and on btrfs in all four cases.
+- **The same install over HTTP on the small system:** no clear difference
+  (19 ms against 18); the request is the same for both.
+- **Upgrading one package:** faster in three of the four cases on each
+  file system, no clear difference in the fourth.
 
 `oct --sync` returns, as apk does, only when the change is on disk and
 nothing is left for later. It then flushes three times where apk flushes
 once (the journal's content, its name, the end), and a small change is
-slower than apk's by that: 3 to 5 ms from a warm cache, about 10 from a
-cold one. On btrfs a big removal is slower by the second set of names as
-well (405 ms against 180). Small system, ext4:
+slower than apk's by that: 3 to 4 ms on ext4, 2 to 4 ms from a warm cache
+on btrfs. On btrfs a big removal is slower by the second set of names as
+well (386 ms against 175). Small system, ext4:
 
 | system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict |
 |---|---|---|---|---|---|---|
-| 39 | add nano | warm | 16 ms | 20 ms | 1.18 (1.15-1.23) | slower |
-| 39 | add Cataclysm | warm | 2.27 s | 941 ms | 0.42 (0.37-0.49) | **faster** |
-| 39 | remove nano | warm | 13 ms | 16 ms | 1.18 (1.11-1.27) | slower |
-| 39 | remove nano | cold | 45 ms | 56 ms | 1.23 (1.17-1.27) | slower |
-| 39 | remove Cataclysm | warm | 140 ms | 144 ms | 1.03 (0.97-1.12) | no clear difference |
-| 39 | remove Cataclysm | cold | 238 ms | 283 ms | 1.19 (0.96-2.58) | no clear difference |
-| 39 | upgrade one package | warm | 71 ms | 74 ms | 1.04 (0.99-1.06) | no clear difference |
-| 39 | upgrade one package | cold | 129 ms | 137 ms | 1.06 (0.90-1.09) | no clear difference |
+| 39 | add nano | warm | 17 ms | 20 ms | 1.17 (1.14-1.24) | slower |
+| 39 | add Cataclysm | warm | 2.29 s | 896 ms | 0.39 (0.37-0.42) | **faster** |
+| 39 | remove nano | warm | 13 ms | 17 ms | 1.27 (1.20-1.36) | slower |
+| 39 | remove nano | cold | 39 ms | 43 ms | 1.10 (1.06-1.14) | slower |
+| 39 | remove Cataclysm | warm | 127 ms | 131 ms | 1.03 (0.93-1.22) | no clear difference |
+| 39 | remove Cataclysm | cold | 237 ms | 266 ms | 1.12 (0.93-2.48) | no clear difference |
+| 39 | upgrade one package | warm | 78 ms | 78 ms | 1.01 (0.76-1.17) | no clear difference |
+| 39 | upgrade one package | cold | 115 ms | 109 ms | 0.94 (0.90-0.98) | no clear difference |
 
 The same on btrfs:
 
 | system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict |
 |---|---|---|---|---|---|---|
-| 39 | add nano | warm | 23 ms | 28 ms | 1.20 (1.14-1.23) | slower |
-| 39 | add Cataclysm | warm | 2.28 s | 1.11 s | 0.49 (0.45-0.50) | **faster** |
-| 39 | remove nano | warm | 18 ms | 21 ms | 1.14 (1.06-1.24) | slower |
-| 39 | remove nano | cold | 49 ms | 58 ms | 1.20 (1.17-1.23) | slower |
-| 39 | remove Cataclysm | warm | 180 ms | 405 ms | 2.25 (2.14-2.56) | slower |
-| 39 | remove Cataclysm | cold | 392 ms | 622 ms | 1.59 (1.39-1.84) | slower |
-| 39 | upgrade one package | warm | 108 ms | 101 ms | 0.94 (0.90-1.05) | no clear difference |
-| 39 | upgrade one package | cold | 156 ms | 154 ms | 0.99 (0.96-1.02) | no clear difference |
+| 39 | add nano | warm | 23 ms | 27 ms | 1.20 (1.13-1.26) | slower |
+| 39 | add Cataclysm | warm | 2.36 s | 1.08 s | 0.46 (0.41-0.50) | **faster** |
+| 39 | remove nano | warm | 18 ms | 20 ms | 1.09 (1.04-1.12) | no clear difference |
+| 39 | remove nano | cold | 47 ms | 46 ms | 0.98 (0.90-1.02) | no clear difference |
+| 39 | remove Cataclysm | warm | 175 ms | 386 ms | 2.21 (2.09-2.34) | slower |
+| 39 | remove Cataclysm | cold | 398 ms | 714 ms | 1.79 (1.57-2.30) | slower |
+| 39 | upgrade one package | warm | 105 ms | 99 ms | 0.94 (0.90-1.00) | no clear difference |
+| 39 | upgrade one package | cold | 149 ms | 133 ms | 0.89 (0.86-0.91) | **faster** |
 
 `add nano`, warm, over the rounds of this work (medians of 15):
 
@@ -1126,7 +1219,7 @@ until the command returned and about 250 ms until all was deleted.
 
 ## Tests
 
-- **`cargo test`:** 52 unit tests, 12 command tests and 26 tests over the
+- **`cargo test`:** 60 unit tests, 14 command tests and 29 tests over the
   real repository:
   - every package verified against the index;
   - tampering of every kind is rejected;
@@ -1205,7 +1298,25 @@ until the command returned and about 250 ms until all was deleted.
     immutable counts as one that cannot be removed;
   - big trees are deleted directory by directory on several threads, a
     directory others may write to through descriptors, and no symlink is
-    followed in either.
+    followed in either;
+  - a hint (Files asked for ahead) is given for a regular file only, not
+    for a FIFO, a directory or a link that leads nowhere; it brings a file
+    into memory, leaves its time of last access as it was, and is given
+    once for a file of the lookup index; hints run in the order given, and
+    past one that fails;
+  - a run asks ahead for the files it then reads and for no others
+    (`CATALYST_HINTS=show`): the repository's index, its parsed copy, the
+    keys (the ones given, or the root's own), the freshness records and
+    nothing else beside them, the first files of the lookup index, and of
+    its segments only ones that hold a path of what is being installed; a
+    removal asks for the lookup index alone; the same changes with hints
+    and without leave the same live tree, lookup index, versions, world
+    and freshness records, and say the same on stderr;
+  - a removal reads no keys and works where they cannot be read; an add
+    stops there.
+
+  Each test of the hints was seen to fail with the code it guards broken
+  on purpose (ten ways, in a copy of the source).
 - **End-to-end tests (a) to (c),** run by `catalyst-e2e-all.sh` and the
   scripts it calls (`catalyst-e2e-a.sh`, `catalyst-e2e-b.sh`, `catalyst-e2e-c.sh`).
   These scripts live outside the crate, in the scratchpad folder.
@@ -1252,7 +1363,11 @@ until the command returned and about 250 ms until all was deleted.
   as well (`bigdel` with `CATALYST_UNLINK_THREADS=1`, which makes ext4 do
   what btrfs does by itself; the source as committed): 80 rounds, 76
   killed while running, 34 of them inside the switch, 0 failures; and 40
-  rounds each of the upgrade and `del`, 0 failures. One earlier failure, a directory left 0700 by a kill
+  rounds each of the upgrade and `del`, 0 failures. With files asked for
+  ahead, on top of the developers' fixes of 23 November (5159cf4; the
+  binary of this commit): 180 rounds (`add` 40, `small` 40, the upgrade
+  40, `del` 30, `bigdel` with whole directories moved 30), 175 killed
+  while running, 0 failures. One earlier failure, a directory left 0700 by a kill
   between `mkdir` and `chmod`, led to the atomic directory creation
   described under The transaction.
 - **Power-cut test,** run by `catalyst-powercut.sh` (as root; it needs
@@ -1310,3 +1425,9 @@ until the command returned and about 250 ms until all was deleted.
   `--clean-later` (the removal of Cataclysm on btrfs 60, ext4 30, XFS 20,
   the upgrade on btrfs 20) and 30 without, 0 failures. A journal was on
   the cut disk in 57 of the 64 rounds that stopped a switch.
+
+  With files asked for ahead, on top of the developers' fixes of 23
+  November (5159cf4; the binary of this commit): 135 rounds, 0 failures.
+  The add on btrfs 25 and on ext4 20, `small` and the upgrade on btrfs
+  with `--clean-later` 20 each, the upgrade on XFS 15, the removal on ext4
+  15, the removal of Cataclysm on btrfs with `--clean-later` 20.

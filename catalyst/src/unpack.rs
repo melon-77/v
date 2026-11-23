@@ -194,13 +194,16 @@ fn integrity(path: &[u8], e: io::Error) -> Error {
 }
 
 /// Unpacks `job` into `ROOT/Programs/<name>/<version>`. `progress` gets
-/// content bytes as they are written.
+/// content bytes as they are written. With `hints` (the segment files of
+/// the index of installed files), those the package's paths belong to are
+/// asked for as soon as the paths are known ([`crate::warm`]).
 pub fn unpack(
     root: &Path,
     job: &Job,
     keys: &TrustedKeys,
     ids: &IdMap,
     allow_untrusted: bool,
+    hints: Option<&crate::warm::Files>,
     progress: &mut dyn FnMut(u64),
 ) -> Result<Stats> {
     if !db::safe_component(&job.name) || !db::safe_version(&job.version) {
@@ -237,7 +240,7 @@ pub fn unpack(
     // under root's hands. The live tree does not need it open: its files
     // are other names of the same inodes.
     fs::DirBuilder::new().mode(0o700).create(&partial)?;
-    let r = unpack_into(&partial, job, keys, ids, allow_untrusted, progress).and_then(|st| {
+    let r = unpack_into(&partial, job, keys, ids, allow_untrusted, hints, progress).and_then(|st| {
         fs::rename(&partial, &fin)?;
         Ok(st)
     });
@@ -256,6 +259,7 @@ fn unpack_into(
     keys: &TrustedKeys,
     ids: &IdMap,
     allow_untrusted: bool,
+    hints: Option<&crate::warm::Files>,
     progress: &mut dyn FnMut(u64),
 ) -> Result<Stats> {
     let identity = &job.index_info.hashes;
@@ -289,6 +293,13 @@ fn unpack_into(
                 String::from_utf8_lossy(&p)
             )));
         }
+    }
+    // the records are what the package says, known before any content is
+    // written: the check and the switch will look their paths up in the
+    // index of installed files, whose files are asked for now
+    let recs = db::records(&pkg);
+    if let Some(files) = hints {
+        crate::index::ask_for(files, &recs);
     }
     let chown = sys::is_root();
     let root_egid_clean = chown && {
@@ -406,7 +417,6 @@ fn unpack_into(
         replaces_priority: pkg.replaces_priority,
         source: job.source.clone(),
     };
-    let recs = db::records(&pkg);
     db::write_meta(dest, &meta, &recs, &pkg)?;
     Ok(st)
 }
