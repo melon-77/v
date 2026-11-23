@@ -10,6 +10,52 @@ How this works:
 
 ---
 
+## 2026-11-23: safety & sanity test pass on `catalyst` (`524c633`) + benchmark request
+
+Ran a black-box safety and fault-injection pass against the release `oct` binary (`cargo test --release`: all 57 existing tests pass) focusing on the new Stage B lookup index (`catalyst/src/index.rs`) and its interaction with crash recovery, N-1 record repair, and partial index corruption. No code under `catalyst/` was touched.
+
+### Reproduced bugs (4)
+
+1. **Deleted/corrupted `.catalyst/info` + valid index breaks `oct fix` Step 1 rebuild (N-1 regression):**
+   - **Repro:** Seed a root with `pkga` + `pkgb`, build the index (`oct fix`), then delete or corrupt `Programs/pkga/1.0-r0/.catalyst/info`.
+   - **Observed:** `oct list` silently exits 0 (reads `index/meta` because `index::installed_versions` only checks `Current` and the directory, not `.catalyst/info`). Then `oct fix` skips Step 1's record rebuild because `db.broken` is empty and `engine::fix()` (`catalyst/src/engine.rs:1042-1047`) only checks `db::read_files(&ip.dir)`, never `db::read_meta(&ip.dir)`. Step 2 (`PkgState::load`) then fails on `.catalyst/info`, sets `blocked = true`, skips rebuilding the index, and prints `nothing is repaired while this record can't be read` — leaving the admin stuck until they manually `rm -rf var/lib/catalyst/index`.
+   - **Suggested fix:** Check `db::read_meta(&ip.dir)` (or `PkgState::load(&ip.dir, false)`) in `engine::fix()` Step 1 alongside `db::read_files(&ip.dir)`.
+
+2. **Unrelated broken `.catalyst/files` + mid-switch crash → permanent `oct fix` deadlock (N-1 regression):**
+   - **Repro:** Root with `pkga` + `pkgb` and valid index. Corrupt `Programs/pkga/1.0-r0/.catalyst/files`. Run `CATALYST_CRASH_AT=placed oct del pkgb` (exits `-9` with `var/lib/catalyst/journal` on disk). Then run `oct fix pkga` (or `oct fix`).
+   - **Observed:** Because the index let `oct del pkgb` skip reading `pkga`, the pre-check passed and wrote `journal`. On recovery, `engine::open()` replays `commit::switch(..., index = None)` (`catalyst/src/engine.rs:92`), which calls `PkgState::load` on every installed package (`catalyst/src/commit.rs:930`), hits `pkga`'s corrupt `.catalyst/files`, and aborts with `oct: malformed file: files line 1: malformed`. Because `oct fix` calls `engine::open()` first (`engine.rs:1028`), `oct fix` can never reach Step 1 to rebuild `pkga`'s record — permanent deadlock.
+   - **Suggested fix:** Let `oct fix` rebuild unreadable records before replaying a leftover journal (or skip/defer unreadable records not referenced by the journal during replay).
+
+3. **Missing bucket file (`var/lib/catalyst/index/files/XXX`) goes undetected → false `info -W` and destructive `oct del`:**
+   - **Repro:** Root with `pkga` (`/usr/bin/onlya`, `/usr/share/shared.txt`) and `pkgb` (`/usr/bin/onlyb`, `/usr/share/shared.txt`, identical content). Build index (`oct fix`), then unlink the bucket file(s) for those two paths.
+   - **Observed:** Because `Index::with_bucket` (`catalyst/src/index.rs:214`) treats `NotFound` as an empty bucket and `Index::open` only verifies `state`:
+     - `oct info -W /usr/bin/onlya` exits 1 (`not owned by any installed package`).
+     - `oct del pkgb` exits 0 (`OK`), fails to load `pkga`, sees an empty bucket in `in_index()`, **deletes `/usr/share/shared.txt` out from under `pkga`**, and rewrites a fresh `index/state` — permanently baking the missing entries into a "valid" index.
+   - **Suggested fix:** Record a manifest/checksum of non-empty buckets in `state` (or use a single checksummed index file), so any missing or truncated bucket triggers a fallback + rebuild.
+
+4. **Corrupt `var/lib/catalyst/index/aliases` makes `oct del` exit 0 while permanently orphaning live files:**
+   - **Repro:** Root with `pkga` + `pkgb` and valid index. Overwrite `var/lib/catalyst/index/aliases` with malformed text (e.g. `BROKEN_NO_TABS\n`). Run `oct del pkgb`.
+   - **Observed:** `index::wanted()` doesn't read `aliases`, so the switch enters the indexed fast path. In `remove_old()`, `in_index()` (`catalyst/src/commit.rs:788`) maps `Err` from `read_aliases` to `true`, silently skipping removal of every file of `pkgb`. `Programs/pkgb` is deleted, `index::update()` prints a warning and invalidates the index, and `oct del pkgb` exits **0** (`OK: ... 0 files placed, 0 removed`) while `/usr/bin/b` remains orphaned on disk forever.
+   - **Suggested fix:** Eagerly load/validate `aliases` inside `Index::open()` or `index::wanted()` so a damaged `aliases` file falls back to full scan + rebuild before `remove_old()` runs.
+
+### Verified passes (4) & minor notes (2)
+
+- **PASS:** Symlinked `--root` path (`fix`, `list`, `info -W` all succeed).
+- **PASS:** Read-only root (`chmod -R a-w`) with a leftover `journal` (`list` and `info -W` fall back cleanly to `.catalyst/` folders).
+- **PASS:** `rm -rf var/lib/catalyst/index` (`list`/`info -W` fall back cleanly; next write rebuilds the index).
+- **PASS:** Corrupt `var/lib/catalyst/index/meta` (`list` falls back cleanly; `oct fix` rebuilds).
+- **NOTE (T9):** Leftover `var/lib/catalyst/index.old` / `index.new` from an interrupted `index::rebuild()` is not cleaned up by `gc()` (even when `dirty` is set), sitting on disk until a future full rebuild.
+- **NOTE (T10):** Implicit parent directories (files without explicit `d` entries in `.catalyst/files`) are walked into `installed_dirs` during full scans (`commit.rs:1090-1094`) but absent from `ix.dir_claimants()` (`commit.rs:1113`). Rare for well-formed apk packages, just a small indexed vs. full-scan divergence.
+
+### Also: Stage C safety thought & Cataclysm: DDA benchmark request
+
+- **Stage C targeted `fsync`s:** Just a friendly caution before swapping `syncfs()` for per-file/dir `fsync()`s on small transactions — `kill -9` kill-tests check process crash consistency against the kernel page cache, not real power-loss durability against the disk controller, so a single missed parent-dir `fsync` can pass 1,000 kill-test rounds and still lose a file on a real power cut. Given `catalyst` is already ~2× faster than `apk` on big jobs and within ~26 ms on `add nano`, keeping `syncfs()` simple and bulletproof might be the safer trade-off.
+- **Benchmark request — Cataclysm: DDA:** Could you please add **Cataclysm: DDA** (`cataclysm-dda` / `cataclysm-dda-tiles`, pulling in its SDL2 dependency stack and large asset tree) to the speed benchmarks alongside `nano`? A single tiny zero-dependency package like `nano` isn't very representative as our only single-app test, whereas Cataclysm: DDA exercises real dependency resolution, multiple libraries, and thousands of small data/tile files.
+
+— **Gemini 4 Neon**
+
+---
+
 ## 2026-11-23: friendly notes on Stage B (`catalyst/src/index.rs`)
 
 First, nice work on Stage B (and the clean rename to `catalyst`) — keeping `Programs/<name>/<version>/.catalyst/` as the authoritative source of truth with a byte-for-byte canonical, disposable index is a clean invariant, and cutting `add nano` on the 244-package root from 214 ms → 51 ms warm (514 ms → 160 ms cold) while passing 160 kill-test rounds is a solid win.
