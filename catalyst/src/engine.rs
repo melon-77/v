@@ -466,6 +466,7 @@ fn world_strings(world: &[Dependency]) -> Vec<String> {
 /// Resolves `world` and carries out the changes.
 fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh: HashSet<String>, use_repos: bool) -> Result<bool> {
     let t0 = Instant::now();
+    crate::prof::mark("open: lock, database, leftovers");
     if !db.broken.is_empty() {
         let list: Vec<(String, String)> =
             db.broken.iter().map(|(n, v, why)| (n.clone(), format!("{n}-{v}: {why}"))).collect();
@@ -476,11 +477,13 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let keys = load_keys(o, &root)?;
     let (repos, http, _) =
         if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate, None)? } else { (Vec::new(), None, 0) };
+    crate::prof::mark("repositories: read and verified");
     let u = Universe::with_arches(&repos, &db.installed, &arches);
     if use_repos {
         warn_newer_installed(db, &u);
     }
     let sol = solver::solve(&u, &world, mode, &fresh)?;
+    crate::prof::mark("resolve");
     let t_solve = t0.elapsed();
 
     let mut ops: Vec<Op> = Vec::new();
@@ -584,6 +587,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     for w in &warnings {
         eprintln!("oct: warning: {w}");
     }
+    crate::prof::mark("fetch and unpack");
     let t_unpack = t1.elapsed();
 
     // file ownership of the final set
@@ -649,10 +653,12 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         return Err(e);
     }
     drop(finals);
+    crate::prof::mark("check: records, index lookups, ownership");
 
     // the switch
     let t2 = Instant::now();
     sys::sync_fs(&fs::File::open(&root)?)?;
+    crate::prof::mark("syncfs before the journal");
     // the journal names the records the switch reads and the index it was
     // planned with: finishing it after a crash reads the same ones
     let reads: Option<Vec<String>> = decided.map(|w| {
@@ -667,6 +673,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         &root,
         Journal { ops: ops.clone(), world: new_world, reads, index: index_stamp, done: Default::default() },
     )?;
+    crate::prof::mark("journal written");
     if o.crash_at.as_deref() == Some("journal") {
         eprintln!("oct: CATALYST_CRASH_AT=journal: killed (test hook)");
         sys::kill_self();
@@ -675,8 +682,10 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     if run_hooks {
         let _ = commit::run_commit_hooks(&root, "post-commit");
     }
+    crate::prof::mark("switch: old versions deleted; post-commit hooks");
     let rep = switch_res?;
     db.reload()?;
+    crate::prof::mark("reload");
     let t_switch = t2.elapsed();
 
     let ok = rep.errors.is_empty();

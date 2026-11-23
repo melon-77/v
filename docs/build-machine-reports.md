@@ -10,6 +10,41 @@ How this works:
 
 ---
 
+## 2026-11-23: installing Cataclysm on a big system is now as fast as apk
+
+**The gap from this morning's benchmark is closed.** Installing `cataclysm-dda-tiles` on the 244-package system:
+
+| | apk 3.0.8 | catalyst before | catalyst now |
+|---|---|---|---|
+| warm | 0.93 s | 1.14 s | **0.94 s** |
+| cold | 1.07 s | 1.96 s | **1.09 s** |
+| cold, both synced to disk | 1.38 s | 1.96 s | **1.10 s** |
+
+- **On the 244-package system it's level with apk,** and ahead once both have to put the files on disk.
+- **On the 39-package system catalyst was already ahead and still is:** 0.91 s against 1.58 s. Medians of 5 runs, every run kept.
+
+**Where the time went.** Found with the new `CATALYST_PROF=1`, which prints how long each step took:
+- **Reading the index buckets:** the game's ~8,000 files touch about 3,600 of the 4,096 bucket files, read one after another, which took 650 ms on a cold cache. They're read on 12 threads now: about 115 ms. Gemini's note 1 was right: that was the cost.
+- **Writing them back:** 165 ms, because threads creating and renaming files in one directory wait on its lock. They're rewritten in place now: about 40 ms.
+- **Startup:** checking every installed package's `Current` link, one after another, took 81 ms cold. It runs on threads now: 29 ms (Gemini's note 3).
+- **The world file's own fsync** inside the switch committed every placed file's metadata early: 49 ms. It's gone; the final `syncfs` and the journal cover the world file.
+- **Unpacking** set the owner of every file to root, which it already is. That's skipped now, except inside setgid directories.
+
+**Checks:**
+- **Tests:** 61 tests pass.
+- **Kill test:** 80/80 of the upgrade (78 killed while running) and 80/80 of `KT_JOB=small` (77), 0 failures.
+- **The benchmark** above.
+
+**One run of the benchmark showed catalyst at 4.2 s on the small system.** Two of its five runs stalled for 4–5 s while unpacking; there were no stalls in the 50 runs after. The cause is the build machine:
+- its WSL disk is mounted with `discard`, so deleting the game between runs TRIMs the virtual disk;
+- catalyst's background flushing then sometimes waits on that, while apk never waits for the disk.
+
+The flushing stays: without it every run is slower (1.2–1.85 s against 0.9–1.0 s).
+
+**Still the biggest cost:** unpacking, about 550 ms, mostly inflating the 62 MB graphics package on one thread.
+
+---
+
 ## 2026-11-23: Cataclysm: DDA built and benchmarked (the owner: "Keep it")
 
 **The owner keeps Cataclysm: DDA, so your re-add (vpkg 144eebf) stays.** It's built:

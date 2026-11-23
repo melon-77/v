@@ -174,6 +174,13 @@ canonical places, and the aliases. A missing, truncated or changed file is
 found there, before anything is switched, and the change then reads every
 record and rebuilds the index.
 
+A big change touches thousands of buckets (installing Cataclysm: DDA on a
+system of 244 packages, about 3,600 of the 4,096), so they are read and
+written on several threads. A bucket file that exists is rewritten in
+place rather than through a temporary name: creating and renaming files in
+one directory would make the threads wait for each other. Nothing reads
+the index while it is written, and every bucket has its checksum.
+
 Inside a switch the index is updated before the final `syncfs`. The
 journal names the records the switch reads and the index it was planned
 with, and finishing an interrupted switch reads the same records with that
@@ -522,6 +529,19 @@ after the command, since apk leaves writeback to the kernel:
 | base | cold | 48 ms | 95 ms | 81 ms | 1.67 | 59 ms, 86 ms |
 | big | warm | 32 ms | 214 ms | 51 ms | 1.56 | 44 ms, 56 ms |
 | big | cold | 77 ms | 514 ms | 160 ms | 2.09 | 89 ms, 165 ms |
+
+A one-app job with real dependencies and many files: `add
+cataclysm-dda-tiles` (the game with graphics and sound; 7,929 data files),
+5 runs each, medians, 23 November 2026:
+
+| system | cache | packages added | apk 3.0.8 | catalyst | + sync: apk, catalyst |
+|---|---|---|---|---|---|
+| 39 packages | warm | 39 | 1.58 s | 0.91 s | 2.02 s, 0.92 s |
+| 39 packages | cold | 39 | 1.72 s | 1.16 s | 2.15 s, 1.17 s |
+| 244 packages | warm | 8 | 0.93 s | 0.94 s | 1.50 s, 0.95 s |
+| 244 packages | cold | 8 | 1.07 s | 1.09 s | 1.38 s, 1.10 s |
+
+`CATALYST_PROF=1` prints, on stderr, how long each step of a run took.
 
 ## Tests
 

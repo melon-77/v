@@ -35,6 +35,7 @@ pub mod engine;
 pub mod error;
 pub mod fetch;
 pub mod index;
+pub mod prof;
 pub mod progress;
 pub mod repo;
 pub mod rootfs;

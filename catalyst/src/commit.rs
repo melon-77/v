@@ -943,6 +943,7 @@ pub fn switch(
     for c in conflicts {
         eprintln!("oct: warning: {c}");
     }
+    crate::prof::mark("switch: records loaded, ownership");
 
     let mut s = Switch {
         root: root.to_path_buf(),
@@ -1021,6 +1022,7 @@ pub fn switch(
     }
     s.run_deferred();
     s.crash("placed");
+    crate::prof::mark("switch: placed");
 
     // 2. removed packages
     for op in &plan.ops {
@@ -1053,11 +1055,15 @@ pub fn switch(
         }
     }
     s.crash("removed");
+    crate::prof::mark("switch: removed");
 
     // 3. the world
     let world: Vec<crate::adb::Dependency> =
         plan.world.iter().filter_map(|w| crate::adb::Dependency::parse(w).ok()).collect();
-    db::write_atomic(&Db::state(root).join("world"), db::format_world(&world).as_bytes())?;
+    // without an fsync of its own: on a big change that would commit the
+    // metadata of every entry placed so far, which the final syncfs does
+    // anyway; a crash before that redoes this step from the journal
+    db::write_replace(&Db::state(root).join("world"), db::format_world(&world).as_bytes())?;
     s.crash("world");
 
     // 4. owners once more, now that all files (etc/passwd too) are in place
@@ -1084,6 +1090,7 @@ pub fn switch(
         }
     }
 
+    crate::prof::mark("switch: world, owners");
     // 5. triggers (§D9, apk's fire_triggers): a package's trigger script
     // runs when it was just installed/upgraded or a directory matching one
     // of its globs was modified; it gets the matching directories
@@ -1156,6 +1163,7 @@ pub fn switch(
         }
     }
     s.crash("triggers");
+    crate::prof::mark("switch: triggers");
 
     // the index: the changed packages' entries replaced (before the final
     // syncfs, so a crash is covered by the journal), or all of it rebuilt
@@ -1183,8 +1191,10 @@ pub fn switch(
         }
     }
 
+    crate::prof::mark("switch: index");
     // 6. durable, then forget the journal and the old versions
     s.sync()?;
+    crate::prof::mark("switch: final syncfs");
     let Switch { j, rep, .. } = s;
     j.remove(root)?;
     for op in &plan.ops {

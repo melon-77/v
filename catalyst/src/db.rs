@@ -751,6 +751,14 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// Replaces a file through a temporary name, without an fsync: for writes
+/// that something later makes durable (a switch's final `syncfs`).
+pub fn write_replace(path: &Path, data: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("catalyst-tmp");
+    fs::write(&tmp, data)?;
+    fs::rename(&tmp, path)
+}
+
 /// Points `Programs/<name>/Current` at `version` atomically.
 pub fn set_current(root: &Path, name: &str, version: &str) -> io::Result<()> {
     let d = root.join(PROGRAMS).join(name);

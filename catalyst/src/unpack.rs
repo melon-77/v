@@ -247,6 +247,13 @@ fn unpack_into(
     let chown = sys::is_root();
     let mut st = Stats::default();
     let mut made: HashSet<Vec<u8>> = HashSet::new();
+    // directories made setgid: what is created in them takes their group,
+    // so it needs its owner set even when that is root
+    let mut setgid: HashSet<Vec<u8>> = HashSet::new();
+    // a new file is root's already when catalyst runs as root (outside a setgid directory)
+    let needs_chown = |rel: &[u8], uid: u32, gid: u32, setgid: &HashSet<Vec<u8>>| {
+        (uid, gid) != (0, 0) || setgid.contains(crate::rootfs::split_rel(rel).0)
+    };
     let mut buf = vec![0u8; 256 * 1024];
     while let Some(mut e) = pr.next_entry()? {
         let rel = e.path.to_vec();
@@ -262,6 +269,9 @@ fn unpack_into(
                 Err(err) => return Err(err.into()),
             }
             apply_acl(&p, acl, ids, chown, false)?;
+            if acl.mode & 0o2000 != 0 {
+                setgid.insert(rel.clone());
+            }
             made.insert(rel);
             continue;
         }
@@ -281,8 +291,9 @@ fn unpack_into(
                         progress(n as u64);
                     }
                 }
-                if chown {
-                    fchown(&out, Some(ids.uid(acl.user.as_deref())), Some(ids.gid(acl.group.as_deref())))?;
+                let (uid, gid) = (ids.uid(acl.user.as_deref()), ids.gid(acl.group.as_deref()));
+                if chown && needs_chown(&rel, uid, gid, &setgid) {
+                    fchown(&out, Some(uid), Some(gid))?;
                 }
                 out.set_permissions(fs::Permissions::from_mode(acl.mode & 0o7777))?;
                 out.set_times(mtime(fe.mtime))?;
@@ -292,8 +303,9 @@ fn unpack_into(
             }
             FileKind::Symlink(t) => {
                 symlink(OsStr::from_bytes(t), &p)?;
-                if chown {
-                    lchown(&p, Some(ids.uid(acl.user.as_deref())), Some(ids.gid(acl.group.as_deref())))?;
+                let (uid, gid) = (ids.uid(acl.user.as_deref()), ids.gid(acl.group.as_deref()));
+                if chown && needs_chown(&rel, uid, gid, &setgid) {
+                    lchown(&p, Some(uid), Some(gid))?;
                 }
             }
             FileKind::CharDev(dev) | FileKind::BlockDev(dev) | FileKind::Fifo(dev) => {

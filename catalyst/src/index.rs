@@ -283,16 +283,27 @@ impl Index {
     /// Bucket `b`, read and checked once (lookups then use the copy). A bucket
     /// marked as not empty whose file is missing or damaged is an error.
     fn load(&self, b: u32) -> Result<()> {
-        let mut cache = self.buckets.borrow_mut();
-        if !cache.contains_key(&b) {
-            let bk = if has(&self.present, b) {
-                let p = self.dir.join("files").join(bucket_name(b));
-                let t = fs::read_to_string(&p).map_err(|e| Error::Format(format!("index: bucket {}: {e}", bucket_name(b))))?;
-                parse_bucket(&t)?
-            } else {
-                Bucket::new()
-            };
-            cache.insert(b, bk);
+        if !self.buckets.borrow().contains_key(&b) {
+            let bk = read_bucket(&self.dir, &self.present, b)?;
+            self.buckets.borrow_mut().insert(b, bk);
+        }
+        Ok(())
+    }
+
+    /// Like [`Index::load`] for many buckets: a big change touches thousands,
+    /// and read one after another from a cold cache each is a wait for the
+    /// disk, so they are read on several threads.
+    fn load_many(&self, ids: impl IntoIterator<Item = u32>) -> Result<()> {
+        let mut todo: Vec<u32> = {
+            let c = self.buckets.borrow();
+            ids.into_iter().filter(|b| !c.contains_key(b)).collect()
+        };
+        todo.sort_unstable();
+        todo.dedup();
+        // only the path and the bit map go to the threads (the index's caches are not Sync)
+        let (dir, present) = (&self.dir, &self.present);
+        for (b, bk) in on_threads(&todo, |&b| read_bucket(dir, present, b).map(|bk| (b, bk)))? {
+            self.buckets.borrow_mut().insert(b, bk);
         }
         Ok(())
     }
@@ -340,20 +351,76 @@ impl Index {
     /// the aliases. Damage there is then found before the switch.
     pub fn preload(&self, rfs: &mut RootFs, pkgs: &[&PkgState]) -> Result<()> {
         self.aliases_loaded()?;
+        let mut ids: HashSet<u32> = HashSet::new();
         for p in pkgs {
             for r in &p.recs {
-                self.load(bucket_of(&r.path))?;
-                self.load(bucket_of(rootfs::split_rel(&r.path).0))?;
+                ids.insert(bucket_of(&r.path));
+                ids.insert(bucket_of(rootfs::split_rel(&r.path).0));
                 if let Some(c) = canon_of(rfs, &r.path) {
-                    self.load(bucket_of(&c))?;
+                    ids.insert(bucket_of(&c));
                 }
             }
             for t in &p.meta.triggers {
-                self.load(bucket_of(t.trim_start_matches('+').trim_matches('/').as_bytes()))?;
+                ids.insert(bucket_of(t.trim_start_matches('+').trim_matches('/').as_bytes()));
             }
         }
-        Ok(())
+        self.load_many(ids)
     }
+}
+
+fn read_bucket(dir: &Path, present: &[u8], b: u32) -> Result<Bucket> {
+    if !has(present, b) {
+        return Ok(Bucket::new());
+    }
+    let p = dir.join("files").join(bucket_name(b));
+    let t = fs::read_to_string(&p).map_err(|e| Error::Format(format!("index: bucket {}: {e}", bucket_name(b))))?;
+    parse_bucket(&t)
+}
+
+/// `f` over `items`: on the calling thread for a few, spread over threads
+/// for many; the results in the order of `items`, or the first error.
+fn on_threads<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
+    if items.len() < 64 {
+        return items.iter().map(&f).collect();
+    }
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 16);
+    let per = (items.len() + threads - 1) / threads;
+    let f = &f;
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = items.chunks(per).map(|part| sc.spawn(move || part.iter().map(f).collect::<Result<Vec<R>>>())).collect();
+        let mut out = Vec::with_capacity(items.len());
+        for h in hs {
+            out.extend(h.join().map_err(|_| Error::Format("index: a worker thread failed".into()))??);
+        }
+        Ok(out)
+    })
+}
+
+/// Writes the buckets of `list` into the directory `files` (an empty one
+/// removed), on several threads when there are many. An existing bucket file
+/// is rewritten in place: creating or renaming files takes the directory's
+/// lock, which would make the threads wait for each other. That is safe
+/// because nothing reads the index while it is written (an update removes
+/// `state` first, a rebuild writes a new directory) and every bucket carries
+/// its own checksum.
+fn write_buckets(files: &Path, list: &[(u32, &Bucket)]) -> Result<()> {
+    on_threads(list, |(b, bk)| -> Result<()> {
+        let p = files.join(bucket_name(*b));
+        if bk.is_empty() {
+            return match fs::remove_file(&p) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            };
+        }
+        let data = format_bucket(bk);
+        match fs::OpenOptions::new().write(true).truncate(true).open(&p) {
+            Ok(mut f) => Ok(io::Write::write_all(&mut f, data.as_bytes())?),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(fs::write(&p, data)?),
+            Err(e) => Err(e.into()),
+        }
+    })?;
+    Ok(())
 }
 
 fn read_aliases(dir: &Path, sum: &str) -> Result<HashMap<Vec<u8>, Vec<(Vec<u8>, String)>>> {
@@ -484,8 +551,9 @@ pub fn rebuild(root: &Path, pkgs: &[PkgState], durable: bool) -> Result<()> {
     }
     fs::create_dir_all(tmp.join("files"))?;
     let mut present = vec![0u8; (BUCKETS / 8) as usize];
-    for (b, bk) in &buckets {
-        fs::write(tmp.join("files").join(bucket_name(*b)), format_bucket(bk))?;
+    let list: Vec<(u32, &Bucket)> = buckets.iter().map(|(b, bk)| (*b, bk)).collect();
+    write_buckets(&tmp.join("files"), &list)?;
+    for b in buckets.keys() {
         set(&mut present, *b, true);
     }
     let al = format_aliases(&aliases);
@@ -531,10 +599,9 @@ pub fn update(
         }
     }
     // everything read (and checked) first, while the old index is whole
-    for &b in &touched {
-        ix.load(b)?;
-    }
+    ix.load_many(touched.iter().copied())?;
     ix.aliases_loaded()?;
+    crate::prof::mark("  index: buckets read");
     invalidate(root);
     let mut buckets: HashMap<u32, Bucket> = touched.iter().map(|&b| (b, ix.buckets.borrow()[&b].clone())).collect();
     for bk in buckets.values_mut() {
@@ -560,22 +627,15 @@ pub fn update(
             }
         }
     }
+    crate::prof::mark("  index: claims merged");
     fs::create_dir_all(d.join("files"))?;
     let mut present = ix.present.clone();
+    let list: Vec<(u32, &Bucket)> = buckets.iter().map(|(b, bk)| (*b, bk)).collect();
+    write_buckets(&d.join("files"), &list)?;
     for (b, bk) in &buckets {
-        let p = d.join("files").join(bucket_name(*b));
-        if bk.is_empty() {
-            match fs::remove_file(&p) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-            set(&mut present, *b, false);
-        } else {
-            write_replace(&p, format_bucket(bk).as_bytes())?;
-            set(&mut present, *b, true);
-        }
+        set(&mut present, *b, !bk.is_empty());
     }
+    crate::prof::mark("  index: buckets written");
     let mut aliases: Vec<(Vec<u8>, Vec<u8>, String)> = ix
         .aliases
         .borrow()
@@ -754,6 +814,7 @@ pub fn installed_versions(root: &Path) -> io::Result<(BTreeMap<String, String>, 
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((out, false)),
         Err(e) => return Err(e),
     };
+    let mut names = Vec::new();
     for e in rd {
         let e = e?;
         let name = e.file_name().to_string_lossy().into_owned();
@@ -761,16 +822,25 @@ pub fn installed_versions(root: &Path) -> io::Result<(BTreeMap<String, String>, 
             odd = true;
             continue;
         }
-        let t = match fs::read_link(e.path().join(db::CURRENT)) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
+        names.push(name);
+    }
+    // a readlink and a stat per package: on a cold cache each waits for the
+    // disk, so they are done on several threads
+    let found = on_threads(&names, |name| -> Result<Option<(String, Option<String>)>> {
+        let d = programs.join(name);
+        let Ok(t) = fs::read_link(d.join(db::CURRENT)) else { return Ok(None) };
         let v = t.to_string_lossy().into_owned();
-        if !db::safe_version(&v) || !fs::symlink_metadata(e.path().join(&v)).map_or(false, |m| m.is_dir()) {
-            odd = true;
-            continue;
+        let ok = db::safe_version(&v) && fs::symlink_metadata(d.join(&v)).map_or(false, |m| m.is_dir());
+        Ok(Some((name.clone(), ok.then_some(v))))
+    })
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    for (name, v) in found.into_iter().flatten() {
+        match v {
+            Some(v) => {
+                out.insert(name, v);
+            }
+            None => odd = true,
         }
-        out.insert(name, v);
     }
     Ok((out, odd))
 }

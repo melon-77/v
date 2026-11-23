@@ -363,6 +363,7 @@ fn cmd_manifest(o: &Opts) -> Result<bool, Error> {
 }
 
 fn main() -> ExitCode {
+    catalyst::prof::mark("start");
     let o = match parse_args() {
         Ok(o) => o,
         Err(m) => {
