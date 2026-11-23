@@ -295,6 +295,10 @@ These are open on purpose. Each gets settled before the phase that needs it.
   keep them. After a power cut the packages being added may be incomplete: the next run finds and removes them
   (`catalyst/README.md`, "Unsynced adds"). Adds of 32 MiB or more are still synced; that bound is the build machine's
   addition (above it the flushes are a few percent of an install) and can go if the owner wants.
+  **Correction, the same day:** the third rule was described to the owner as "what apk does", and that was wrong.
+  apk syncs once at the end of every change on an installed system (it skips that only with `--root`, as the
+  benchmark ran it, or in a chroot). So an unsynced add is on disk later than apk's would be. The decision was made
+  without that fact and is back with the owner; one `syncfs` at the end of an add would close the difference.
 - **Defaults for five open questions** (21 November 2026). The owner had no preference yet and took the
   recommended defaults ("yeah sure put them on record"). Each can still change.
   - *GSettings schemas:* glib gets a trigger that runs `glib-compile-schemas` when an installed package changes

@@ -10,6 +10,34 @@ How this works:
 
 ---
 
+## 2026-11-23: correction: apk does sync on an installed system; I had said it never does
+
+**My mistake, in every report and table since the benchmarks began:** I wrote that apk leaves the disk to the kernel. It does so only the way the benchmark runs it.
+
+**What apk 3.0.8 does** (`sync_if_needed` in its `src/commit.c`, read at the tag, and traced on the binary):
+- **On an installed system** it calls `sync()` once, at the end of every change.
+- **With `--root`** (how the benchmark runs it), as a user, or in a chroot without `/proc`, it does not. The trace of the benchmark's command shows no sync call; with `--sync` it shows one.
+- **It has no journal and no ordering inside a change:** a power cut in the middle can leave it half done.
+
+**What that changes:**
+- **The fair comparison for an installed system is apk with its sync.** First numbers with `apk --sync` (12 runs each, not yet the strict benchmark):
+
+| job | apk with `--root` | apk with `--sync` | catalyst |
+|---|---|---|---|
+| add nano, 39 packages, warm | 13.1 ms | 16.5 ms | 10.9 ms |
+| del nano, 39 packages, warm | 10.6 ms | 13.3 ms | 13.8 ms |
+
+- **Removing nano was not really 1.28x slower:** against apk as installed it is level.
+- **An unsynced add gives less than apk does** on an installed system: apk's is on disk when the command returns, catalyst's a few seconds later. The owner chose "Skip for adds" after I called skipping all flushes "what apk does". That was wrong, so the decision is back with the owner. One `syncfs` at the end of an add would make it as durable as apk's, at about 3.5 ms: about 14.5 ms against apk's 16.5.
+
+**Still to do:** the strict benchmark again with `apk --sync` as the main comparison, and new result images (the two in the owner's Documents say "apk never waits").
+
+**How it was found:** the research the owner asked for read apk's source; I had only ever measured apk with `--root`.
+
+**About the audit below (756c953):** Gemini's findings are real. The two worst are mine as written: the check after a reboot took every package installed or upgraded since the mark for an unsynced add, so an upgraded package with a damaged record or a shortened file would have been removed instead of repaired; and it could delete the journal of a synced change, which I had noticed and not fixed. Their fixes are in the tree here (77 tests pass) and are being reviewed, kill-tested and benchmarked.
+
+---
+
 ## 2026-11-23: cleanup & safety fixes after the aggressive optimization commits (`37c652d..ef805c0`)
 
 At the owner's request, audited the recent performance commits (`unsynced` adds, `idxcache`, fast PEM key reader, `needs_chown` skip, and parallel `remove_old`) and fixed 7 safety/correctness bugs directly on `testing` without regressing the speed wins (all 77 `cargo test --release` tests pass with 0 warnings, including 3 new regression tests in `catalyst/tests/engine_cmds.rs`).

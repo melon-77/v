@@ -572,8 +572,10 @@ Setup:
 - apk-tools is 3.0.8 with `--no-cache`. catalyst reads the local repository in
   place.
 - Cold runs drop the caches first.
-- `+sync` adds a `sync -f` right after the command. catalyst syncs itself; apk
-  leaves writeback to the kernel.
+- `+sync` adds a `sync -f` right after the command. catalyst syncs itself. apk
+  was run with `--root`, and then it does not sync; on an installed
+  system it calls `sync()` once at the end of every change (see "What apk
+  does about the disk" under The strict comparison).
 
 The sets:
 - **base** is `valence-base`: 39 packages, 60 MB.
@@ -625,7 +627,7 @@ The next speedups are measured but not done:
 One-package jobs (`add nano`, `--no-scripts`, 7 runs each; one root per
 tool, each add undone by an untimed `del`; 23 November 2026). "No index"
 is the committed code before the lookup index; "+ sync" adds a `sync -f`
-after the command, since apk leaves writeback to the kernel:
+after the command, since apk run with `--root` does not sync:
 
 | set | cache | apk 3.0.8 | catalyst, no index | catalyst, index | catalyst / apk | + sync: apk, catalyst |
 |---|---|---|---|---|---|---|
@@ -658,8 +660,32 @@ It gives a verdict only when both of these hold:
 Anything else is "no clear difference". "+ sync" adds a `sync -f` to both
 tools. 23 November 2026, the 39-package and the 244-package system,
 `--no-scripts`. `add nano` is an add that is not synced (see Unsynced
-adds), as apk's never are; the Cataclysm install is over 32 MiB, so
-catalyst syncs it:
+adds); the Cataclysm install is over 32 MiB, so catalyst syncs it. apk
+ran with `--root` in all of these, so it did not sync; read the "+ sync"
+columns for an installed system (next paragraph):
+
+**What apk does about the disk** (corrected on 23 November 2026; this
+file and the reports said until then that apk never syncs). apk-tools
+3.0.8 ends every change with one `sync()` of all file systems
+(`sync_if_needed` in its `src/commit.c`), unless `--no-sync` is given,
+`--root` is given, it runs as a user, or it is not on the host (it looks
+for the kernel thread in `/proc/2/stat`, so not in a chroot without
+`/proc`). A trace of the benchmark's command shows no sync call; with
+`--sync` it shows one. So:
+- on an installed system apk's change is on disk when the command
+  returns, and an add of catalyst's that is not synced is not, for a few
+  seconds: there catalyst gives less than apk, which the "Unsynced adds"
+  decision did not know;
+- apk has no ordering inside a change and no journal, so a power cut in
+  the middle of one can leave it half done; catalyst's upgrades and
+  removals cannot be left so;
+- the fair comparison for an installed system is apk with its sync. A
+  first measurement with `apk --sync` (12 runs each, not yet the strict
+  benchmark): `add nano` 16.5 ms against catalyst's 10.9 ms (13.1 ms
+  without the sync); `del nano` 13.3 ms against 13.8 ms (10.6 ms without).
+  The "+ sync" columns below are close to that, but both tools pay there
+  for starting a `sync` program, about 5 ms.
+
 
 | system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | + sync: apk, catalyst | ratio (95% CI) | verdict |
 |---|---|---|---|---|---|---|---|---|---|
