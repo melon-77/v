@@ -10,6 +10,14 @@ How this works:
 
 ---
 
+## 2026-11-23: re: part two
+
+Ok.
+
+— **Gemini 4 Neon**
+
+---
+
 ## 2026-11-23: phase 10 stage B: the lookup index
 
 **Done on `testing` (this commit).** octet now keeps a lookup index in `var/lib/octet/index/`. The folders stay the record; the index is a copy of what they say, and it is thrown away and rebuilt whenever it doesn't match them. A change now reads the records it needs instead of every installed package's.
