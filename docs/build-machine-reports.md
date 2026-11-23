@@ -10,6 +10,41 @@ How this works:
 
 ---
 
+## 2026-11-23: three more files asked for ahead; what the cases at the line are
+
+**What changed since the entry below.** Three more hints, the same kind as before (`catalyst/README.md`, "Files asked for ahead"):
+- the package files that are already there, as soon as the plan is known;
+- the lists of users and groups;
+- the root's architecture is read by the run's own thread only where a repository is given by its directory.
+
+**What it gave.** About 1 ms on a one-package install from a cold cache on the small ext4 system: 41 to 42 ms in four runs, where the commit below took 42 to 44 ms in three.
+
+**The tables in the README are now this binary's** (15 runs a case, apk with `--sync`, catalyst with `--clean-later`, both tools from fresh copies):
+
+| | cases | faster | no clear difference | slower | the commit below |
+|---|---|---|---|---|---|
+| btrfs, when the command returns | 22 | 21 | 1 | 0 | 19 / 3 / 0 |
+| btrfs, until on disk | 22 | 18 | 4 | 0 | 16 / 6 / 0 |
+| ext4, when the command returns | 26 | 14 | 12 | 0 | 17 / 9 / 0 |
+| ext4, until on disk | 26 | 14 | 11 | 1 | 15 / 11 / 0 |
+
+**Why ext4 shows fewer "faster" with code that is no slower.** Several cases on the small ext4 system are 6 to 10% ahead, and the rule wants the interval's end below 0.95, so the same code is called faster in one run and "no clear difference" in the next.
+- The case this work was about, the one-package install from a cold cache: 42 ms against 46 ms in the table and not called faster. In six other quiet runs that evening it took 41 to 44 ms against 46 to 49 ms and was called faster in four.
+- The upgrades of one package on the small system moved the same way between the two runs.
+- What holds in every run: catalyst is not slower in these cases, and ahead.
+- The one "slower" until on disk is the removal of a big package from the big system from a warm cache (257 ms against 177 ms), a known weak spot whose times vary most.
+
+**Tried and not kept:** reading every package's `Current` link ahead on threads of their own. No gain on the small system; the cold install on the big system took 79 ms instead of 63 to 67.
+
+**Review and tests.** A fourth round by the independent reviewer found no defect in the non-test code and the real loading path (`repo::locate`) unchanged; its points on tests and comments are fixed. The new assertions were seen to fail with their code broken on purpose (five more ways).
+- `cargo test`: 60 unit, 14 command, 29 on the real repository.
+- Kill test: 180 rounds, 171 killed while running, 0 failures. Power-cut test: 135 rounds on btrfs, ext4 and XFS, 0 failures.
+- The binary that was tested and measured is the one this source builds (same checksum).
+
+**For the developers.** Nothing to do. The three findings on 5159cf4 in the entry below are still open.
+
+---
+
 ## 2026-11-23: files asked for ahead of their use; the benchmark runs both tools from fresh copies; three findings on 5159cf4
 
 **Why.** One case was still slower than apk: a one-package install from a cold cache on the small system on ext4, 60 ms against 52 ms. The owner, asked whether to go on with it: "Yes, go on".

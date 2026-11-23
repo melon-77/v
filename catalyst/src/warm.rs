@@ -14,8 +14,8 @@
 //! little time on another thread and nothing else; no error of a hint is
 //! reported. Nothing is written, made or locked. A file asked for by its
 //! path is opened without setting its time of last access where the
-//! system allows that; the keys of a root are read as the run reads them a
-//! moment later.
+//! system allows that; what is found inside a root (its keys, its lists of
+//! users and groups, its architecture) is read as the run reads it.
 //!
 //! The threads of hints make file system calls only, and none into a
 //! library that tidies up when the process ends (the cryptographic one

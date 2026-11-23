@@ -96,7 +96,9 @@ pub fn arches(o: &Options, root: &Path) -> Vec<String> {
 /// ([`crate::warm`]: a hint, nothing is decided by it). That is the first
 /// files of the index of installed files and, for a run that plans with
 /// the repositories (`repos`), their indexes, the parsed copies of those,
-/// the freshness records and the keys. `max_age` is the one the run will
+/// the freshness records and the keys; and the small things every run
+/// reads on its way (the list of `Programs`, the lists of users and
+/// groups, the root's architecture). `max_age` is the one the run will
 /// plan with ([`index_max_age`]): a remote repository's cached index is
 /// asked for only when the run will use it as it is.
 ///
@@ -112,11 +114,13 @@ fn hint_start(o: &Options, repos: bool, max_age: Option<std::time::Duration>) {
     }
     let Ok(root) = abs_root(o, false) else { return };
     // catalyst's own places only where they are real directories, as the
-    // run itself insists before it uses them
+    // run itself insists before it uses them. Looked at from the last to
+    // the first: the run's own thread looks at them from the first on, and
+    // so each finds some of them looked up by the other.
     fn own_places_are_real(root: &Path) -> bool {
-        Db::own_dirs(root).iter().all(|d| db::real_dir(d).is_ok())
+        Db::own_dirs(root).iter().rev().all(|d| db::real_dir(d).is_ok())
     }
-    let (r, keys_dir) = (root.clone(), o.keys_dir.clone());
+    let (r, keys_dir, arch_given) = (root.clone(), o.keys_dir.clone(), o.arch.is_some());
     crate::warm::later(move || {
         if repos {
             // the keys are what the run reads first
@@ -138,6 +142,17 @@ fn hint_start(o: &Options, repos: bool, max_age: Option<std::time::Duration>) {
             for f in ["state", "meta", "aliases"] {
                 advise(&ix.join(f));
             }
+            // what every run reads on its way: the list of Programs (the
+            // packages' Current links are read from it), the lists of
+            // users and groups, and the root's architecture where none was
+            // given
+            if let Ok(rd) = fs::read_dir(Db::programs(&r)) {
+                rd.for_each(drop);
+            }
+            unpack::IdMap::hint(&r);
+            if !arch_given {
+                let _ = repo::root_arches(&r);
+            }
             if repos {
                 // the freshness records, as repo::Freshness::load takes
                 // them: files with a name of 64 characters, no link followed
@@ -158,12 +173,14 @@ fn hint_start(o: &Options, repos: bool, max_age: Option<std::time::Duration>) {
     // hashing is the cryptographic library's: they are worked out here, on
     // the run's own thread, because the threads of hints make file system
     // calls only (crate::warm says why). What is read for it, the root's
-    // architecture and its list of repositories, the run reads next anyway.
+    // list of repositories and, for a repository given by its directory,
+    // the root's architecture, the run reads next anyway.
     let cache = root.join(db::CACHE_DIR);
-    let arch = arches(o, &root).swap_remove(0);
+    let specs = repo_specs(o, &root).unwrap_or_default();
+    let arch = if specs.iter().all(|s| repo::names_its_index(s)) { String::new() } else { arches(o, &root).swap_remove(0) };
     let mut big: Vec<PathBuf> = Vec::new();
-    for s in repo_specs(o, &root).unwrap_or_default() {
-        big.extend(repo::files_read(&s, &arch, &cache, max_age));
+    for s in &specs {
+        big.extend(repo::files_read(s, &arch, &cache, max_age));
     }
     if big.is_empty() {
         return;
@@ -827,6 +844,24 @@ fn transact_at(
         }
         println!("OK: nothing to do; {} packages installed", db.installed.len());
         return Ok(true);
+    }
+
+    // The package files are what the workers that unpack them read first.
+    // Those that are here already (not one that is still to be fetched) are
+    // asked for now (crate::warm), while the plan is printed and the lists
+    // of users and groups are read: the sixteen biggest, in the order in
+    // which the workers take the jobs.
+    if !o.simulate {
+        let mut first: Vec<(u64, PathBuf)> = jobs.iter().filter(|j| j.url.is_none()).map(|j| (j.work, j.job.src.clone())).collect();
+        first.sort_by_key(|(work, _)| std::cmp::Reverse(*work));
+        first.truncate(16);
+        if !first.is_empty() {
+            crate::warm::later(move || {
+                for (_, p) in &first {
+                    crate::warm::advise(p);
+                }
+            });
+        }
     }
 
     let (mut ni, mut nu, mut nr) = (0, 0, 0);

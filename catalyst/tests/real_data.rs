@@ -1790,6 +1790,9 @@ fn a_run_asks_ahead_for_the_files_it_reads() {
     assert!(in_root(&h, "var/lib/catalyst/index/state") && in_root(&h, "var/lib/catalyst/index/meta"), "the index of installed files: {h:?}");
     let records = format!("{r}/var/lib/catalyst/indexes/");
     assert!(h.iter().any(|l| l.starts_with(&records) && l.len() == records.len() + 64), "a freshness record: {h:?}");
+    let repo_dir = format!("{}/", repo.to_string_lossy().trim_end_matches('/'));
+    assert!(h.iter().any(|l| l.starts_with(&format!("{repo_dir}tree-")) && l.ends_with(".apk")), "the package to unpack: {h:?}");
+    assert_eq!(h.iter().filter(|l| l.ends_with(".apk")).count(), new.len(), "one package file for each package installed: {h:?}");
     // The segments asked for while the packages were unpacked are segments
     // of their paths: told by what the index holds now, not by the function
     // that asked. After the add each of them names one of the new packages.
@@ -1808,14 +1811,20 @@ fn a_run_asks_ahead_for_the_files_it_reads() {
     // every hint names a file that is there, inside the root, the repository or the keys
     for l in &h {
         assert!(std::path::Path::new(l).is_file(), "{l} was asked for and is no file");
-        assert!(l.starts_with(&format!("{r}/")) || *l == index || l.starts_with(&format!("{keys}/")), "{l}");
+        assert!(l.starts_with(&format!("{r}/")) || l.starts_with(&repo_dir) || l.starts_with(&format!("{keys}/")), "{l}");
     }
 
     let out = oct_real(&root, &[("CATALYST_HINTS", "show")], &["del", "tree"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let h = hints(&out);
     assert!(in_root(&h, "var/lib/catalyst/index/state"), "{h:?}");
-    assert!(h.iter().all(|l| l.starts_with(&format!("{r}/var/lib/catalyst/index/"))), "a removal asked for more than the index: {h:?}");
+    for no in [format!("{keys}/"), repo_dir.clone(), format!("{r}/var/cache/catalyst/"), format!("{r}/var/lib/catalyst/indexes/"), format!("{r}/etc/apk/")] {
+        assert!(!h.iter().any(|l| l.starts_with(&no)), "a removal asked for something of {no}: {h:?}");
+    }
+    // nothing is fetched or unpacked for a plan that is only shown
+    let out = oct_real(&root, &[("CATALYST_HINTS", "show")], &["--simulate", "add", "tree"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!hints(&out).iter().any(|l| l.ends_with(".apk")), "a package file was asked for under --simulate");
 
     // The root's own keys and list of repositories, and decoys beside the
     // freshness records: a name of another length, and a link under a name
@@ -1832,6 +1841,8 @@ fn a_run_asks_ahead_for_the_files_it_reads() {
     }
     assert!(!own_keys.is_empty(), "no public key in {keys}");
     std::fs::write(etc.join("repositories"), format!("{index}\n")).unwrap();
+    std::fs::write(root.join("etc/passwd"), "root:x:0:0:root:/root:/bin/sh\n").unwrap();
+    std::fs::write(root.join("etc/group"), "root:x:0:\n").unwrap();
     let records = root.join("var/lib/catalyst/indexes");
     std::fs::write(records.join("short"), b"x").unwrap();
     let link = "l".repeat(64);
@@ -1848,6 +1859,7 @@ fn a_run_asks_ahead_for_the_files_it_reads() {
         assert!(in_root(&h, &format!("etc/apk/keys/{k}")), "the root's key {k}: {h:?}");
     }
     assert!(h.iter().any(|l| *l == index), "the index its list of repositories names: {h:?}");
+    assert!(in_root(&h, "etc/passwd") && in_root(&h, "etc/group"), "the lists of users and groups: {h:?}");
     assert!(h.iter().any(|l| l.starts_with(&format!("{r}/var/cache/catalyst/parsed-"))), "{h:?}");
     assert!(!in_root(&h, "var/lib/catalyst/indexes/short") && !in_root(&h, &format!("var/lib/catalyst/indexes/{link}")), "a decoy was taken for a freshness record: {h:?}");
     assert!(root.join("usr/bin/tree").exists());

@@ -66,6 +66,17 @@ impl IdMap {
         IdMap { users: parse_ids(&read(b"etc/passwd")), groups: parse_ids(&read(b"etc/group")) }
     }
 
+    /// Reads the files that [`Self::load`] will read, and drops them: a
+    /// hint ([`crate::warm`]).
+    pub fn hint(root: &Path) {
+        let rfs = RootFs::new(root);
+        for p in [&b"etc/passwd"[..], b"etc/group"] {
+            if let Ok(Some(_)) = rfs.read_file(p, 16 << 20) {
+                crate::warm::named(&rfs.host(p));
+            }
+        }
+    }
+
     fn lookup(m: &HashMap<String, u32>, name: Option<&str>) -> (u32, bool) {
         match name {
             Some(n) => match m.get(n) {

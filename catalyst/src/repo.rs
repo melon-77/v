@@ -180,11 +180,7 @@ fn parse_repositories(t: &str) -> std::result::Result<Vec<String>, String> {
 /// URL as a v2 repository (`APKINDEX.tar.gz`); catalyst only reads v3 indexes
 /// and looks for `Packages.adb` there.
 pub fn locate(spec: &str, arch: &str) -> (String, String, String) {
-    let (kw, raw) = match spec.split_once(' ') {
-        Some((k @ ("v3" | "ndx"), u)) => (k, u.trim()),
-        _ => ("", spec.trim()),
-    };
-    let ndx = kw == "ndx" || (kw.is_empty() && (raw.ends_with(".adb") || raw.ends_with(".tar.gz")));
+    let (ndx, raw) = split_spec(spec);
     let url = raw.trim_end_matches('/');
     if ndx {
         let base = match url.rfind('/') {
@@ -272,6 +268,24 @@ fn url_key(index_url: &str) -> String {
 /// Where the index of a remote repository is kept once it was fetched.
 fn cached_index(cache_dir: &Path, index_url: &str) -> PathBuf {
     cache_dir.join(format!("Packages.{}.adb", &url_key(index_url)[..8]))
+}
+
+/// A repository's line taken apart: whether it names the index file itself
+/// (`ndx`, or no keyword and a name that ends in `.adb` or `.tar.gz`), and
+/// the address in it.
+fn split_spec(spec: &str) -> (bool, &str) {
+    let (kw, raw) = match spec.split_once(' ') {
+        Some((k @ ("v3" | "ndx"), u)) => (k, u.trim()),
+        _ => ("", spec.trim()),
+    };
+    (kw == "ndx" || (kw.is_empty() && (raw.ends_with(".adb") || raw.ends_with(".tar.gz"))), raw)
+}
+
+/// Whether `spec` names its index file itself. If not it names the
+/// repository's directory, and the index is the one of an architecture in
+/// it: only then does [`locate`] use the architecture it is given.
+pub fn names_its_index(spec: &str) -> bool {
+    split_spec(spec).0
 }
 
 /// Whether the cached copy `dest` of a remote index is used without asking
@@ -722,6 +736,11 @@ mod files_read_tests {
         assert_eq!(files_read("file:///some/where/Packages.adb", "x86_64", &cache, four_hours)[0], PathBuf::from("/some/where/Packages.adb"));
         // a repository given by its directory: the index of the architecture
         assert_eq!(files_read("/some/where", "x86_64", &cache, None)[0], PathBuf::from("/some/where/x86_64/Packages.adb"));
+        // which only such a one needs to be told
+        assert!(names_its_index("/some/where/Packages.adb") && names_its_index("ndx https://example.org/an-index"));
+        assert!(names_its_index("file:///some/where/APKINDEX.tar.gz"));
+        assert!(!names_its_index("/some/where") && !names_its_index("v3 https://example.org/repo") && !names_its_index("https://example.org/repo"));
+        assert_eq!(files_read("/some/where/Packages.adb", "", &cache, None), local);
         // a remote one of which nothing was fetched yet: the parsed copy alone
         let url = "https://example.org/repo";
         let index_url = "https://example.org/repo/x86_64/Packages.adb";
