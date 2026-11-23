@@ -834,7 +834,7 @@ the command `oct` (`oct add gcc`). The name is the owner's of 22 November 2026; 
   apk, a fixed cost per run (start-up, reading every record, the syncs), which the rest of phase 10 works on.
 - The lookup index (`var/lib/catalyst/index/`, `catalyst/README.md` "The lookup index"): a change reads only the records
   it needs, not every installed package's; the folders stay the record, and the index is rebuilt from them whenever
-  it doesn't match. Adding one package to 244 installed went from 0.21 s to 0.05 s (apk 0.03 s);
+  it doesn't match or is damaged (every file of it is checksummed). Adding one package to 244 installed went from 0.21 s to 0.05 s (apk 0.03 s);
   start-up and the syncs are next.
 - A record that can't be read stops every change before anything is unpacked; `oct fix` rebuilds it from the
   signed package (`catalyst/README.md`, "Recovery").

@@ -649,3 +649,75 @@ fn lookup_index_knows_the_directory_symlinks_and_equals_a_rebuild() {
     assert!(updated == snap(), "the updated index differs from the one rebuilt by oct fix");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `oct` on `root` with the real repository, `--no-scripts`, and `env` added.
+fn oct_real(root: &std::path::Path, env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
+    let index = repo().unwrap().join("Packages.adb");
+    let keys = std::env::var("CATALYST_KEYS").unwrap_or_else(|_| "/root/valence/keys/trusted".into());
+    let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_oct"));
+    c.args(["--root", root.to_str().unwrap(), "--repository", index.to_str().unwrap(), "--keys-dir", &keys, "--no-scripts", "--plain"]);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.args(args).output().unwrap()
+}
+
+fn fresh_root(tag: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("catalyst-rd-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+/// Gemini's audit (5b18213), bug 1: with a valid index the package list comes
+/// from its copy of every info, and `oct fix` must still find, and rebuild, a
+/// deleted `.catalyst/info`.
+#[test]
+fn fix_rebuilds_a_deleted_info_while_the_index_is_valid() {
+    if repo().is_none() {
+        return;
+    }
+    let root = fresh_root("deleted-info");
+    assert!(oct_real(&root, &[], &["--initdb", "add", "zstd-libs", "xz-libs"]).status.success());
+    let info = root.join("Programs/zstd-libs/Current/.catalyst/info");
+    std::fs::remove_file(&info).unwrap();
+    let out = oct_real(&root, &[], &["fix"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("rebuilt the record of zstd-libs"));
+    assert!(info.exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Bug 2: a record that a change through the index doesn't read can't be
+/// read, and the change is killed in its switch. Finishing it reads only what
+/// the switch read; when the index from before the switch is gone as well,
+/// `oct fix` rebuilds the record first and then finishes the switch.
+#[test]
+fn a_killed_switch_is_finished_without_the_records_it_did_not_read() {
+    if repo().is_none() {
+        return;
+    }
+    for lose_index in [false, true] {
+        let root = fresh_root(if lose_index { "killed-noindex" } else { "killed" });
+        assert!(oct_real(&root, &[], &["--initdb", "add", "zstd-libs", "xz-libs"]).status.success());
+        std::fs::write(root.join("Programs/zstd-libs/Current/.catalyst/files"), b"\x00garbled\n").unwrap();
+        let out = oct_real(&root, &[("CATALYST_CRASH_AT", "placed")], &["del", "xz-libs"]);
+        assert!(!out.status.success());
+        assert!(root.join("var/lib/catalyst/journal").exists());
+        if lose_index {
+            std::fs::remove_file(root.join("var/lib/catalyst/index/state")).unwrap();
+            let out = oct_real(&root, &[], &["upgrade"]);
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("oct fix"), "{}", String::from_utf8_lossy(&out.stderr));
+            let out = oct_real(&root, &[], &["fix"]);
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert!(String::from_utf8_lossy(&out.stdout).contains("rebuilt the record of zstd-libs"));
+        } else {
+            let out = oct_real(&root, &[], &["upgrade"]);
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        assert!(!root.join("var/lib/catalyst/journal").exists());
+        assert!(!root.join("Programs/xz-libs/Current").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

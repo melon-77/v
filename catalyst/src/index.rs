@@ -19,14 +19,24 @@
 //! - `aliases` holds the entries that reach another place through a
 //!   directory symlink (canonical path, literal path, package).
 //!
+//! Every file of the index is checked when it is read: `state` holds which
+//! buckets are not empty, the SHA-256 of `meta` and of `aliases`, and a sum
+//! of itself; each bucket starts with the SHA-256 of the rest of it. A
+//! missing, truncated or changed file makes the index unusable, and the
+//! change reads every record instead. Before a change goes through the
+//! index, everything it may look up there is read ([`Index::preload`]), so
+//! that damage is found before the switch, not in the middle of it.
+//!
 //! A change updates the index inside the switch, before its final
 //! `syncfs`, without an fsync per file (`state` removed first and written
-//! last). A crash before that `syncfs` leaves the journal, and nothing uses
-//! the index while there is a journal ([`crate::db::Db::reload`]): finishing
-//! the interrupted switch works from every record and rebuilds the index.
-//! Outside a switch (a missing or outdated index rebuilt when a root is
-//! opened, or by `oct fix`) the new index is written beside the old one,
-//! synced, and swapped in.
+//! last). A crash before that `syncfs` leaves the journal, which names the
+//! records the switch reads and the index it was planned with. Finishing an
+//! interrupted switch reads those same records with that same index while
+//! the index is still the one from before the switch ([`open_before`]), and
+//! every record otherwise. Nothing else uses the index while there is a
+//! journal ([`crate::db::Db::reload`]). Outside a switch (a missing or
+//! outdated index rebuilt when a root is opened, or by `oct fix`) the new
+//! index is written beside the old one, synced, and swapped in.
 //!
 //! The index is canonical: the same installed packages give the same files,
 //! whether it was updated change by change or rebuilt.
@@ -45,7 +55,9 @@ use crate::error::{Error, Result};
 use crate::rootfs::{self, RootFs};
 
 pub const INDEX_DIR: &str = "var/lib/catalyst/index";
-const HEADER: &str = "catalyst-index 1";
+const HEADER: &str = "catalyst-index 2";
+/// A bucket file's first line: this, a space, and the SHA-256 of the rest.
+const BUCKET_HEADER: &str = "catalyst-bucket";
 const BUCKETS: u32 = 4096;
 
 fn bucket_of(path: &[u8]) -> u32 {
@@ -98,8 +110,14 @@ fn parse_names(f: &str) -> Vec<String> {
 }
 
 fn parse_bucket(text: &str) -> Result<Bucket> {
+    let damaged = || Error::Format("index: damaged bucket".into());
+    let (head, body) = text.split_once('\n').ok_or_else(damaged)?;
+    let sum = head.strip_prefix(BUCKET_HEADER).and_then(|s| s.strip_prefix(' ')).ok_or_else(damaged)?;
+    if sum_of(body.as_bytes()) != sum {
+        return Err(damaged());
+    }
     let mut b = Bucket::new();
-    for line in text.lines() {
+    for line in body.lines() {
         if line.is_empty() {
             continue;
         }
@@ -113,11 +131,36 @@ fn parse_bucket(text: &str) -> Result<Bucket> {
 }
 
 fn format_bucket(b: &Bucket) -> String {
-    let mut s = String::new();
+    let mut body = String::new();
     for (p, c) in b {
-        s.push_str(&format!("{}\t{}\t{}\n", escape(p), names_field(&c.files), names_field(&c.dirs)));
+        body.push_str(&format!("{}\t{}\t{}\n", escape(p), names_field(&c.files), names_field(&c.dirs)));
     }
-    s
+    format!("{BUCKET_HEADER} {}\n{body}", sum_of(body.as_bytes()))
+}
+
+fn sum_of(data: &[u8]) -> String {
+    digest::hex(&digest::sha256(data))
+}
+
+/// Whether bucket `b` is marked as not empty.
+fn has(present: &[u8], b: u32) -> bool {
+    present[(b / 8) as usize] & (1 << (b % 8)) != 0
+}
+
+fn set(present: &mut [u8], b: u32, on: bool) {
+    let (i, m) = ((b / 8) as usize, 1u8 << (b % 8));
+    if on {
+        present[i] |= m;
+    } else {
+        present[i] &= !m;
+    }
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
 /// The stamp of a set of installed versions: SHA-256 of `name=version`
@@ -130,38 +173,59 @@ pub fn stamp(versions: &BTreeMap<String, String>) -> String {
     digest::hex(&digest::sha256(s.as_bytes()))
 }
 
+/// What `state` says.
+struct State {
+    stamp: String,
+    links: Vec<(Vec<u8>, Vec<u8>)>,
+    /// One bit per bucket: set when the bucket is not empty (its file must be there).
+    present: Vec<u8>,
+    meta_sum: String,
+    aliases_sum: String,
+}
+
 /// An index that matched the root when it was opened.
 pub struct Index {
     dir: PathBuf,
     /// The directory symlinks it was written with: (canonical path of the
     /// link, its target).
     pub links: Vec<(Vec<u8>, Vec<u8>)>,
+    present: Vec<u8>,
+    meta_sum: String,
+    aliases_sum: String,
     buckets: std::cell::RefCell<HashMap<u32, Bucket>>,
     aliases: std::cell::RefCell<Option<HashMap<Vec<u8>, Vec<(Vec<u8>, String)>>>>,
 }
 
-fn read_state(dir: &Path) -> Option<(String, Vec<(Vec<u8>, Vec<u8>)>)> {
+fn read_state(dir: &Path) -> Option<State> {
     let t = fs::read_to_string(dir.join("state")).ok()?;
-    let mut lines = t.lines();
+    // the last lines: the sum of everything before them, then "end"
+    let at = t.rfind("\nsum\t")? + 1;
+    let (body, tail) = t.split_at(at);
+    if tail != format!("sum\t{}\nend\n", sum_of(body.as_bytes())) {
+        return None;
+    }
+    let mut lines = body.lines();
     if lines.next()? != HEADER {
         return None;
     }
-    let mut stamp = None;
+    let (mut stamp, mut present, mut meta_sum, mut aliases_sum) = (None, None, None, None);
     let mut links = Vec::new();
-    let mut ended = false;
     for l in lines {
         let f: Vec<&str> = l.split('\t').collect();
         match f.as_slice() {
             ["packages", s] => stamp = Some(s.to_string()),
             ["link", p, t] => links.push((unescape(p).ok()?, unescape(t).ok()?)),
-            ["end"] => ended = true,
+            ["buckets", b] => present = Some(unhex(b)?),
+            ["meta", s] => meta_sum = Some(s.to_string()),
+            ["aliases", s] => aliases_sum = Some(s.to_string()),
             _ => return None,
         }
     }
-    if !ended {
+    let present = present?;
+    if present.len() != (BUCKETS / 8) as usize {
         return None;
     }
-    Some((stamp?, links))
+    Some(State { stamp: stamp?, links, present, meta_sum: meta_sum?, aliases_sum: aliases_sum? })
 }
 
 impl Index {
@@ -170,22 +234,33 @@ impl Index {
     /// it was written with are still there, pointing where they pointed.
     pub fn open(root: &Path, versions: &BTreeMap<String, String>) -> Option<Index> {
         let dir = dir(root);
-        let (st, links) = read_state(&dir)?;
-        if st != stamp(versions) {
+        let st = read_state(&dir)?;
+        if st.stamp != stamp(versions) {
             return None;
         }
-        for (p, t) in &links {
+        for (p, t) in &st.links {
             let l = fs::read_link(root.join(std::ffi::OsStr::from_bytes(p))).ok()?;
             if l.as_os_str().as_bytes() != t.as_slice() {
                 return None;
             }
         }
-        Some(Index { dir, links, buckets: Default::default(), aliases: Default::default() })
+        Some(Index {
+            dir,
+            links: st.links,
+            present: st.present,
+            meta_sum: st.meta_sum,
+            aliases_sum: st.aliases_sum,
+            buckets: Default::default(),
+            aliases: Default::default(),
+        })
     }
 
     /// The metadata of every package it describes, by name.
     pub fn metas(&self) -> Result<BTreeMap<String, PkgMeta>> {
         let data = fs::read(self.dir.join("meta"))?;
+        if sum_of(&data) != self.meta_sum {
+            return Err(Error::Format("index: damaged meta".into()));
+        }
         let mut out = BTreeMap::new();
         let mut i = 0;
         while i < data.len() {
@@ -205,18 +280,35 @@ impl Index {
         Ok(out)
     }
 
-    fn with_bucket<T>(&self, path: &[u8], f: impl FnOnce(Option<&Claims>) -> T) -> Result<T> {
-        let b = bucket_of(path);
+    /// Bucket `b`, read and checked once (lookups then use the copy). A bucket
+    /// marked as not empty whose file is missing or damaged is an error.
+    fn load(&self, b: u32) -> Result<()> {
         let mut cache = self.buckets.borrow_mut();
         if !cache.contains_key(&b) {
-            let bk = match fs::read_to_string(self.dir.join("files").join(bucket_name(b))) {
-                Ok(t) => parse_bucket(&t)?,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Bucket::new(),
-                Err(e) => return Err(e.into()),
+            let bk = if has(&self.present, b) {
+                let p = self.dir.join("files").join(bucket_name(b));
+                let t = fs::read_to_string(&p).map_err(|e| Error::Format(format!("index: bucket {}: {e}", bucket_name(b))))?;
+                parse_bucket(&t)?
+            } else {
+                Bucket::new()
             };
             cache.insert(b, bk);
         }
-        Ok(f(cache[&b].get(path)))
+        Ok(())
+    }
+
+    fn with_bucket<T>(&self, path: &[u8], f: impl FnOnce(Option<&Claims>) -> T) -> Result<T> {
+        let b = bucket_of(path);
+        self.load(b)?;
+        Ok(f(self.buckets.borrow()[&b].get(path)))
+    }
+
+    fn aliases_loaded(&self) -> Result<()> {
+        let mut al = self.aliases.borrow_mut();
+        if al.is_none() {
+            *al = Some(read_aliases(&self.dir, &self.aliases_sum)?);
+        }
+        Ok(())
     }
 
     /// The packages with a non-directory entry at `path`.
@@ -235,24 +327,41 @@ impl Index {
         let mut out = self.with_bucket(canon, |c| {
             c.map(|c| c.files.iter().chain(c.dirs.iter()).cloned().collect::<Vec<_>>()).unwrap_or_default()
         })?;
-        let mut al = self.aliases.borrow_mut();
-        if al.is_none() {
-            *al = Some(read_aliases(&self.dir)?);
-        }
-        if let Some(v) = al.as_ref().unwrap().get(canon) {
+        self.aliases_loaded()?;
+        if let Some(v) = self.aliases.borrow().as_ref().and_then(|m| m.get(canon)) {
             out.extend(v.iter().map(|(_, n)| n.clone()));
         }
         Ok(out)
     }
+
+    /// Reads, and so checks, everything about these packages' paths that a
+    /// switch may look up: the buckets of the paths, of their directories and
+    /// of their canonical places, of the directories their triggers name, and
+    /// the aliases. Damage there is then found before the switch.
+    pub fn preload(&self, rfs: &mut RootFs, pkgs: &[&PkgState]) -> Result<()> {
+        self.aliases_loaded()?;
+        for p in pkgs {
+            for r in &p.recs {
+                self.load(bucket_of(&r.path))?;
+                self.load(bucket_of(rootfs::split_rel(&r.path).0))?;
+                if let Some(c) = canon_of(rfs, &r.path) {
+                    self.load(bucket_of(&c))?;
+                }
+            }
+            for t in &p.meta.triggers {
+                self.load(bucket_of(t.trim_start_matches('+').trim_matches('/').as_bytes()))?;
+            }
+        }
+        Ok(())
+    }
 }
 
-fn read_aliases(dir: &Path) -> Result<HashMap<Vec<u8>, Vec<(Vec<u8>, String)>>> {
+fn read_aliases(dir: &Path, sum: &str) -> Result<HashMap<Vec<u8>, Vec<(Vec<u8>, String)>>> {
+    let t = fs::read_to_string(dir.join("aliases")).map_err(|e| Error::Format(format!("index: aliases: {e}")))?;
+    if sum_of(t.as_bytes()) != sum {
+        return Err(Error::Format("index: damaged aliases".into()));
+    }
     let mut m: HashMap<Vec<u8>, Vec<(Vec<u8>, String)>> = HashMap::new();
-    let t = match fs::read_to_string(dir.join("aliases")) {
-        Ok(t) => t,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(m),
-        Err(e) => return Err(e.into()),
-    };
     for line in t.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = line.split('\t').collect();
         if f.len() != 3 {
@@ -283,12 +392,20 @@ fn format_meta(metas: &BTreeMap<String, PkgMeta>) -> Vec<u8> {
     out
 }
 
-fn format_state(versions: &BTreeMap<String, String>, links: &[(Vec<u8>, Vec<u8>)]) -> String {
+fn format_state(
+    versions: &BTreeMap<String, String>,
+    links: &[(Vec<u8>, Vec<u8>)],
+    present: &[u8],
+    meta_sum: &str,
+    aliases_sum: &str,
+) -> String {
     let mut s = format!("{HEADER}\npackages\t{}\n", stamp(versions));
     for (p, t) in links {
         s.push_str(&format!("link\t{}\t{}\n", escape(p), escape(t)));
     }
-    s.push_str("end\n");
+    s.push_str(&format!("buckets\t{}\nmeta\t{meta_sum}\naliases\t{aliases_sum}\n", digest::hex(present)));
+    let sum = sum_of(s.as_bytes());
+    s.push_str(&format!("sum\t{sum}\nend\n"));
     s
 }
 
@@ -366,12 +483,16 @@ pub fn rebuild(root: &Path, pkgs: &[PkgState], durable: bool) -> Result<()> {
         fs::remove_dir_all(&tmp)?;
     }
     fs::create_dir_all(tmp.join("files"))?;
+    let mut present = vec![0u8; (BUCKETS / 8) as usize];
     for (b, bk) in &buckets {
         fs::write(tmp.join("files").join(bucket_name(*b)), format_bucket(bk))?;
+        set(&mut present, *b, true);
     }
-    fs::write(tmp.join("aliases"), format_aliases(&aliases))?;
-    fs::write(tmp.join("meta"), format_meta(&metas))?;
-    fs::write(tmp.join("state"), format_state(&versions, &links))?;
+    let al = format_aliases(&aliases);
+    let meta = format_meta(&metas);
+    fs::write(tmp.join("aliases"), &al)?;
+    fs::write(tmp.join("meta"), &meta)?;
+    fs::write(tmp.join("state"), format_state(&versions, &links, &present, &sum_of(&meta), &sum_of(al.as_bytes())))?;
     if durable {
         crate::sys::sync_fs(&fs::File::open(root)?)?;
     }
@@ -403,22 +524,19 @@ pub fn update(
     rfs: &mut RootFs,
 ) -> Result<()> {
     let d = dir(root);
-    invalidate(root);
     let mut touched: HashSet<u32> = HashSet::new();
     for p in olds.iter().chain(news.iter()) {
         for r in &p.recs {
             touched.insert(bucket_of(&r.path));
         }
     }
-    let mut buckets: HashMap<u32, Bucket> = HashMap::new();
+    // everything read (and checked) first, while the old index is whole
     for &b in &touched {
-        let bk = match fs::read_to_string(d.join("files").join(bucket_name(b))) {
-            Ok(t) => parse_bucket(&t)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Bucket::new(),
-            Err(e) => return Err(e.into()),
-        };
-        buckets.insert(b, bk);
+        ix.load(b)?;
     }
+    ix.aliases_loaded()?;
+    invalidate(root);
+    let mut buckets: HashMap<u32, Bucket> = touched.iter().map(|&b| (b, ix.buckets.borrow()[&b].clone())).collect();
     for bk in buckets.values_mut() {
         for c in bk.values_mut() {
             c.files.retain(|n| !changed.contains(n));
@@ -443,6 +561,7 @@ pub fn update(
         }
     }
     fs::create_dir_all(d.join("files"))?;
+    let mut present = ix.present.clone();
     for (b, bk) in &buckets {
         let p = d.join("files").join(bucket_name(*b));
         if bk.is_empty() {
@@ -451,21 +570,32 @@ pub fn update(
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
+            set(&mut present, *b, false);
         } else {
             write_replace(&p, format_bucket(bk).as_bytes())?;
+            set(&mut present, *b, true);
         }
     }
-    let mut aliases: Vec<(Vec<u8>, Vec<u8>, String)> = read_aliases(&d)?
-        .into_iter()
-        .flat_map(|(c, v)| v.into_iter().map(move |(p, n)| (c.clone(), p, n)))
-        .filter(|(_, _, n)| !changed.contains(n))
-        .collect();
+    let mut aliases: Vec<(Vec<u8>, Vec<u8>, String)> = ix
+        .aliases
+        .borrow()
+        .as_ref()
+        .map(|m| {
+            m.iter()
+                .flat_map(|(c, v)| v.iter().map(move |(p, n)| (c.clone(), p.clone(), n.clone())))
+                .filter(|(_, _, n)| !changed.contains(n))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     aliases.extend(new_aliases);
-    write_replace(&d.join("aliases"), format_aliases(&aliases).as_bytes())?;
-    write_replace(&d.join("meta"), &format_meta(metas))?;
+    let al = format_aliases(&aliases);
+    let meta = format_meta(metas);
+    write_replace(&d.join("aliases"), al.as_bytes())?;
+    write_replace(&d.join("meta"), &meta)?;
     let versions: BTreeMap<String, String> =
         metas.iter().map(|(n, m)| (n.clone(), m.version().to_string())).collect();
-    write_replace(&d.join("state"), format_state(&versions, &ix.links).as_bytes())?;
+    let state = format_state(&versions, &ix.links, &present, &sum_of(&meta), &sum_of(al.as_bytes()));
+    write_replace(&d.join("state"), state.as_bytes())?;
     Ok(())
 }
 
@@ -489,6 +619,12 @@ pub fn wanted(
     }
     let pattern = |t: &String| t.trim_start_matches('+').bytes().any(|c| matches!(c, b'*' | b'?' | b'[' | b'\\'));
     if news.iter().any(|p| p.meta.triggers.iter().any(pattern)) {
+        return None;
+    }
+    // everything the switch may look up, read and checked now: a damaged
+    // index is found before the switch, which then reads every record
+    let all: Vec<&PkgState> = olds.iter().chain(news.iter()).copied().collect();
+    if ix.preload(rfs, &all).is_err() {
         return None;
     }
     let mut w = relevant(ix, changed, olds, news).ok()?;
@@ -642,4 +778,38 @@ pub fn installed_versions(root: &Path) -> io::Result<(BTreeMap<String, String>, 
 /// The final set's records, keyed by name, for [`rebuild`] from `installed`.
 pub fn load_all(installed: &BTreeMap<String, Installed>) -> Result<Vec<PkgState>> {
     installed.values().map(|ip| PkgState::load(&ip.dir, false)).collect()
+}
+
+/// The index as it was before the switch of `ops`, if it is intact and is
+/// the one the switch was planned with (state stamp `planned`): finishing an
+/// interrupted switch with it reads the records the switch read.
+pub fn open_before(root: &Path, ops: &[db::Op], planned: &str) -> Option<Index> {
+    let (mut v, odd) = installed_versions(root).ok()?;
+    if odd {
+        return None;
+    }
+    for op in ops {
+        match op {
+            db::Op::Install { name, .. } => {
+                v.remove(name);
+            }
+            db::Op::Upgrade { name, old, .. } | db::Op::Remove { name, old } => {
+                v.insert(name.clone(), old.clone());
+            }
+        }
+    }
+    if stamp(&v) != planned {
+        return None;
+    }
+    Index::open(root, &v)
+}
+
+/// Removes what an interrupted rebuild left (`index.new`, `index.old`).
+pub fn clean_leftovers(root: &Path) {
+    for n in ["index.new", "index.old"] {
+        let p = root.join(db::STATE_DIR).join(n);
+        if fs::symlink_metadata(&p).map_or(false, |m| m.is_dir()) {
+            let _ = fs::remove_dir_all(&p);
+        }
+    }
 }

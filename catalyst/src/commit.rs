@@ -913,15 +913,22 @@ pub fn switch(
             }
         }
     }
-    // the unchanged packages whose records matter: with a matching index
-    // those that share a path with the change and those with a trigger
-    // (crate::index::wanted); otherwise all of them, and the index is
-    // rebuilt at the end
-    let wanted: Option<HashSet<String>> = index.and_then(|ix| {
-        let o: Vec<&PkgState> = olds.values().collect();
-        let n: Vec<&PkgState> = news.iter().collect();
-        crate::index::wanted(ix, &mut RootFs::new(root), installed, &changed_names, &o, &n)
-    });
+    // the unchanged packages whose records matter, as planned before the
+    // journal was written (crate::index::wanted) and recorded in it: with the
+    // index those that share a path with the change and those with a
+    // trigger; otherwise all of them, and the index is rebuilt at the end
+    let wanted: Option<HashSet<String>> = match (index, &plan.reads) {
+        (Some(_), Some(r)) => Some(r.iter().cloned().collect()),
+        _ => None,
+    };
+    if let Some(w) = &wanted {
+        // checked before the journal was written, unreadable since
+        let mut missing: Vec<&str> = w.iter().filter(|n| !installed.contains_key(*n)).map(|s| s.as_str()).collect();
+        if !missing.is_empty() {
+            missing.sort();
+            return Err(crate::error::Error::Msg(format!("the record of {} can't be read", missing.join(", "))));
+        }
+    }
     let full = wanted.is_none();
     // the final set: unchanged packages first, then new ones in order
     let mut pkgs: Vec<PkgState> = Vec::new();

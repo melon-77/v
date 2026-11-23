@@ -798,6 +798,11 @@ pub struct Journal {
     pub ops: Vec<Op>,
     /// The world to write.
     pub world: Vec<String>,
+    /// With the lookup index: the unchanged packages whose records the
+    /// switch reads, and the stamp of the index it was planned with (both
+    /// `None`: every record).
+    pub reads: Option<Vec<String>>,
+    pub index: Option<String>,
     pub done: std::collections::HashSet<String>,
 }
 
@@ -813,6 +818,14 @@ impl Journal {
         }
         for w in &self.world {
             s.push_str(&format!("world {w}\n"));
+        }
+        if let (Some(r), Some(st)) = (&self.reads, &self.index) {
+            s.push_str(&format!("index {st}\nreads"));
+            for n in r {
+                s.push(' ');
+                s.push_str(n);
+            }
+            s.push('\n');
         }
         s.push_str("end\n");
         s
@@ -835,6 +848,10 @@ impl Journal {
                 }
                 ("remove", 3) if !ended => j.ops.push(Op::Remove { name: f[1].into(), old: f[2].into() }),
                 ("world", 2) if !ended => j.world.push(f[1].into()),
+                ("index", 2) if !ended => j.index = Some(f[1].into()),
+                ("reads", _) if !ended => {
+                    j.reads = Some(f[1..].iter().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+                }
                 ("end", 1) => ended = true,
                 ("done", 2) if ended => {
                     j.done.insert(f[1].into());
@@ -854,6 +871,12 @@ impl Journal {
             if !ok {
                 return Err(Error::Format("journal: unsafe name".into()));
             }
+        }
+        if j.reads.is_some() != j.index.is_some()
+            || j.reads.iter().flatten().any(|n| !safe_component(n))
+            || j.index.as_ref().map_or(false, |s| s.len() != 64 || !s.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(Error::Format("journal: bad reads or index line".into()));
         }
         Ok(j)
     }
@@ -1002,6 +1025,8 @@ mod tests {
                 Op::Remove { name: "c".into(), old: "3".into() },
             ],
             world: vec!["a".into(), "b>=2".into()],
+            reads: Some(vec!["d".into(), "e".into()]),
+            index: Some("ab".repeat(32)),
             done: Default::default(),
         };
         let mut t = j.format();
@@ -1009,6 +1034,8 @@ mod tests {
         let p = Journal::parse(&t).unwrap();
         assert_eq!(p.ops, j.ops);
         assert_eq!(p.world, j.world);
+        assert_eq!(p.reads, j.reads);
+        assert_eq!(p.index, j.index);
         assert!(p.done.contains("pre:a"));
         assert!(Journal::parse("catalyst-journal 1\ninstall a 1\n").is_err());
         assert!(Journal::parse("catalyst-journal 1\ninstall ../a 1\nend\n").is_err());

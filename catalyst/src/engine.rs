@@ -83,13 +83,50 @@ pub fn arches(o: &Options, root: &Path) -> Vec<String> {
 
 /// Opens a root: lock, recovery of an interrupted switch, cleanup.
 pub fn open(o: &Options) -> Result<Db> {
+    let mut db = open_locked(o)?;
+    settle(o, &mut db)?;
+    Ok(db)
+}
+
+/// Takes the lock and reads the database; a leftover journal is left as it is.
+fn open_locked(o: &Options) -> Result<Db> {
     let root = abs_root(o, true)?;
-    let mut db = Db::open(&root, o.initdb)?;
+    Db::open(&root, o.initdb)
+}
+
+/// Finishes a leftover journal, cleans up after an interrupted run, and
+/// rebuilds a missing or outdated index.
+fn settle(o: &Options, db: &mut Db) -> Result<()> {
+    let root = db.root.clone();
     let mut recovered = false;
     if let Some(j) = JournalFile::open(&root)? {
         println!("oct: finishing an interrupted switch ({} package changes)", j.plan.ops.len());
-        // never with the index: a crash may have kept some of its files and not others
-        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts(), None)?;
+        // a switch planned with the index is finished with the index as it
+        // was before the switch, when that is still intact: then it reads the
+        // same records, all checked before the journal was written; otherwise
+        // it reads every record
+        let before = match (&j.plan.index, &j.plan.reads) {
+            (Some(st), Some(_)) => crate::index::open_before(&root, &j.plan.ops, st),
+            _ => None,
+        };
+        let needs = |n: &str| match (&before, &j.plan.reads) {
+            (Some(_), Some(r)) => r.iter().any(|x| x == n),
+            _ => true,
+        };
+        let broken: Vec<(String, String)> = db
+            .broken
+            .iter()
+            .filter(|(n, _, _)| needs(n.as_str()))
+            .map(|(n, v, why)| (n.clone(), format!("{n}-{v}: {why}")))
+            .collect();
+        if !broken.is_empty() {
+            return Err(Error::Msg(format!("{}\n(finishing the interrupted switch needs it)", broken_records(&broken))));
+        }
+        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts(), before.as_ref()).map_err(|e| {
+            Error::Msg(format!(
+                "finishing the interrupted switch failed: {e}\n  if a record can't be read, `oct fix` rebuilds it from the signed package and then finishes the switch"
+            ))
+        })?;
         println!(
             "oct: switch finished: {} files placed, {} already in place, {} removed",
             rep.placed, rep.unchanged, rep.removed
@@ -97,12 +134,14 @@ pub fn open(o: &Options) -> Result<Db> {
         db.reload()?;
         recovered = true;
     }
+    // what an interrupted rebuild of the index left behind
+    crate::index::clean_leftovers(&root);
     // the clean-up walk over Programs is only needed after an interrupted or
     // failed run: one whose journal was just finished, or that left the
     // dirty mark (set before unpacking, removed when a change succeeded)
     let dirty = dirty_mark(&root);
     if recovered || dirty.exists() {
-        gc(&root, &db)?;
+        gc(&root, db)?;
         let _ = fs::remove_file(&dirty);
     }
     // the index, rebuilt from the records when it is missing or out of date
@@ -114,7 +153,7 @@ pub fn open(o: &Options) -> Result<Db> {
             }
         }
     }
-    Ok(db)
+    Ok(())
 }
 
 /// The mark a change leaves while it unpacks and switches.
@@ -550,6 +589,8 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     // file ownership of the final set
     let changed: HashSet<&str> = ops.iter().map(|o| o.name()).collect();
     let mut finals: Vec<PkgState> = Vec::new();
+    // which unchanged packages' records the switch reads (None: every one)
+    let mut decided: Option<HashSet<String>> = None;
     let mut check = || -> Result<()> {
         // every record the switch reads must be readable before the journal
         // is written: a journal whose switch can't load a record would stop
@@ -581,6 +622,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
             let names: HashSet<String> = changed.iter().map(|s| s.to_string()).collect();
             crate::index::wanted(ix, &mut crate::rootfs::RootFs::new(&root), &db.installed, &names, &o, &n)
         });
+        decided = wanted.clone();
         for (name, ip) in &db.installed {
             if !changed.contains(name.as_str()) && wanted.as_ref().map_or(true, |w| w.contains(name)) {
                 match PkgState::load(&ip.dir, false) {
@@ -611,7 +653,20 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     // the switch
     let t2 = Instant::now();
     sys::sync_fs(&fs::File::open(&root)?)?;
-    let jf = JournalFile::create(&root, Journal { ops: ops.clone(), world: new_world, done: Default::default() })?;
+    // the journal names the records the switch reads and the index it was
+    // planned with: finishing it after a crash reads the same ones
+    let reads: Option<Vec<String>> = decided.map(|w| {
+        let mut v: Vec<String> = w.into_iter().collect();
+        v.sort();
+        v
+    });
+    let index_stamp = reads.as_ref().map(|_| {
+        crate::index::stamp(&db.installed.iter().map(|(n, ip)| (n.clone(), ip.meta.info.version.clone())).collect())
+    });
+    let jf = JournalFile::create(
+        &root,
+        Journal { ops: ops.clone(), world: new_world, reads, index: index_stamp, done: Default::default() },
+    )?;
     if o.crash_at.as_deref() == Some("journal") {
         eprintln!("oct: CATALYST_CRASH_AT=journal: killed (test hook)");
         sys::kill_self();
@@ -1025,7 +1080,9 @@ pub fn cache_clean(o: &Options) -> Result<bool> {
 /// packages against their copies in `Programs/<name>/<version>/`.
 /// If `names` is empty, checks all installed packages.
 pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
-    let mut db = if o.simulate { open_readonly(o)? } else { open(o)? };
+    // a leftover journal is finished after step 1: finishing it may need a
+    // record that only step 1 can rebuild
+    let mut db = if o.simulate { open_readonly(o)? } else { open_locked(o)? };
     let filter: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
     for n in &filter {
         if !db.installed.contains_key(*n) && !db.broken.iter().any(|b| b.0 == *n) {
@@ -1041,8 +1098,26 @@ pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
     // (all of them: one unreadable record stops every change)
     let mut rebuild: Vec<(String, String, String)> = db.broken.clone();
     for (name, ip) in &db.installed {
-        if let Err(e) = db::read_files(&ip.dir) {
+        // both files: with the index the package list comes from its copy of
+        // every info, so an unreadable info is not in db.broken
+        if let Err(e) = db::read_meta(&ip.dir).and_then(|_| db::read_files(&ip.dir)) {
             rebuild.push((name.clone(), ip.meta.info.version.clone(), e.to_string()));
+        }
+    }
+    // and the versions a leftover journal switches between, which finishing it reads
+    if let Ok(t) = fs::read_to_string(Db::journal_path(&db.root)) {
+        if let Ok(j) = Journal::parse(&t) {
+            for op in &j.ops {
+                for v in [op.old_version(), op.new_version()].into_iter().flatten() {
+                    let d = Db::pkg_dir(&db.root, op.name(), v);
+                    if !d.join(db::META_DIR).exists() || rebuild.iter().any(|(n, x, _)| n == op.name() && x == v) {
+                        continue;
+                    }
+                    if let Err(e) = db::read_meta(&d).and_then(|_| db::read_files(&d)) {
+                        rebuild.push((op.name().to_string(), v.to_string(), e.to_string()));
+                    }
+                }
+            }
         }
     }
     if !rebuild.is_empty() {
@@ -1076,6 +1151,10 @@ pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
             }
             db.reload()?;
         }
+    }
+    // a leftover journal finished, now that the records it reads are whole
+    if !o.simulate {
+        settle(o, &mut db)?;
     }
 
     // 2. the files, checked and repaired against the records

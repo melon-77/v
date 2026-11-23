@@ -400,3 +400,85 @@ fn unreadable_record_blocks_changes_before_any_journal() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("hello-1.0-r0") && err.contains("nothing is repaired"), "{err}");
 }
+
+// ------------------------------------------------------------ the lookup index against damage (Gemini's audit, 5b18213)
+
+/// `pkga` and `pkgb`, each with a file of its own and the same
+/// `usr/share/shared.txt`.
+fn seed_shared(root: &Path) {
+    for d in ["var/lib/catalyst", "var/cache/catalyst", "etc/apk", "usr/bin", "usr/share"] {
+        fs::create_dir_all(root.join(d)).unwrap();
+    }
+    fs::write(root.join("etc/apk/arch"), "x86_64\n").unwrap();
+    fs::write(root.join("var/lib/catalyst/world"), "pkga\npkgb\n").unwrap();
+    for p in ["pkga", "pkgb"] {
+        let d = root.join(format!("Programs/{p}/1.0-r0"));
+        for s in [".catalyst", "usr/bin", "usr/share"] {
+            fs::create_dir_all(d.join(s)).unwrap();
+        }
+        let own = format!("only {p}\n");
+        let bin = format!("usr/bin/only{}", &p[3..]);
+        fs::write(d.join(&bin), &own).unwrap();
+        fs::write(d.join("usr/share/shared.txt"), b"shared\n").unwrap();
+        fs::write(
+            d.join(".catalyst/info"),
+            format!("name: {p}\nversion: 1.0-r0\narch: x86_64\norigin: {p}\nlicense: MIT\ndescription: test\nurl: https://example.org\ninstalled-size: 4096\n"),
+        )
+        .unwrap();
+        fs::write(
+            d.join(".catalyst/files"),
+            format!(
+                "d\t0755\troot\troot\t0\t0\t-\t-\t-\tusr\nd\t0755\troot\troot\t0\t0\t-\t-\t-\tusr/bin\nd\t0755\troot\troot\t0\t0\t-\t-\t-\tusr/share\n\
+                 f\t0644\troot\troot\t{}\t0\t{}\t-\t-\t{bin}\nf\t0644\troot\troot\t7\t0\t{}\t-\t-\tusr/share/shared.txt\n",
+                own.len(),
+                sha256_hex(own.as_bytes()),
+                sha256_hex(b"shared\n")
+            ),
+        )
+        .unwrap();
+        symlink("1.0-r0", root.join(format!("Programs/{p}/Current"))).unwrap();
+        fs::hard_link(d.join(&bin), root.join(&bin)).unwrap();
+    }
+    fs::hard_link(root.join("Programs/pkga/1.0-r0/usr/share/shared.txt"), root.join("usr/share/shared.txt")).unwrap();
+}
+
+fn oct_at(root: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(oct_bin()).arg("--root").arg(root).arg("--plain").args(args).output().unwrap()
+}
+
+/// The name of the index bucket of `path` (FNV-1a, 4096 buckets).
+fn bucket_name(path: &str) -> String {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in path.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("{:03x}", h % 4096)
+}
+
+#[test]
+fn a_missing_bucket_file_sends_the_change_to_every_record() {
+    // bug 3: a missing bucket read as an empty one let `del pkgb` delete pkga's file
+    let root = temp_root("missing-bucket");
+    seed_shared(&root);
+    assert!(oct_at(&root, &["fix"]).status.success());
+    fs::remove_file(root.join("var/lib/catalyst/index/files").join(bucket_name("usr/share/shared.txt"))).unwrap();
+    let out = oct_at(&root, &["del", "pkgb"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(root.join("usr/share/shared.txt").exists(), "pkga's file was deleted");
+    assert!(!root.join("usr/bin/onlyb").exists());
+    assert!(root.join("var/lib/catalyst/index/state").exists(), "the index was not rebuilt");
+}
+
+#[test]
+fn a_damaged_aliases_file_sends_the_change_to_every_record() {
+    // bug 4: a damaged aliases file kept every file of the removed package
+    let root = temp_root("damaged-aliases");
+    seed_shared(&root);
+    assert!(oct_at(&root, &["fix"]).status.success());
+    fs::write(root.join("var/lib/catalyst/index/aliases"), b"BROKEN_NO_TABS\n").unwrap();
+    let out = oct_at(&root, &["del", "pkgb"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!root.join("usr/bin/onlyb").exists(), "pkgb's file was left behind");
+    assert!(root.join("usr/share/shared.txt").exists());
+}

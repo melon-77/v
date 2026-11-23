@@ -165,10 +165,27 @@ outdated index is rebuilt when a root is opened for a change, and `oct fix`
 always rebuilds it. The index is canonical: one updated change by change
 is byte for byte the one a rebuild writes, and the tests compare the two.
 
-Inside a switch the index is updated before the final `syncfs`, so a crash
-leaves the journal, and finishing that switch rebuilds the index. A rebuild
-outside a switch writes the new index beside the old one, syncs it, then
-swaps it in.
+Every file of the index is checked when it is read. `state` holds which
+buckets are not empty, the SHA-256 of `meta` and of `aliases`, and a sum
+of itself; each bucket starts with the SHA-256 of the rest of it. Before a
+change goes through the index, everything it may look up there is read
+and checked: the buckets of its paths, of their directories and of their
+canonical places, and the aliases. A missing, truncated or changed file is
+found there, before anything is switched, and the change then reads every
+record and rebuilds the index.
+
+Inside a switch the index is updated before the final `syncfs`. The
+journal names the records the switch reads and the index it was planned
+with, and finishing an interrupted switch reads the same records with that
+index, as long as the index is still the one from before the switch. If
+the crash came while the index was being updated, the recovery reads every
+record. A rebuild outside a switch writes the new index beside the old
+one, syncs it, then swaps it in.
+
+A package's directories, for the index, are the ones its record lists.
+Real packages list every directory of their files (all 1,953 on
+valence-base); a hand-made record that leaves one out is read slightly
+differently with the index than without it.
 
 ## The transaction
 
@@ -269,8 +286,10 @@ disk. A run that finds a journal finishes it first (roll forward):
 - placed packages and scripts that ran are marked in the journal, so they
   are not placed or run again.
 
-Nothing uses the lookup index while there is a journal: finishing the
-switch reads every record and rebuilds the index.
+While there is a journal, nothing but the recovery uses the lookup index.
+The recovery reads the records the switch read, with the index from
+before the switch (see The lookup index), or every record when that index
+is gone.
 
 Leftover `.partial` and stale version directories are deleted by the
 next run after an interrupted one: a run that finished a journal, or that
@@ -278,13 +297,15 @@ finds the `var/lib/catalyst/dirty` mark, which a change sets before it unpacks
 and removes once it has succeeded. A clean run skips that walk over
 `Programs`.
 
-A record that can't be read (a `.catalyst/info` or `.catalyst/files` of an installed
-version that is missing or damaged) stops every change before anything is
-unpacked or a journal is written, with a message that names it. `oct fix`
-rebuilds it from the signed package of that version in the repositories,
-verifying the whole package file first, and then checks the files against
-it. While a record stays unreadable, `oct fix` repairs nothing: who owns
-which file can't be known.
+A record that can't be read (a `.catalyst/info` or `.catalyst/files` of an
+installed version that is missing or damaged) stops every change that
+needs it before anything is unpacked or a journal is written, with a
+message that names it. `oct fix` checks both files of every record and
+rebuilds a damaged one from the signed package of that version in the
+repositories, verifying the whole package file first, and then checks the
+files against it. It does this before it finishes a leftover journal,
+since finishing the journal may need the record. While a record stays
+unreadable, `oct fix` repairs nothing: who owns which file can't be known.
 
 So an upgrade killed at any point leaves every path either the old or the
 new entry, with a working `/bin/sh`, libc and dynamic loader, and the next
@@ -504,7 +525,7 @@ after the command, since apk leaves writeback to the kernel:
 
 ## Tests
 
-- **`cargo test`:** 38 unit tests, 9 command tests and 10 tests over the
+- **`cargo test`:** 38 unit tests, 11 command tests and 12 tests over the
   real repository:
   - every package verified against the index;
   - tampering of every kind is rejected;
@@ -512,7 +533,10 @@ after the command, since apk leaves writeback to the kernel:
   - a broken record stops only the changes that need it, and `oct fix`
     rebuilds it from the signed package;
   - the lookup index knows the tree's directory symlinks and, after a
-    series of changes, equals the one `oct fix` rebuilds.
+    series of changes, equals the one `oct fix` rebuilds;
+  - a damaged index (a bucket file missing, the aliases damaged) sends a
+    change to every record instead, and a switch killed while going
+    through the index is finished without the records it didn't read.
 - **End-to-end tests (a) to (c),** run by `catalyst-e2e-all.sh` and the
   scripts it calls (`catalyst-e2e-a.sh`, `catalyst-e2e-b.sh`, `catalyst-e2e-c.sh`).
   These scripts live outside the crate, in the scratchpad folder.
