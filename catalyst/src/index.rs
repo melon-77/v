@@ -390,7 +390,7 @@ fn read_bucket(dir: &Path, present: &[u8], b: u32) -> Result<Bucket> {
 
 /// `f` over `items`: on the calling thread for a few, spread over threads
 /// for many; the results in the order of `items`, or the first error.
-fn on_threads<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
+pub(crate) fn on_threads<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
     if items.len() < 16 {
         return items.iter().map(&f).collect();
     }

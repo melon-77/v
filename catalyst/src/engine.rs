@@ -131,7 +131,7 @@ fn settle(o: &Options, db: &mut Db) -> Result<()> {
             // finished as a synced switch: what the journal names is on disk first
             sys::sync_fs(&fs::File::open(&root)?)?;
         }
-        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts(), before.as_ref()).map_err(|e| {
+        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts(), before.as_ref(), Vec::new()).map_err(|e| {
             Error::Msg(format!(
                 "finishing the interrupted switch failed: {e}\n  if a record can't be read, `oct fix` rebuilds it from the signed package and then finishes the switch"
             ))
@@ -688,8 +688,30 @@ fn world_strings(world: &[Dependency]) -> Vec<String> {
     db::format_world(world).lines().filter(|l| !l.is_empty()).map(String::from).collect()
 }
 
+/// How old a remote repository's cached index may be for an `add` to plan
+/// with it without asking the server: four hours, as apk's is. The owner
+/// decided this on 2026-11-23 ("Reuse for 4 hours"): fetching the index on
+/// every `add` was a request apk does not make. `add -u`, `upgrade` and
+/// `update` always ask the server.
+const INDEX_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(4 * 3600);
+
 /// Resolves `world` and carries out the changes.
 fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh: HashSet<String>, use_repos: bool) -> Result<bool> {
+    let max_age = (mode == Mode::Keep && !o.upgrade).then_some(INDEX_MAX_AGE);
+    transact_at(o, db, world, mode, fresh, use_repos, max_age)
+}
+
+/// [`transact`] with the age up to which a cached index is used as it is
+/// (`None`: the server is asked).
+fn transact_at(
+    o: &Options,
+    db: &mut Db,
+    world: Vec<Dependency>,
+    mode: Mode,
+    fresh: HashSet<String>,
+    use_repos: bool,
+    max_age: Option<std::time::Duration>,
+) -> Result<bool> {
     let t0 = Instant::now();
     crate::prof::mark("open: lock, database, leftovers");
     if !db.broken.is_empty() {
@@ -702,7 +724,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let keys = load_keys(o, &root)?;
     crate::prof::mark("  keys loaded");
     let (repos, http, _) =
-        if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate, None)? } else { (Vec::new(), None, 0) };
+        if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate, max_age)? } else { (Vec::new(), None, 0) };
     crate::prof::mark("repositories: read and verified");
     let u = Universe::with_arches(&repos, &db.installed, &arches);
     crate::prof::mark("  resolve: universe built");
@@ -820,6 +842,12 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
             if run_hooks {
                 let _ = commit::run_commit_hooks(&root, "post-commit");
             }
+            // planned with a cached index, which may name a package the
+            // server has replaced since: once more, with the index fetched
+            if max_age.is_some() && repos.iter().any(|r| r.reused) {
+                eprintln!("oct: {e}\noct: the repository index came from the cache; fetching it and trying again");
+                return transact_at(o, db, world, mode, fresh, use_repos, None);
+            }
             return Err(e);
         }
     };
@@ -832,6 +860,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     // file ownership of the final set
     let changed: HashSet<&str> = ops.iter().map(|o| o.name()).collect();
     let mut finals: Vec<PkgState> = Vec::new();
+    let mut olds_read: Vec<PkgState> = Vec::new();
     // which unchanged packages' records the switch reads (None: every one)
     let mut decided: Option<HashSet<String>> = None;
     let mut check = || -> Result<()> {
@@ -878,6 +907,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
             return Err(broken_records(&broken));
         }
         finals.extend(news_st);
+        olds_read = olds_st;
         let (_, conflicts) = commit::ownership(&finals);
         if !conflicts.is_empty() {
             return Err(Error::Msg(format!("file conflicts:\n  {}", conflicts.join("\n  "))));
@@ -891,7 +921,9 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         }
         return Err(e);
     }
-    drop(finals);
+    // the records read for the check go to the switch, which needs the same
+    let mut pool = finals;
+    pool.extend(olds_read);
     crate::prof::mark("check: records, index lookups, ownership");
 
     // the switch
@@ -925,7 +957,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         sys::kill_self();
     }
     let switch_res =
-        commit::switch(&root, &db.installed, jf, &SwitchOptions { unsynced, ..o.switch_opts() }, db.index.as_ref());
+        commit::switch(&root, &db.installed, jf, &SwitchOptions { unsynced, ..o.switch_opts() }, db.index.as_ref(), pool);
     if run_hooks {
         let _ = commit::run_commit_hooks(&root, "post-commit");
     }

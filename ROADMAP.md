@@ -282,6 +282,11 @@ These are open on purpose. Each gets settled before the phase that needs it.
   2026).
 
 ## Decided
+- **`oct add` uses a cached repository index for four hours** (23 November 2026). catalyst fetched the index on every
+  `add`, a request apk does not make: over the network that was the difference between one request and two (43 ms
+  against 14 ms for `add nano` from a server on the same machine). Asked whether `add` may plan with an index up to
+  four hours old, as apk does, the owner chose "Reuse for 4 hours". `add -u`, `upgrade` and `update` still always ask
+  the server, and the rollback check is unchanged.
 - **Adds of new packages are not synced** (23 November 2026). catalyst's three device flushes made every install
   crash-safe and on disk when the command returned; they were about 9.5 ms of a 22 ms `oct add nano`, and the reason
   apk was faster on a small system. The owner: "the situations it would be nice in rarely happen at all if ever", and,

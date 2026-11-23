@@ -55,32 +55,39 @@ impl Limit {
 /// A blocking HTTP(S) client, shared by the fetch threads.
 #[derive(Clone)]
 pub struct Http {
-    /// for http:// URLs
+    /// For http:// URLs: no TLS, and no redirect is followed (one that
+    /// comes is asked for again through `tls`, which can follow it to
+    /// https).
     plain: ureq::Agent,
-    /// for https:// URLs: refuses to follow a redirect to http://
-    secure: ureq::Agent,
+    /// The agents that can do TLS, made when one is first needed: setting
+    /// TLS up reads the system's certificates, which took about 25 ms of
+    /// every run with a remote repository. The first is for http:// URLs
+    /// that redirect; the second, for https:// URLs, refuses to follow a
+    /// redirect to http://.
+    tls: Arc<std::sync::OnceLock<std::result::Result<(ureq::Agent, ureq::Agent), String>>>,
 }
 
 impl Http {
     pub fn new() -> Result<Http> {
-        let tls = Arc::new(native_tls::TlsConnector::new().map_err(|e| Error::Msg(format!("TLS setup: {e}")))?);
-        let base = || {
-            ureq::AgentBuilder::new()
-                .tls_connector(tls.clone())
-                .timeout_connect(Duration::from_secs(20))
-                .timeout_read(RATE_WINDOW)
-                .redirects(5)
-                .user_agent(concat!("catalyst/", env!("CARGO_PKG_VERSION")))
-        };
-        Ok(Http { plain: base().build(), secure: base().https_only(true).build() })
+        Ok(Http { plain: Self::base().redirects(0).build(), tls: Arc::new(std::sync::OnceLock::new()) })
     }
 
-    fn agent(&self, url: &str) -> &ureq::Agent {
-        if url.starts_with("https://") {
-            &self.secure
-        } else {
-            &self.plain
-        }
+    fn base() -> ureq::AgentBuilder {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(20))
+            .timeout_read(RATE_WINDOW)
+            .user_agent(concat!("catalyst/", env!("CARGO_PKG_VERSION")))
+    }
+
+    fn tls(&self) -> Result<&(ureq::Agent, ureq::Agent)> {
+        self.tls
+            .get_or_init(|| {
+                let c = Arc::new(native_tls::TlsConnector::new().map_err(|e| format!("TLS setup: {e}"))?);
+                let with = || Self::base().tls_connector(c.clone()).redirects(5);
+                Ok((with().build(), with().https_only(true).build()))
+            })
+            .as_ref()
+            .map_err(|e| Error::Msg(e.clone()))
     }
 
     /// Downloads `url` into `dest` (through `dest.part`, renamed at the
@@ -98,7 +105,15 @@ impl Http {
     }
 
     fn download_to(&self, url: &str, part: &Path, limit: Limit, progress: &mut dyn FnMut(u64)) -> Result<u64> {
-        let resp = self.agent(url).get(url).call().map_err(|e| Error::Msg(format!("{url}: {e}")))?;
+        let resp = if url.starts_with("https://") {
+            self.tls()?.1.get(url).call()
+        } else {
+            match self.plain.get(url).call() {
+                Ok(r) if (300..400).contains(&r.status()) => self.tls()?.0.get(url).call(),
+                r => r,
+            }
+        }
+        .map_err(|e| Error::Msg(format!("{url}: {e}")))?;
         if let Some(cl) = resp.header("Content-Length").and_then(|v| v.trim().parse::<u64>().ok()) {
             match limit {
                 Limit::Exact(n) if cl != n => {

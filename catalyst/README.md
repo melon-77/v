@@ -454,6 +454,14 @@ What an untrusted file or a hostile mirror can make catalyst do is bounded:
     index to hold back fixes.
   - A downloaded index replaces the cached one only after it was verified
     and found fresh.
+  - `add` plans with a remote repository's cached index when that is less
+    than four hours old, without asking the server. apk does the same,
+    with the same four hours (the owner's decision of 23 November 2026;
+    ROADMAP, "Decided"). `add -u`, `upgrade` and `update` always ask the
+    server. The rollback check runs on a cached index as on a downloaded
+    one. If a download fails after planning with a cached index (the
+    server may have replaced that package since), the index is fetched
+    and the change is tried once more.
   - catalyst warns when an installed package is newer than anything the
     repositories offer.
   - A root that never saw a repository has nothing to compare with. That
@@ -655,59 +663,64 @@ catalyst syncs it:
 
 | system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | + sync: apk, catalyst | ratio (95% CI) | verdict |
 |---|---|---|---|---|---|---|---|---|---|
-| 39 | nano | warm | 13 ms | 11 ms | 0.80 (0.79-0.85) | **faster** | 20 ms, 18 ms | 0.89 (0.86-0.92) | **faster** |
-| 39 | nano | cold | 46 ms | 48 ms | 1.05 (1.01-1.10) | no clear difference | 54 ms, 58 ms | 1.06 (1.02-1.10) | no clear difference |
-| 244 | nano | warm | 32 ms | 16 ms | 0.48 (0.45-0.49) | **faster** | 44 ms, 23 ms | 0.52 (0.48-0.55) | **faster** |
-| 244 | nano | cold | 69 ms | 77 ms | 1.11 (1.01-1.17) | no clear difference | 82 ms, 86 ms | 1.04 (0.95-1.11) | no clear difference |
-| 39 | Cataclysm | warm | 1.58 s | 1.07 s | 0.68 (0.65-0.79) | **faster** | 2.35 s, 1.07 s | 0.46 (0.41-0.55) | **faster** |
-| 39 | Cataclysm | cold | 1.97 s | 1.29 s | 0.65 (0.62-0.70) | **faster** | 2.43 s, 1.30 s | 0.53 (0.50-0.56) | **faster** |
-| 244 | Cataclysm | warm | 944 ms | 913 ms | 0.97 (0.92-1.02) | no clear difference | 1.45 s, 916 ms | 0.63 (0.56-0.68) | **faster** |
-| 244 | Cataclysm | cold | 1.08 s | 1.07 s | 0.99 (0.92-1.02) | no clear difference | 1.44 s, 1.08 s | 0.75 (0.71-0.78) | **faster** |
+| 39 | nano | warm | 13 ms | 10 ms | 0.83 (0.79-0.93) | **faster** | 19 ms, 17 ms | 0.91 (0.86-0.97) | no clear difference |
+| 39 | nano | cold | 42 ms | 43 ms | 1.01 (0.97-1.06) | no clear difference | 50 ms, 51 ms | 1.02 (0.99-1.06) | no clear difference |
+| 244 | nano | warm | 33 ms | 16 ms | 0.48 (0.44-0.50) | **faster** | 43 ms, 24 ms | 0.55 (0.50-0.57) | **faster** |
+| 244 | nano | cold | 76 ms | 82 ms | 1.07 (0.97-1.20) | no clear difference | 88 ms, 91 ms | 1.03 (0.94-1.14) | no clear difference |
+| 39 | Cataclysm | warm | 1.58 s | 969 ms | 0.61 (0.57-0.64) | **faster** | 2.18 s, 972 ms | 0.45 (0.39-0.47) | **faster** |
+| 39 | Cataclysm | cold | 1.88 s | 1.24 s | 0.66 (0.63-0.71) | **faster** | 2.37 s, 1.24 s | 0.52 (0.49-0.57) | **faster** |
+| 244 | Cataclysm | warm | 957 ms | 926 ms | 0.97 (0.92-1.03) | no clear difference | 1.42 s, 935 ms | 0.66 (0.59-0.71) | **faster** |
+| 244 | Cataclysm | cold | 1.09 s | 1.12 s | 1.03 (0.95-1.14) | no clear difference | 1.37 s, 1.13 s | 0.83 (0.77-0.91) | **faster** |
 
 Removals, upgrades and a network repository, by the same rules (23
 November 2026). The upgrades use a second repository with 27 packages of
 valence-base rebuilt as a newer version; the 27-package upgrade starts
 from a fresh root every round, so it was run on the small system only.
 The HTTP server is on the same machine, once as it is and once with
-25 ms added to every request, as a mirror some way off would; apk keeps
-its index cache there, as an installed system does:
+25 ms added to every request, as a mirror some way off would; both tools
+keep their index cache there, as an installed system does:
 
 | system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | + sync: apk, catalyst | verdict |
 |---|---|---|---|---|---|---|---|---|
-| 39 | remove nano | warm | 11 ms | 14 ms | 1.25 (1.19-1.32) | slower | 15 ms, 18 ms | slower |
-| 39 | remove nano | cold | 42 ms | 46 ms | 1.10 (1.04-1.16) | no clear difference | 48 ms, 51 ms | no clear difference |
-| 244 | remove nano | warm | 30 ms | 22 ms | 0.73 (0.67-0.77) | **faster** | 38 ms, 26 ms | **faster** |
-| 244 | remove nano | cold | 68 ms | 83 ms | 1.22 (1.10-1.30) | no clear difference | 78 ms, 88 ms | no clear difference |
-| 39 | remove Cataclysm | warm | 76 ms | 243 ms | 3.20 (3.05-3.49) | slower | 137 ms, 290 ms | slower |
-| 39 | remove Cataclysm | cold | 226 ms | 558 ms | 2.47 (2.00-6.69) | slower | 244 ms, 570 ms | slower |
-| 244 | remove Cataclysm | warm | 89 ms | 283 ms | 3.17 (2.97-3.27) | slower | 174 ms, 326 ms | slower |
-| 244 | remove Cataclysm | cold | 260 ms | 625 ms | 2.40 (1.92-5.33) | slower | 282 ms, 637 ms | slower |
-| 39 | upgrade one package | warm | 65 ms | 69 ms | 1.06 (1.02-1.20) | no clear difference | 71 ms, 74 ms | no clear difference |
-| 39 | upgrade one package | cold | 107 ms | 118 ms | 1.10 (1.03-1.20) | no clear difference | 115 ms, 124 ms | no clear difference |
-| 244 | upgrade one package | warm | 87 ms | 94 ms | 1.07 (0.93-1.15) | no clear difference | 116 ms, 102 ms | no clear difference |
-| 244 | upgrade one package | cold | 145 ms | 171 ms | 1.18 (1.14-1.32) | slower | 157 ms, 178 ms | slower |
-| 39 | upgrade 27 packages | warm | 222 ms | 170 ms | 0.77 (0.75-0.79) | **faster** | 259 ms, 176 ms | **faster** |
-| 39 | upgrade 27 packages | cold | 312 ms | 274 ms | 0.88 (0.83-0.91) | **faster** | 322 ms, 281 ms | **faster** |
-| 39 | add nano over HTTP | warm | 14 ms | 43 ms | 3.12 (3.07-3.19) | slower | 20 ms, 51 ms | slower |
-| 244 | add nano over HTTP | warm | 34 ms | 48 ms | 1.42 (1.40-1.44) | slower | 44 ms, 56 ms | slower |
-| 39 | add nano over HTTP, +25 ms a request | warm | 41 ms | 104 ms | 2.56 (2.51-2.58) | slower | 48 ms, 112 ms | slower |
-| 244 | add nano over HTTP, +25 ms a request | warm | 61 ms | 108 ms | 1.79 (1.77-1.82) | slower | 71 ms, 117 ms | slower |
+| 39 | remove nano | warm | 10 ms | 13 ms | 1.28 (1.22-1.32) | slower | 14 ms, 17 ms | slower |
+| 39 | remove nano | cold | 42 ms | 48 ms | 1.13 (1.02-1.19) | no clear difference | 49 ms, 53 ms | no clear difference |
+| 244 | remove nano | warm | 30 ms | 20 ms | 0.69 (0.65-0.71) | **faster** | 38 ms, 24 ms | **faster** |
+| 244 | remove nano | cold | 64 ms | 71 ms | 1.11 (1.02-1.25) | no clear difference | 76 ms, 76 ms | no clear difference |
+| 39 | remove Cataclysm | warm | 78 ms | 175 ms | 2.24 (2.08-2.34) | slower | 143 ms, 188 ms | slower |
+| 39 | remove Cataclysm | cold | 242 ms | 372 ms | 1.54 (1.26-4.03) | slower | 257 ms, 385 ms | slower |
+| 244 | remove Cataclysm | warm | 93 ms | 216 ms | 2.33 (2.24-2.42) | slower | 174 ms, 230 ms | slower |
+| 244 | remove Cataclysm | cold | 285 ms | 436 ms | 1.53 (1.33-3.38) | slower | 304 ms, 448 ms | slower |
+| 39 | upgrade one package | warm | 68 ms | 86 ms | 1.27 (0.97-1.40) | no clear difference | 86 ms, 93 ms | no clear difference |
+| 39 | upgrade one package | cold | 114 ms | 117 ms | 1.03 (0.99-1.17) | no clear difference | 120 ms, 124 ms | no clear difference |
+| 244 | upgrade one package | warm | 88 ms | 104 ms | 1.18 (1.02-1.55) | no clear difference | 119 ms, 113 ms | no clear difference |
+| 244 | upgrade one package | cold | 147 ms | 172 ms | 1.18 (1.10-1.33) | slower | 160 ms, 182 ms | slower |
+| 39 | upgrade 27 packages | warm | 232 ms | 169 ms | 0.73 (0.71-0.79) | **faster** | 245 ms, 174 ms | **faster** |
+| 39 | upgrade 27 packages | cold | 315 ms | 283 ms | 0.90 (0.87-0.93) | **faster** | 325 ms, 290 ms | **faster** |
+| 39 | add nano over HTTP | warm | 14 ms | 14 ms | 0.96 (0.93-0.98) | no clear difference | 20 ms, 20 ms | no clear difference |
+| 244 | add nano over HTTP | warm | 36 ms | 19 ms | 0.52 (0.50-0.54) | **faster** | 46 ms, 27 ms | **faster** |
+| 39 | add nano over HTTP, +25 ms a request | warm | 40 ms | 41 ms | 1.04 (1.02-1.06) | no clear difference | 47 ms, 49 ms | no clear difference |
+| 244 | add nano over HTTP, +25 ms a request | warm | 62 ms | 46 ms | 0.73 (0.70-0.76) | **faster** | 74 ms, 53 ms | **faster** |
 
-Where catalyst loses, and why:
-- **Removing a big package:** every file has two names, one under
-  `Programs` and one in the live tree, so it is unlinked twice (about
-  55 ms and 77 ms for Cataclysm's 8,517 entries), each pass on one thread;
-  apk unlinks once. Then about 44 ms in the three flushes, 42 ms reading
-  the records (twice) and checking ownership, and 34 ms rewriting about
-  3,600 bucket files of the lookup index.
-- **A network repository:** catalyst downloads the index on every `add`
-  and apk does not (it uses its cached index for four hours: with the
-  cached file made 3 hours old it asked for nothing, 5 hours old it asked
-  again). So catalyst makes two requests where apk makes one, and it sets
-  up TLS, reading the system's certificates, on every run with a remote
-  repository, even one over plain HTTP.
+Over the 34 cases of both tables catalyst is faster in 9, slower in 6,
+and in 19 there is no clear difference. Where it loses, and why:
+- **Removing a big package** (2.2 times apk's time warm, 1.5 cold). Every
+  file has two names, one under `Programs` and one in the live tree, so it
+  is unlinked twice; apk unlinks once. The two passes run on several
+  threads now (about 34 ms and 38 ms for Cataclysm's 8,517 entries; 55 and
+  77 before), but unlinks on ext4 gain little from threads. On top come
+  about 26 ms in the three flushes, 30 ms reading the records and checking
+  ownership, and 28 ms rewriting about 3,600 bucket files of the lookup
+  index. It was 3.2 times apk's time before the threads and before the
+  records were read once.
 - **Removing one small package on a small system:** the three flushes,
   which a removal keeps.
+- **Upgrading one package on the big system from a cold cache:** reading
+  catalyst's own files from the disk.
+
+Over the network catalyst was 1.4 to 3.1 times slower until it stopped
+downloading the index on every `add` (see Trust and limits: a cached
+index is used for four hours, as apk does) and stopped setting up TLS,
+which reads the system's certificates, for URLs that need none.
 
 `add nano`, warm, over the rounds of this work (medians of 15):
 
@@ -733,7 +746,7 @@ is reading files from the disk.
 
 ## Tests
 
-- **`cargo test`:** 43 unit tests, 11 command tests and 16 tests over the
+- **`cargo test`:** 44 unit tests, 11 command tests and 19 tests over the
   real repository:
   - every package verified against the index;
   - tampering of every kind is rejected;
@@ -745,6 +758,10 @@ is reading files from the disk.
     reboot and the rest of the tree is as it was; an add cut in its switch
     is finished only when what it installs is whole; an add that has to
     replace something is synced from there on;
+  - against an HTTP server inside the test: `add` uses a cached index for
+    four hours and `add -u` and `upgrade` ask the server; an add that
+    fails with a cached index is tried again with a fresh one; a
+    repository that redirects is followed;
   - a broken record stops only the changes that need it, and `oct fix`
     rebuilds it from the signed package;
   - the lookup index knows the tree's directory symlinks and, after a

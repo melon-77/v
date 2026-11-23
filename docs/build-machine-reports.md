@@ -10,6 +10,39 @@ How this works:
 
 ---
 
+## 2026-11-23: the network losses are fixed; big removals are 2.2x apk's time, down from 3.2x
+
+**After the report below, two of its three losses were worked on.** Same strict benchmark, all 34 cases run again:
+
+| job | cache | 39 packages: apk, catalyst | verdict | 244 packages: apk, catalyst | verdict |
+|---|---|---|---|---|---|
+| add nano over HTTP | warm | 14 ms, 14 ms (was 43) | no clear difference | 36 ms, 19 ms (was 48) | **faster**, 0.52 |
+| add nano over HTTP, +25 ms a request | warm | 40 ms, 41 ms (was 104) | no clear difference | 62 ms, 46 ms (was 108) | **faster**, 0.73 |
+| remove Cataclysm | warm | 78 ms, 175 ms (was 243) | slower, 2.2x | 93 ms, 216 ms (was 283) | slower, 2.3x |
+| remove Cataclysm | cold | 242 ms, 372 ms (was 558) | slower, 1.5x | 285 ms, 436 ms (was 625) | slower, 1.5x |
+| remove nano | warm | 10 ms, 13 ms | slower, 1.28x | 30 ms, 20 ms | **faster**, 0.69 |
+| upgrade one package | cold | 114 ms, 117 ms | no clear difference | 147 ms, 172 ms | slower, 1.18x |
+| upgrade 27 packages | warm | 232 ms, 169 ms | **faster**, 0.73 | not run | |
+
+Over all 34 cases: faster in 9, slower in 6, no clear difference in 19. The installs are as in the last report but one. Full tables: `catalyst/README.md`, "The strict comparison".
+
+**The network (the owner decided the first point: "Reuse for 4 hours"):**
+- **`add` plans with a cached index up to four hours old** without asking the server, as apk does. `add -u`, `upgrade` and `update` always ask.
+- **If a download then fails,** the index is fetched and the change is tried once more: the server may have replaced the package since.
+- **TLS is set up only when a URL needs it.** Reading the system's certificates was about 25 ms of every run with a remote repository, even over plain HTTP. An HTTP repository that redirects is still followed.
+
+**Removals:**
+- **Both unlink passes run on several threads** (the entries in the live tree, then the old version folders): 55 + 77 ms became 34 + 38 ms for Cataclysm. ext4 gains little from threads here.
+- **The records are read once,** not for the check and again for the switch.
+
+**What is left of the removal gap is the design:** two names per file, about 3,600 index buckets to rewrite, and the flushes a removal keeps.
+
+**Checks:**
+- **Tests:** 74 pass (44 unit, 11 command, 19 over the real repository). Four are new: three against an HTTP server inside the test (the four-hour reuse, the retry, a redirect), one for the threaded tree removal (no symlink is followed).
+- **Kill test:** 80/80 of the upgrade (77 killed while running), 80/80 of `KT_JOB=small` (78) and 80/80 of `KT_JOB=add` (75), 0 failures.
+
+---
+
 ## 2026-11-23: the benchmark, extended: catalyst loses on big removals and over the network
 
 **The owner asked for the cases the benchmark didn't have: removals, upgrades, a network repository.** Same strict rules (15 runs per tool, every run kept). Of 18 new cases catalyst is faster in 3, level in 5 and **slower in 10**:

@@ -912,3 +912,146 @@ fn an_add_is_synced_once_it_replaces_something_and_other_changes_always() {
     assert_eq!(std::fs::read_to_string(&world).unwrap(), "less\nnano\n");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A small HTTP server over the directory above the repository: `/x86_64/...`
+/// are its files, `/moved/...` redirects there, and the first request whose
+/// path contains `fail_once` (if not empty) gets a 404. Returns its port and
+/// the paths asked for.
+fn serve(fail_once: &'static str) -> (u16, std::sync::Arc<Mutex<Vec<String>>>) {
+    use std::io::Write;
+    let dir = repo().unwrap().parent().unwrap().to_path_buf();
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let log2 = log.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { continue };
+            let (dir, log, failed) = (dir.clone(), log2.clone(), failed.clone());
+            std::thread::spawn(move || {
+                let mut req = Vec::new();
+                let mut b = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut b) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => req.extend_from_slice(&b[..n]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&req).lines().next().unwrap_or("").to_string();
+                let path = line.split(' ').nth(1).unwrap_or("/").to_string();
+                log.lock().unwrap().push(path.clone());
+                let head = |code: &str, extra: &str, len: usize| {
+                    format!("HTTP/1.1 {code}\r\n{extra}Content-Length: {len}\r\nConnection: close\r\n\r\n")
+                };
+                if let Some(to) = path.strip_prefix("/moved") {
+                    let _ = s.write_all(head("302 Found", &format!("Location: {to}\r\n"), 0).as_bytes());
+                    return;
+                }
+                let gone = !fail_once.is_empty() && path.contains(fail_once) && !failed.swap(true, Ordering::SeqCst);
+                match std::fs::read(dir.join(path.trim_start_matches('/'))) {
+                    Ok(body) if !gone => {
+                        let _ = s.write_all(head("200 OK", "", body.len()).as_bytes());
+                        let _ = s.write_all(&body);
+                    }
+                    _ => {
+                        let _ = s.write_all(head("404 Not Found", "", 0).as_bytes());
+                    }
+                }
+            });
+        }
+    });
+    (port, log)
+}
+
+fn oct_url(root: &Path, url: &str, args: &[&str]) -> std::process::Output {
+    let keys = std::env::var("CATALYST_KEYS").unwrap_or_else(|_| "/root/valence/keys/trusted".into());
+    let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_oct"));
+    c.args(["--root", root.to_str().unwrap(), "--repository", url, "--keys-dir", &keys, "--no-scripts", "--plain"]);
+    c.args(args).output().unwrap()
+}
+
+/// The owner's "Reuse for 4 hours" (2026-11-23): `add` plans with a cached
+/// index up to four hours old without asking the server; `add -u` and
+/// `upgrade` ask; an older cached index is fetched again.
+#[test]
+fn add_uses_a_cached_index_for_four_hours() {
+    if repo().is_none() {
+        return;
+    }
+    let (port, log) = serve("");
+    let url = format!("http://127.0.0.1:{port}/x86_64/Packages.adb");
+    let root = fresh_root("index-age");
+    let asked = |what: &str| {
+        let mut l = log.lock().unwrap();
+        let n = l.iter().filter(|p| p.contains(what)).count();
+        l.clear();
+        n
+    };
+    let run = |args: &[&str]| {
+        let out = oct_url(&root, &url, args);
+        assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
+    };
+    run(&["--initdb", "add", "tree"]);
+    assert_eq!(asked("Packages.adb"), 1, "nothing cached yet");
+    run(&["add", "nano"]);
+    assert!(root.join("usr/bin/nano").exists());
+    assert_eq!(asked("Packages.adb"), 0, "a fresh cached index is used as it is");
+    run(&["add", "-u", "nano"]);
+    assert_eq!(asked("Packages.adb"), 1, "add -u asks the server");
+    run(&["upgrade"]);
+    assert_eq!(asked("Packages.adb"), 1, "upgrade asks the server");
+    // five hours later
+    let cached: Vec<_> = std::fs::read_dir(root.join("var/cache/catalyst"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("Packages."))
+        .collect();
+    assert_eq!(cached.len(), 1, "{cached:?}");
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 3600);
+    std::fs::OpenOptions::new().write(true).open(&cached[0]).unwrap().set_modified(old).unwrap();
+    run(&["add", "less"]);
+    assert_eq!(asked("Packages.adb"), 1, "an index older than four hours is fetched again");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A cached index may name a package the server has replaced since. The
+/// download fails, and the add is done once more with the index fetched.
+#[test]
+fn an_add_that_fails_with_a_cached_index_is_tried_again_with_a_fresh_one() {
+    if repo().is_none() {
+        return;
+    }
+    let (port, log) = serve("/nano-");
+    let url = format!("http://127.0.0.1:{port}/x86_64/Packages.adb");
+    let root = fresh_root("index-retry");
+    assert!(oct_url(&root, &url, &["--initdb", "add", "tree"]).status.success());
+    log.lock().unwrap().clear();
+    let out = oct_url(&root, &url, &["add", "nano"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("trying again"), "{}", text(&out.stderr));
+    let l = log.lock().unwrap().clone();
+    assert_eq!(l.iter().filter(|p| p.contains("/nano-")).count(), 2, "{l:?}");
+    assert_eq!(l.iter().filter(|p| p.contains("Packages.adb")).count(), 1, "{l:?}");
+    assert!(root.join("usr/bin/nano").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// TLS is set up only when a URL needs it: a plain HTTP repository does
+/// without, and one that redirects is followed all the same.
+#[test]
+fn a_redirecting_http_repository_is_followed() {
+    if repo().is_none() {
+        return;
+    }
+    let (port, log) = serve("");
+    let url = format!("http://127.0.0.1:{port}/moved/x86_64/Packages.adb");
+    let root = fresh_root("redirect");
+    let out = oct_url(&root, &url, &["--initdb", "add", "tree"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(root.join("usr/bin/tree").exists());
+    let l = log.lock().unwrap().clone();
+    assert!(l.iter().any(|p| p == "/moved/x86_64/Packages.adb") && l.iter().any(|p| p == "/x86_64/Packages.adb"), "{l:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}

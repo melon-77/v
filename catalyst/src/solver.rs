@@ -613,6 +613,7 @@ mod tests {
             generation: 0,
             offer: [0; 32],
             stale: false,
+            reused: false,
         };
         let inst: BTreeMap<String, Installed> = installed
             .iter()

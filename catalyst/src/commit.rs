@@ -825,6 +825,11 @@ impl<'a> Switch<'a> {
         modified: &mut HashSet<Vec<u8>>,
     ) {
         let mut dirs: BTreeSet<(usize, Vec<u8>)> = BTreeSet::new();
+        // Which entries may go is decided here, on this thread (the lookups
+        // share their caches). What follows for each of them, two lstat and
+        // an unlink, runs on several threads when the package is big:
+        // removing Cataclysm's 8,517 entries one after another took 55 ms.
+        let mut may_go: Vec<(&FileRec, PathBuf)> = Vec::new();
         for r in &o.recs {
             if r.is_dir() {
                 if !own.dirs.contains(&r.path) && !in_index(lookup, &r.path, true) {
@@ -839,36 +844,62 @@ impl<'a> Switch<'a> {
             if keep.contains(&e.canon) || in_index(lookup, &e.canon, false) {
                 continue;
             }
-            let Ok(m) = fs::symlink_metadata(&e.host) else { continue };
+            may_go.push((r, e.host));
+        }
+        enum Gone {
+            Removed,
+            /// changed locally: kept, and said so
+            Kept,
+            /// not there any more, or a directory now
+            Nothing,
+            Failed(io::Error),
+        }
+        let odir = &o.dir;
+        let one = |(r, host): &(&FileRec, PathBuf)| -> Result<Gone> {
+            let Ok(m) = fs::symlink_metadata(host) else { return Ok(Gone::Nothing) };
             let ours = match &r.kind {
                 _ if m.is_dir() => false,
                 RecKind::File(FileKind::Symlink(t)) => {
                     m.file_type().is_symlink()
-                        && fs::read_link(&e.host).map_or(false, |l| l.as_os_str().as_bytes() == &t[..])
+                        && fs::read_link(host).map_or(false, |l| l.as_os_str().as_bytes() == &t[..])
                 }
                 _ if m.file_type().is_symlink() => false,
                 RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if m.is_file() => {
                     let same_inode = !is_etc(&r.path)
-                        && fs::symlink_metadata(o.dir.join(OsStr::from_bytes(&r.path)))
+                        && fs::symlink_metadata(odir.join(OsStr::from_bytes(&r.path)))
                             .map_or(false, |pm| pm.dev() == m.dev() && pm.ino() == m.ino());
                     same_inode
                         || Alg::from_len(r.hash.len())
-                            .map_or(false, |a| hash_file(&e.host, a).map_or(false, |h| h == r.hash))
+                            .map_or(false, |a| hash_file(host, a).map_or(false, |h| h == r.hash))
                 }
                 RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) => false,
                 _ => !m.is_file(), // device node or fifo
             };
             if !ours {
-                if !m.is_dir() {
+                return Ok(if m.is_dir() { Gone::Nothing } else { Gone::Kept });
+            }
+            Ok(match fs::remove_file(host) {
+                Ok(()) => Gone::Removed,
+                Err(err) => Gone::Failed(err),
+            })
+        };
+        let done = match crate::index::on_threads(&may_go, one) {
+            Ok(d) => d,
+            Err(e) => {
+                self.err(format!("{}: removing its entries: {e}", o.meta.nv()));
+                Vec::new()
+            }
+        };
+        for (g, (r, _)) in done.into_iter().zip(&may_go) {
+            match g {
+                Gone::Removed => self.rep.removed += 1,
+                Gone::Kept => {
                     let msg = format!("/{} was changed locally; kept", r.path_lossy());
                     println!("  {msg}");
                     self.rep.warnings.push(msg);
                 }
-                continue;
-            }
-            match fs::remove_file(&e.host) {
-                Ok(()) => self.rep.removed += 1,
-                Err(err) => self.err(format!("{}: removing /{}: {err}", o.meta.nv(), r.path_lossy())),
+                Gone::Nothing => {}
+                Gone::Failed(err) => self.err(format!("{}: removing /{}: {err}", o.meta.nv(), r.path_lossy())),
             }
         }
         for (_, d) in dirs {
@@ -915,9 +946,22 @@ pub fn switch(
     j: JournalFile,
     opts: &SwitchOptions,
     index: Option<&crate::index::Index>,
+    pool: Vec<PkgState>,
 ) -> Result<Report> {
     let plan = j.plan.clone();
     let programs = Db::programs(root);
+    // records the caller read a moment ago (to check the change) are not
+    // read again: for a big package that is thousands of lines each time
+    let mut pool: HashMap<PathBuf, PkgState> = pool.into_iter().map(|p| (p.dir.clone(), p)).collect();
+    let mut load = |dir: &Path, changed: bool| -> Result<PkgState> {
+        match pool.remove(dir) {
+            Some(mut p) => {
+                p.changed = changed;
+                Ok(p)
+            }
+            None => PkgState::load(dir, changed),
+        }
+    };
     let changed: HashMap<&str, &Op> = plan.ops.iter().map(|o| (o.name(), o)).collect();
     let changed_names: HashSet<String> = changed.keys().map(|s| s.to_string()).collect();
 
@@ -925,7 +969,7 @@ pub fn switch(
     let mut news: Vec<PkgState> = Vec::new();
     for op in &plan.ops {
         if let Some(v) = op.new_version() {
-            news.push(PkgState::load(&programs.join(op.name()).join(v), true)?);
+            news.push(load(&programs.join(op.name()).join(v), true)?);
         }
     }
     // old versions (absent if already deleted)
@@ -934,7 +978,7 @@ pub fn switch(
         if let Some(v) = op.old_version() {
             let d = programs.join(op.name()).join(v);
             if d.join(db::META_DIR).exists() {
-                olds.insert(op.name().to_string(), PkgState::load(&d, true)?);
+                olds.insert(op.name().to_string(), load(&d, true)?);
             }
         }
     }
@@ -959,7 +1003,7 @@ pub fn switch(
     let mut pkgs: Vec<PkgState> = Vec::new();
     for (name, ip) in installed {
         if !changed.contains_key(name.as_str()) && wanted.as_ref().map_or(true, |w| w.contains(name)) {
-            pkgs.push(PkgState::load(&ip.dir, false)?);
+            pkgs.push(load(&ip.dir, false)?);
         }
     }
     let first_new = pkgs.len();
@@ -1233,6 +1277,7 @@ pub fn switch(
     }
     let Switch { j, rep, .. } = s;
     j.remove(root)?;
+    let mut trees: Vec<PathBuf> = Vec::new();
     for op in &plan.ops {
         // only through real directories (Programs/<name> a symlink is
         // corruption, never followed)
@@ -1240,21 +1285,51 @@ pub fn switch(
             Op::Upgrade { name, old, .. } => {
                 let d = db::checked_pkg_parent(root, name)?.join(old);
                 match fs::symlink_metadata(&d) {
-                    Ok(m) if m.is_dir() => fs::remove_dir_all(&d)?,
+                    Ok(m) if m.is_dir() => trees.push(d),
                     Ok(_) => fs::remove_file(&d)?,
                     Err(_) => {}
                 }
             }
             Op::Remove { name, .. } => {
                 let d = db::checked_pkg_parent(root, name)?;
-                if fs::symlink_metadata(d.join(db::CURRENT)).is_err() && d.exists() {
-                    fs::remove_dir_all(&d)?;
+                if fs::symlink_metadata(d.join(db::CURRENT)).is_err() && fs::symlink_metadata(&d).map_or(false, |m| m.is_dir()) {
+                    trees.push(d);
                 }
             }
             Op::Install { .. } => {}
         }
     }
+    remove_trees(&trees)?;
     Ok(rep)
+}
+
+/// Deletes directory trees (the old versions of a change). Every file of
+/// a package has a second name there, so removing a big package is as
+/// many unlinks again as taking it out of the live tree: 77 ms for
+/// Cataclysm when done one after another. The files go on several threads
+/// when there are many (a directory's files stay together), then the
+/// directories, children first. No symlink is followed: only what
+/// `read_dir` reports as a directory is walked into.
+fn remove_trees(roots: &[PathBuf]) -> io::Result<()> {
+    let mut dirs: Vec<PathBuf> = Vec::new(); // parents before their children
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut todo: Vec<PathBuf> = roots.to_vec();
+    while let Some(d) = todo.pop() {
+        for e in fs::read_dir(&d)? {
+            let e = e?;
+            if e.file_type()?.is_dir() {
+                todo.push(e.path());
+            } else {
+                files.push(e.path());
+            }
+        }
+        dirs.push(d);
+    }
+    crate::index::on_threads(&files, |f| Ok(fs::remove_file(f)?)).map_err(|e| other(e.to_string()))?;
+    for d in dirs.iter().rev() {
+        fs::remove_dir(d)?;
+    }
+    Ok(())
 }
 
 /// Makes an old version directory accessible to root only (mode 0700).
@@ -1666,6 +1741,34 @@ pub fn repair(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trees_are_removed_whole_and_no_symlink_is_followed() {
+        let base = std::env::temp_dir().join(format!("catalyst-rmtrees-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let outside = base.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), b"x").unwrap();
+        // enough files for the threads, in nested directories, with a
+        // symlink to a directory that must not be walked into
+        let (a, b) = (base.join("a"), base.join("b"));
+        for (i, root) in [&a, &b].into_iter().enumerate() {
+            for d in 0..40 {
+                let dir = root.join(format!("d{d}/sub"));
+                fs::create_dir_all(&dir).unwrap();
+                for f in 0..(60 + i) {
+                    fs::write(dir.join(format!("f{f}")), b"data").unwrap();
+                }
+            }
+            symlink(&outside, root.join("d0/link-out")).unwrap();
+            fs::create_dir_all(root.join("empty/deeper")).unwrap();
+        }
+        remove_trees(&[a.clone(), b.clone()]).unwrap();
+        assert!(!a.exists() && !b.exists());
+        assert!(outside.join("keep").exists());
+        remove_trees(&[]).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn commit_hooks_discover_dedup_and_order() {

@@ -56,6 +56,9 @@ pub struct Repo {
     pub offer: [u8; 32],
     /// True if a remote refresh failed and the cached index was used.
     pub stale: bool,
+    /// True if the cached index was used without asking the server: it was
+    /// newer than the age the caller allows.
+    pub reused: bool,
 }
 
 pub fn is_remote(url: &str) -> bool {
@@ -404,6 +407,7 @@ pub fn load(
         Ok((index, trust, offer))
     };
     let mut stale = false;
+    let mut reused = false;
     let (index, trust, offer) = if remote {
         let name = format!("Packages.{}.adb", &url_key(&index_url)[..8]);
         let dest = cache_dir.join(name);
@@ -413,6 +417,7 @@ pub fn load(
             if age <= max_age { Some(()) } else { None }
         });
         if cache_fresh.is_some() {
+            reused = true;
             read(&dest)?
         } else {
             let http = http.ok_or_else(|| Error::Msg("no HTTP client".into()))?;
@@ -457,6 +462,7 @@ pub fn load(
         generation,
         offer,
         stale,
+        reused,
     })
 }
 
@@ -562,6 +568,7 @@ mod tests {
                 generation: 0,
                 offer: [0; 32],
                 stale: false,
+                reused: false,
             }
         };
         assert_eq!(mk("/r/x86_64/Packages.adb").package_url(&p).unwrap(), "/r/x86_64/foo-1-r0.apk");
