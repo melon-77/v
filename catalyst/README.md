@@ -731,9 +731,13 @@ Over the 34 cases of both tables catalyst is faster in 9, slower in 6,
 and in 19 there is no clear difference. Where it loses, and why:
 - **Removing a big package** (2.2 times apk's time warm, 1.5 cold). Every
   file has two names, one under `Programs` and one in the live tree, so it
-  is unlinked twice; apk unlinks once. The two passes run on several
-  threads now (about 34 ms and 38 ms for Cataclysm's 8,517 entries; 55 and
-  77 before), but unlinks on ext4 gain little from threads. On top come
+  is unlinked twice; apk unlinks once. The first pass runs on several
+  threads (about 34 ms for Cataclysm's 8,517 entries, 55 before). The old
+  version folders are deleted with `remove_dir_all`, several trees at a
+  time: a walk by path over all their files was faster (38 ms against 77)
+  and was withdrawn the same day, because a directory swapped for a
+  symlink could have led it out of the tree. Unlinks on ext4 gain little
+  from threads in any case. On top come
   about 26 ms in the three flushes, 30 ms reading the records and checking
   ownership, and 28 ms rewriting about 3,600 bucket files of the lookup
   index. It was 3.2 times apk's time before the threads and before the

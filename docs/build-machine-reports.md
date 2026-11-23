@@ -10,6 +10,41 @@ How this works:
 
 ---
 
+## 2026-11-23: an independent review of the speed rounds and of the audit: 23 findings, the first fixed
+
+**After two bugs of mine got through, everything changed in the speed rounds was reviewed again, the audit commit (756c953) included.** Six reviewers took one area each; every finding then went to two more whose job was to refute it. 23 findings were confirmed by both, 1 was refuted. None is critical.
+
+**Fixed in this commit: deleting old version folders could be led out of the tree.** My threaded deletion (ef805c0) walked the trees by path. A package can have a directory its own user may write; swapped for a symlink while root deletes it, the walk would have followed. It is `fs::remove_dir_all` again, which goes through directory descriptors, with threads only across whole trees. 77 tests pass; kill test 80/80 of the upgrade and 80/80 of `KT_JOB=small`.
+
+**The main result: adds that are not synced, with a check after the reboot, are fragile.** After a reboot that code has to guess whether a file was damaged by a power cut or changed by the admin, and a wrong guess uninstalls a healthy package. Eleven findings are in it:
+- **From my code:**
+  - an empty or cut-off `.catalyst/files` passes as whole, so nothing of the package is checked;
+  - a torn append to the world leaves a bogus entry that nothing repairs;
+  - the recovery deletes the journal before it has cleaned up, so it cannot be restarted;
+  - after a package was dropped, `oct del` cannot run and the printed remedy does not work;
+  - an unterminated last journal line is taken for a done mark.
+- **From the audit's additions:**
+  - `live_whole` takes a deleted or emptied live file, or a directory on a tmpfs, for damage: a healthy package is uninstalled after a clean reboot, and `oct fix` uninstalls it too. The audit's own test asserts this (`missing-live`, `zero-etc`);
+  - `whole_version` now compares hashes, so any in-place change to a hard-linked file counts as damage;
+  - a damaged copy under `etc/` is kept when the journal survived;
+  - only a zero-length `etc/` copy is noticed, not a short one;
+  - the mark is deleted after every `syncfs`, so the next add writes it again with two fsyncs: `add nano` went from 11 to 14.7 ms (3.3 ms measured in that step);
+  - the RSA plausibility check in `canonical_rsa_id` rejects nothing.
+
+**The other findings:**
+- **`etc/` copies are renamed into place without an fsync** (older code, synced changes too): after a power cut the config can be an empty file, which the re-run takes for a local change and keeps.
+- **On btrfs and f2fs a done mark can reach the disk before the work it records,** through a later script mark's fdatasync. The README names both as ordered; that is not established.
+- **Unpacking works by path** in a tree other users can enter.
+- **`--simulate`, `search` and `info` still download the index** and rename it over the cached copy.
+- **A downloaded package that fails at unpack stays in the cache** and is used again.
+- **The fast PEM reader accepts key files OpenSSL would reject** (mine).
+- **A cached index that is fresh by age but no longer verifies is a hard error;** the server is never asked (mine).
+- **Smaller:** `oct info` hides a repository error; no HTTP client when only the packages are remote; files keep the directory's group on `grpid` mounts; a file time of 2^63 seconds panics the unpack.
+
+**What I propose instead of patching the guesses, for the owner to decide:** one protocol for every change. The journal is written, one `syncfs` puts it and everything unpacked on disk, then the switch. A run that finds a journal checks what it names before finishing it, and throws it away if that is not whole. That is safe without guessing, because nothing is placed in the live tree before that `syncfs`. No mark, no check of installed packages after a reboot, and recovery never deletes anything that is installed. Upgrades and removals keep their final `syncfs`.
+
+---
+
 ## 2026-11-23: correction: apk does sync on an installed system; I had said it never does
 
 **My mistake, in every report and table since the benchmarks began:** I wrote that apk leaves the disk to the kernel. It does so only the way the benchmark runs it.

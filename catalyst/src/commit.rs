@@ -1306,33 +1306,37 @@ pub fn switch(
     Ok(rep)
 }
 
-/// Deletes directory trees (the old versions of a change). Every file of
-/// a package has a second name there, so removing a big package is as
-/// many unlinks again as taking it out of the live tree: 77 ms for
-/// Cataclysm when done one after another. The files go on several threads
-/// when there are many (a directory's files stay together), then the
-/// directories, children first. No symlink is followed: only what
-/// `read_dir` reports as a directory is walked into.
+/// Deletes directory trees (the old versions of a change), each with
+/// `fs::remove_dir_all`, several at a time when there are several.
+///
+/// Only whole trees go to the threads. `remove_dir_all` walks a tree
+/// through directory descriptors and follows no symlink, so a directory
+/// that is swapped for a symlink while root deletes it (a package may have
+/// a directory its own user can write) cannot lead the deletion anywhere
+/// else. A walk by path, which an earlier version did here to spread the
+/// files of one tree over the threads, has no such protection.
 fn remove_trees(roots: &[PathBuf]) -> io::Result<()> {
-    let mut dirs: Vec<PathBuf> = Vec::new(); // parents before their children
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut todo: Vec<PathBuf> = roots.to_vec();
-    while let Some(d) = todo.pop() {
-        for e in fs::read_dir(&d)? {
-            let e = e?;
-            if e.file_type()?.is_dir() {
-                todo.push(e.path());
-            } else {
-                files.push(e.path());
-            }
+    let threads = roots.len().min(std::thread::available_parallelism().map_or(4, |n| n.get())).min(8);
+    if threads < 2 {
+        return roots.iter().try_for_each(fs::remove_dir_all);
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let first_err: std::sync::Mutex<Option<io::Error>> = std::sync::Mutex::new(None);
+    std::thread::scope(|sc| {
+        for _ in 0..threads {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(root) = roots.get(i) else { break };
+                if let Err(e) = fs::remove_dir_all(root) {
+                    first_err.lock().unwrap().get_or_insert(e);
+                }
+            });
         }
-        dirs.push(d);
+    });
+    match first_err.into_inner().unwrap() {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
-    crate::index::on_threads(&files, |f| Ok(fs::remove_file(f)?)).map_err(|e| other(e.to_string()))?;
-    for d in dirs.iter().rev() {
-        fs::remove_dir(d)?;
-    }
-    Ok(())
 }
 
 /// Makes an old version directory accessible to root only (mode 0700).
@@ -1770,6 +1774,17 @@ mod tests {
         assert!(!a.exists() && !b.exists());
         assert!(outside.join("keep").exists());
         remove_trees(&[]).unwrap();
+        // one tree (no threads), and a tree that is itself a symlink: the
+        // link goes, what it points at stays
+        let c = base.join("c");
+        fs::create_dir_all(c.join("x/y")).unwrap();
+        fs::write(c.join("x/y/f"), b"data").unwrap();
+        remove_trees(&[c.clone()]).unwrap();
+        assert!(!c.exists());
+        let l = base.join("l");
+        symlink(&outside, &l).unwrap();
+        let _ = remove_trees(&[l.clone(), base.join("missing-is-an-error")]);
+        assert!(outside.join("keep").exists());
         fs::remove_dir_all(&base).unwrap();
     }
 
