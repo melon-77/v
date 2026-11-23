@@ -194,6 +194,9 @@ pub struct Index {
     aliases_sum: String,
     buckets: std::cell::RefCell<HashMap<u32, Bucket>>,
     aliases: std::cell::RefCell<Option<HashMap<Vec<u8>, Vec<(Vec<u8>, String)>>>>,
+    /// Each package's `info` as `meta` held it: an update writes these
+    /// back for the packages it doesn't change instead of formatting them.
+    raw_meta: std::cell::RefCell<HashMap<String, Vec<u8>>>,
 }
 
 fn read_state(dir: &Path) -> Option<State> {
@@ -252,6 +255,7 @@ impl Index {
             aliases_sum: st.aliases_sum,
             buckets: Default::default(),
             aliases: Default::default(),
+            raw_meta: Default::default(),
         })
     }
 
@@ -274,6 +278,7 @@ impl Index {
             if m.info.name != *name {
                 return Err(Error::Format("index: meta".into()));
             }
+            self.raw_meta.borrow_mut().insert(name.to_string(), body.to_vec());
             out.insert(name.to_string(), m);
             i = nl + 1 + len;
         }
@@ -449,12 +454,23 @@ fn format_aliases(m: &[(Vec<u8>, Vec<u8>, String)]) -> String {
     s
 }
 
-fn format_meta(metas: &BTreeMap<String, PkgMeta>) -> Vec<u8> {
+/// `meta` for `metas`. With `reuse`, a package that is not in its changed
+/// set and whose entry was read is written back as it was (it would format
+/// the same: the index is canonical).
+fn format_meta(metas: &BTreeMap<String, PkgMeta>, reuse: Option<(&HashMap<String, Vec<u8>>, &HashSet<String>)>) -> Vec<u8> {
     let mut out = Vec::new();
     for (n, m) in metas {
-        let body = db::format_info(m);
+        let kept = reuse.and_then(|(raw, changed)| if changed.contains(n) { None } else { raw.get(n) });
+        let formatted;
+        let body: &[u8] = match kept {
+            Some(b) => b,
+            None => {
+                formatted = db::format_info(m);
+                formatted.as_bytes()
+            }
+        };
         out.extend_from_slice(format!("pkg {n} {}\n", body.len()).as_bytes());
-        out.extend_from_slice(body.as_bytes());
+        out.extend_from_slice(body);
     }
     out
 }
@@ -557,7 +573,7 @@ pub fn rebuild(root: &Path, pkgs: &[PkgState], durable: bool) -> Result<()> {
         set(&mut present, *b, true);
     }
     let al = format_aliases(&aliases);
-    let meta = format_meta(&metas);
+    let meta = format_meta(&metas, None);
     fs::write(tmp.join("aliases"), &al)?;
     fs::write(tmp.join("meta"), &meta)?;
     fs::write(tmp.join("state"), format_state(&versions, &links, &present, &sum_of(&meta), &sum_of(al.as_bytes())))?;
@@ -649,7 +665,7 @@ pub fn update(
         .unwrap_or_default();
     aliases.extend(new_aliases);
     let al = format_aliases(&aliases);
-    let meta = format_meta(metas);
+    let meta = format_meta(metas, Some((&ix.raw_meta.borrow(), changed)));
     write_replace(&d.join("aliases"), al.as_bytes())?;
     write_replace(&d.join("meta"), &meta)?;
     let versions: BTreeMap<String, String> =

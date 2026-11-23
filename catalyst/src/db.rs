@@ -540,6 +540,11 @@ impl Db {
     pub fn journal_path(root: &Path) -> PathBuf {
         root.join(STATE_DIR).join("journal")
     }
+    /// Where a journal is written before it is in effect; one left there by
+    /// a crash was never in effect (the switch had not started) and goes.
+    pub fn journal_pending_path(root: &Path) -> PathBuf {
+        root.join(STATE_DIR).join("journal.new")
+    }
 
     fn own_dirs(root: &Path) -> [PathBuf; 6] {
         [
@@ -896,15 +901,31 @@ pub struct JournalFile {
     pub plan: Journal,
 }
 
-impl JournalFile {
-    /// Writes the plan atomically (temporary file, fsync, rename, fsync of
-    /// the directory).
-    pub fn create(root: &Path, plan: Journal) -> Result<JournalFile> {
+/// A journal written under its temporary name, not yet in effect.
+pub struct PendingJournal {
+    plan: Journal,
+}
+
+impl PendingJournal {
+    /// Puts the journal in effect: renamed to its name, and the directory
+    /// fsync'ed. Called after a syncfs made its content durable, so the
+    /// journal is never there before what it says.
+    pub fn commit(self, root: &Path) -> Result<JournalFile> {
         let p = Db::journal_path(root);
-        write_atomic(&p, plan.format().as_bytes())?;
+        fs::rename(Db::journal_pending_path(root), &p)?;
         File::open(Db::state(root))?.sync_all()?;
         let f = OpenOptions::new().append(true).open(&p)?;
-        Ok(JournalFile { f, plan })
+        Ok(JournalFile { f, plan: self.plan })
+    }
+}
+
+impl JournalFile {
+    /// Writes the plan under the journal's temporary name, without an
+    /// fsync: the syncfs before the switch makes it durable together with
+    /// the unpacked packages, then [`PendingJournal::commit`] renames it.
+    pub fn prepare(root: &Path, plan: Journal) -> Result<PendingJournal> {
+        fs::write(Db::journal_pending_path(root), plan.format())?;
+        Ok(PendingJournal { plan })
     }
 
     pub fn open(root: &Path) -> Result<Option<JournalFile>> {
@@ -941,10 +962,12 @@ impl JournalFile {
         Ok(())
     }
 
+    /// Deletes the journal, without an fsync of its directory: the switch's
+    /// final syncfs made every mark durable, so a journal that comes back
+    /// after a crash is finished again with every step already marked done.
     pub fn remove(self, root: &Path) -> Result<()> {
         drop(self.f);
         fs::remove_file(Db::journal_path(root))?;
-        File::open(Db::state(root))?.sync_all()?;
         Ok(())
     }
 }

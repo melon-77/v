@@ -112,9 +112,12 @@ pub fn index_from_head<R: Read>(head: Head<R>, keys: &TrustedKeys, opts: &Verify
     if head.data_pending.is_some() {
         return Err(Error::Format("DATA block in an index".into()));
     }
+    crate::prof::mark("  repositories: index read, decompressed");
     let opts = VerifyOptions { expected_identity: None, ..opts.clone() };
     let trust = verify::check_trust(keys, schema, head.adb.bytes(), &head.sigs, &opts)?;
+    crate::prof::mark("  repositories: signature checked");
     let index = Index::from_adb(&head.adb)?;
+    crate::prof::mark("  repositories: index parsed");
     Ok((index, trust))
 }
 

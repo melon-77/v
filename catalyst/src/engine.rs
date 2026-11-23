@@ -134,8 +134,10 @@ fn settle(o: &Options, db: &mut Db) -> Result<()> {
         db.reload()?;
         recovered = true;
     }
-    // what an interrupted rebuild of the index left behind
+    // what an interrupted rebuild of the index left behind, and a journal
+    // written but never put in effect (a crash before the switch)
     crate::index::clean_leftovers(&root);
+    let _ = fs::remove_file(Db::journal_pending_path(&root));
     // the clean-up walk over Programs is only needed after an interrupted or
     // failed run: one whose journal was just finished, or that left the
     // dirty mark (set before unpacking, removed when a change succeeded)
@@ -278,6 +280,7 @@ fn load_repos(
     let vo = VerifyOptions { allow_untrusted: o.allow_untrusted, ..Default::default() };
     let cache = root.join(db::CACHE_DIR);
     let mut fresh = repo::Freshness::load(root, o.allow_rollback);
+    crate::prof::mark("  repositories: keys, freshness record");
     let mut repos = Vec::new();
     let mut problems: usize = 0;
     let mut last_err: Option<Error> = None;
@@ -479,6 +482,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate, None)? } else { (Vec::new(), None, 0) };
     crate::prof::mark("repositories: read and verified");
     let u = Universe::with_arches(&repos, &db.installed, &arches);
+    crate::prof::mark("  resolve: universe built");
     if use_repos {
         warn_newer_installed(db, &u);
     }
@@ -657,8 +661,6 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
 
     // the switch
     let t2 = Instant::now();
-    sys::sync_fs(&fs::File::open(&root)?)?;
-    crate::prof::mark("syncfs before the journal");
     // the journal names the records the switch reads and the index it was
     // planned with: finishing it after a crash reads the same ones
     let reads: Option<Vec<String>> = decided.map(|w| {
@@ -669,11 +671,16 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let index_stamp = reads.as_ref().map(|_| {
         crate::index::stamp(&db.installed.iter().map(|(n, ip)| (n.clone(), ip.meta.info.version.clone())).collect())
     });
-    let jf = JournalFile::create(
+    // written under its temporary name first, so that one syncfs makes it
+    // durable together with everything unpacked; in effect only after that
+    let pending = JournalFile::prepare(
         &root,
         Journal { ops: ops.clone(), world: new_world, reads, index: index_stamp, done: Default::default() },
     )?;
-    crate::prof::mark("journal written");
+    sys::sync_fs(&fs::File::open(&root)?)?;
+    crate::prof::mark("syncfs before the switch (packages and journal)");
+    let jf = pending.commit(&root)?;
+    crate::prof::mark("journal in effect");
     if o.crash_at.as_deref() == Some("journal") {
         eprintln!("oct: CATALYST_CRASH_AT=journal: killed (test hook)");
         sys::kill_self();
@@ -684,8 +691,9 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     }
     crate::prof::mark("switch: old versions deleted; post-commit hooks");
     let rep = switch_res?;
-    db.reload()?;
-    crate::prof::mark("reload");
+    // the database in memory stays the one from before the switch (the
+    // process ends here); the count for the summary comes from the plan
+    let installed_now = db.installed.len() + ni - nr;
     let t_switch = t2.elapsed();
 
     let ok = rep.errors.is_empty();
@@ -696,7 +704,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         "{}: {} packages installed ({ni} new, {nu} upgraded, {nr} removed); {} files placed, {} removed; \
          resolve {:.2}s, fetch+unpack {:.2}s, switch {:.2}s, total {:.2}s",
         if ok { "OK" } else { "ERRORS" },
-        db.installed.len(),
+        installed_now,
         rep.placed,
         rep.removed,
         t_solve.as_secs_f64(),
@@ -751,7 +759,8 @@ pub fn del(o: &Options, names: &[String]) -> Result<bool> {
     let ok = transact(o, &mut db, world, Mode::Keep, HashSet::new(), false)?;
     if !o.simulate {
         for n in &gone {
-            if db.installed.contains_key(n) {
+            // after the switch: what is installed is what has a Current
+            if Db::programs(&db.root).join(n).join(db::CURRENT).exists() {
                 println!("oct: {n} stays installed: other packages need it");
             }
         }

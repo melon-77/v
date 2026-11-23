@@ -231,8 +231,11 @@ differently with the index than without it.
    installed package's when the lookup index can't be used.
 6. **Switch.** This is the only step that touches the live tree, and it
    comes last.
-   1. `syncfs`, so everything unpacked is on disk. Then write the journal
-      (which package goes from which version to which), and fsync it.
+   1. The journal (which package goes from which version to which) is
+      written under a temporary name; one `syncfs` puts it on disk
+      together with everything unpacked; only then is it renamed into
+      place, and its directory fsync'ed. A journal is never there before
+      what it points at.
    2. Per package, dependencies first:
       - the pre-install or pre-upgrade script;
       - its entries placed (see "How entries are placed" below);
@@ -247,7 +250,9 @@ differently with the index than without it.
    4. The world is written.
    5. The triggers of affected packages run.
    6. The lookup index is updated, or rebuilt. `syncfs`. The journal is
-      deleted, then the old versions.
+      deleted (without a sync of its own: by then every step is marked
+      done in it, so a journal that a crash brings back is finished again
+      without changing anything), then the old versions.
 7. **Post-commit hooks.** Run after the switch (and also if an error occurs
    after `pre-commit` ran). Failures warn and do not abort remaining hooks.
 
@@ -292,6 +297,9 @@ disk. A run that finds a journal finishes it first (roll forward):
 - every step is idempotent;
 - placed packages and scripts that ran are marked in the journal, so they
   are not placed or run again.
+
+A `journal.new` left by a crash was never in effect (the crash came
+before the switch began) and is deleted.
 
 While there is a journal, nothing but the recovery uses the lookup index.
 The recovery reads the records the switch read, with the index from
