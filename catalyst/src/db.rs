@@ -745,6 +745,45 @@ pub fn format_world(world: &[Dependency]) -> String {
     s
 }
 
+/// Writes the world for a switch that is not synced ([`crate::unsynced`]):
+/// nothing that is in the file may be lost to a power cut. When the new
+/// world only adds entries, they are appended and the bytes already there
+/// are not rewritten (the file is then not sorted; it is read as a set and
+/// sorted again by the next synced change). Otherwise the new file is put
+/// on disk before it replaces the old one.
+pub fn write_world_unsynced(root: &Path, world: &[Dependency]) -> io::Result<()> {
+    let p = Db::state(root).join("world");
+    let new = format_world(world);
+    let old = match fs::read_to_string(&p) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let have: std::collections::HashSet<&str> = old.split_whitespace().collect();
+    let want: Vec<&str> = new.split_whitespace().collect();
+    if have.iter().all(|w| want.contains(w)) {
+        let mut add = String::new();
+        for w in want.iter().filter(|w| !have.contains(*w)) {
+            add.push_str(w);
+            add.push('\n');
+        }
+        if add.is_empty() {
+            return Ok(());
+        }
+        if !old.is_empty() && !old.ends_with('\n') {
+            add.insert(0, '\n');
+        }
+        return OpenOptions::new().append(true).create(true).open(&p)?.write_all(add.as_bytes());
+    }
+    let tmp = p.with_extension("catalyst-tmp");
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(new.as_bytes())?;
+        f.sync_data()?;
+    }
+    fs::rename(&tmp, &p)
+}
+
 /// Writes a file atomically: temporary name, fsync, rename.
 pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("catalyst-tmp");
@@ -816,6 +855,10 @@ pub struct Journal {
     /// `None`: every record).
     pub reads: Option<Vec<String>>,
     pub index: Option<String>,
+    /// Put in effect without a `syncfs` (an add that is not synced,
+    /// [`crate::unsynced`]): after the system went down, what it installs
+    /// is checked before it is finished.
+    pub unsynced: bool,
     pub done: std::collections::HashSet<String>,
 }
 
@@ -839,6 +882,9 @@ impl Journal {
                 s.push_str(n);
             }
             s.push('\n');
+        }
+        if self.unsynced {
+            s.push_str("unsynced\n");
         }
         s.push_str("end\n");
         s
@@ -865,6 +911,7 @@ impl Journal {
                 ("reads", _) if !ended => {
                     j.reads = Some(f[1..].iter().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
                 }
+                ("unsynced", 1) if !ended => j.unsynced = true,
                 ("end", 1) => ended = true,
                 ("done", 2) if ended => {
                     j.done.insert(f[1].into());
@@ -914,6 +961,17 @@ impl PendingJournal {
         let p = Db::journal_path(root);
         fs::rename(Db::journal_pending_path(root), &p)?;
         File::open(Db::state(root))?.sync_all()?;
+        let f = OpenOptions::new().append(true).open(&p)?;
+        Ok(JournalFile { f, plan: self.plan })
+    }
+
+    /// Puts the journal in effect without making it durable, for an add
+    /// that is not synced ([`crate::unsynced`]). It still guides the next
+    /// run after this process is killed; a power cut may take it, and what
+    /// it installs, away.
+    pub fn commit_unsynced(self, root: &Path) -> Result<JournalFile> {
+        let p = Db::journal_path(root);
+        fs::rename(Db::journal_pending_path(root), &p)?;
         let f = OpenOptions::new().append(true).open(&p)?;
         Ok(JournalFile { f, plan: self.plan })
     }
@@ -1058,8 +1116,12 @@ mod tests {
             world: vec!["a".into(), "b>=2".into()],
             reads: Some(vec!["d".into(), "e".into()]),
             index: Some("ab".repeat(32)),
+            unsynced: false,
             done: Default::default(),
         };
+        let u = Journal { unsynced: true, ..j.clone() };
+        assert!(u.format().contains("\nunsynced\nend\n"));
+        assert!(Journal::parse(&u.format()).unwrap().unsynced && !Journal::parse(&j.format()).unwrap().unsynced);
         let mut t = j.format();
         t.push_str("done pre:a\ndon");
         let p = Journal::parse(&t).unwrap();

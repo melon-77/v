@@ -399,7 +399,9 @@ def final(root, ref):
         a, b = now['programs'].get(name), ref['programs'].get(name)
         if a != b:
             viol.append('Programs/%s differs: %s vs clean %s' % (name, a, b))
-    if now['world'] != ref['world']:
+    # as a set of entries: an add that is not synced appends to the world,
+    # and a synced change (or a recovery) writes it sorted
+    if sorted((now['world'] or '').split()) != sorted((ref['world'] or '').split()):
         viol.append('world differs: %r vs %r' % (now['world'], ref['world']))
     a, b = now['index'], ref['index']
     if a is None:
@@ -424,7 +426,8 @@ def final(root, ref):
             nlinks += 1
     st = os.path.join(root, 'var/lib/catalyst')
     for x in sorted(os.listdir(st)):
-        if x in ('world', 'lock', 'index'):
+        # 'unsynced': the mark of adds that were not synced (src/unsynced.rs)
+        if x in ('world', 'lock', 'index', 'unsynced'):
             continue
         if x == 'exec' and not os.listdir(os.path.join(st, x)):
             continue

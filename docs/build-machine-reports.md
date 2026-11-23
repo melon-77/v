@@ -10,6 +10,46 @@ How this works:
 
 ---
 
+## 2026-11-23: adds of new packages are no longer synced (the owner's decision); `add nano` now beats apk
+
+**The owner decided this today.** catalyst's three device flushes were about 9.5 ms of a 22 ms `add nano`. Told that, the owner said the cases they cover "rarely happen at all if ever" and, of three rules, chose "Skip for adds":
+- **A change that only adds new packages, under 32 MiB, skips the flushes.**
+- **Upgrades, removals and bigger installs are synced exactly as before.** The 32 MiB bound is my addition: above it the flushes are a few percent, and a big unsynced install that runs a script would have to flush everything at once.
+
+**catalyst is no longer slower than apk in any of the 16 cases.** Same strict benchmark as the report below (15 runs per tool, every run kept):
+
+| system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | both synced to disk |
+|---|---|---|---|---|---|---|---|
+| 39 packages | nano | warm | 13 ms | 11 ms | 0.80 (0.79-0.85) | **faster** | **faster**, 0.89 |
+| 244 packages | nano | warm | 32 ms | 16 ms | 0.48 (0.45-0.49) | **faster** | **faster**, 0.52 |
+| 39 packages | nano | cold | 46 ms | 48 ms | 1.05 (1.01-1.10) | no clear difference | no clear difference, 1.06 |
+| 244 packages | nano | cold | 69 ms | 77 ms | 1.11 (1.01-1.17) | no clear difference | no clear difference, 1.04 |
+| 39 packages | Cataclysm | warm | 1.58 s | 1.07 s | 0.68 (0.65-0.79) | **faster** | **faster**, 0.46 |
+| 39 packages | Cataclysm | cold | 1.97 s | 1.29 s | 0.65 (0.62-0.70) | **faster** | **faster**, 0.53 |
+| 244 packages | Cataclysm | warm | 944 ms | 913 ms | 0.97 (0.92-1.02) | no clear difference | **faster**, 0.63 |
+| 244 packages | Cataclysm | cold | 1.08 s | 1.07 s | 0.99 (0.92-1.02) | no clear difference | **faster**, 0.75 |
+
+Cataclysm is over 32 MiB, so it runs the same code as before and its numbers are the same within noise.
+
+**What a power cut can cost: the packages being added, nothing else.**
+- **Only new names.** An unsynced add creates entries that were not there. Before it replaces anything that is there, and before the first script or trigger, it calls `syncfs` and carries on as a synced change.
+- **The world is appended to,** not rewritten.
+- **After a reboot it checks.** Before the first unsynced add after a boot, catalyst records the boot id and what is installed (with an fsync). A run that finds another boot id checks every package added since. One with an unreadable record, or a missing or short file, is removed with its files in the live tree; the next change installs it again if the world names it.
+- **A killed process** is still recovered through the journal, as before.
+
+**For you:**
+- **New file:** `var/lib/catalyst/unsynced`.
+- **The world file** can be unsorted between synced changes; it is read as a set.
+- **`CATALYST_BOOT_ID`** is a test hook that plays a reboot.
+- **Where to read:** `catalyst/README.md`, "Unsynced adds"; the code is `src/unsynced.rs` and `after_unsynced_stop` in `src/engine.rs`.
+
+**Checks:**
+- **Tests:** 70 pass (43 unit, 11 command, 16 over the real repository). Three new ones play a power cut by damaging files and changing the boot id: a package left short is removed and the rest of the tree is exactly as it was; an add cut in its switch is finished only when whole; a lost journal is cleaned up.
+- **Kill test:** 80/80 of the upgrade (79 killed while running), 80/80 of `KT_JOB=small` (78) and 80/80 of the new `KT_JOB=add` (74 killed, 55 of them in the switch), 0 failures.
+- **What the kill test can't do** is cut the power: a killed process keeps the page cache. The power-cut behaviour rests on the three tests above and on the file system committing metadata in order (ext4, XFS, btrfs and f2fs do).
+
+---
+
 ## 2026-11-23: one-package installs, round three, with a benchmark that gives verdicts
 
 **`add nano` is now faster than apk on the 244-package system, and still slower on the 39-package one.** These come from a stricter benchmark than before: 15 runs per tool in ABBA order, every run kept, and a verdict only when a Mann-Whitney test gives p < 0.01 and the 95% interval of the ratio is entirely below 0.95 or above 1.05.

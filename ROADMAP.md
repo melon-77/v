@@ -282,6 +282,14 @@ These are open on purpose. Each gets settled before the phase that needs it.
   2026).
 
 ## Decided
+- **Adds of new packages are not synced** (23 November 2026). catalyst's three device flushes made every install
+  crash-safe and on disk when the command returned; they were about 9.5 ms of a 22 ms `oct add nano`, and the reason
+  apk was faster on a small system. The owner: "the situations it would be nice in rarely happen at all if ever", and,
+  offered three rules (keep all flushes; skip them when a change only adds new packages; skip them always, as apk
+  does), chose "Skip for adds". So a change that only adds new packages skips the flushes, and upgrades and removals
+  keep them. After a power cut the packages being added may be incomplete: the next run finds and removes them
+  (`catalyst/README.md`, "Unsynced adds"). Adds of 32 MiB or more are still synced; that bound is the build machine's
+  addition (above it the flushes are a few percent of an install) and can go if the owner wants.
 - **Defaults for five open questions** (21 November 2026). The owner had no preference yet and took the
   recommended defaults ("yeah sure put them on record"). Each can still change.
   - *GSettings schemas:* glib gets a trigger that runs `glib-compile-schemas` when an installed package changes

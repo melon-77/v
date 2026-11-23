@@ -755,3 +755,160 @@ fn a_verified_index_comes_back_from_the_cache_unchanged() {
     assert!(catalyst::repo::load(&spec, "x86_64", &none, &opts, None, &dir, &fresh, None).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Everything in the live tree (not `Programs`, not catalyst's own
+/// directories): path -> (kind, size).
+fn live_tree(root: &Path) -> std::collections::BTreeMap<String, (char, u64)> {
+    fn walk(base: &Path, rel: &Path, out: &mut std::collections::BTreeMap<String, (char, u64)>) {
+        for e in std::fs::read_dir(base.join(rel)).unwrap().flatten() {
+            let r = rel.join(e.file_name());
+            let name = r.to_string_lossy().into_owned();
+            if ["Programs", "var/lib/catalyst", "var/cache/catalyst"].contains(&name.as_str()) {
+                continue;
+            }
+            let m = e.metadata().unwrap();
+            if m.is_dir() {
+                out.insert(name, ('d', 0));
+                walk(base, &r, out);
+            } else if m.file_type().is_symlink() {
+                out.insert(name, ('l', 0));
+            } else {
+                out.insert(name, ('f', m.len()));
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, Path::new(""), &mut out);
+    out
+}
+
+fn text(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+/// The owner's rule of 2026-11-23: an add of new packages only is not
+/// synced. A power cut can then leave the package being added incomplete,
+/// and nothing else: after the reboot it is found and removed, the rest of
+/// the tree is as it was, and adding it again works.
+#[test]
+fn an_add_damaged_by_a_power_cut_is_removed_and_nothing_else_is() {
+    if repo().is_none() {
+        return;
+    }
+    let root = fresh_root("power-cut");
+    let mark = root.join("var/lib/catalyst/unsynced");
+    let world = root.join("var/lib/catalyst/world");
+    let boot = |b: &'static str| [("CATALYST_BOOT_ID", b), ("CATALYST_PROF", "1")];
+    let out = oct_real(&root, &boot("boot-1"), &["--initdb", "add", "nano"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("this add is not synced") && !text(&out.stderr).contains("syncfs"));
+    assert!(std::fs::read_to_string(&mark).unwrap().contains("\nboot boot-1\n"));
+    // a reboot with everything on disk: nothing to do but a new mark, which
+    // lists what is installed before the next add
+    let before = live_tree(&root);
+    let out = oct_real(&root, &boot("boot-2"), &["add", "tree"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("1 to install"), "{}", text(&out.stdout));
+    assert!(!text(&out.stdout).contains("went down"), "{}", text(&out.stdout));
+    let m = std::fs::read_to_string(&mark).unwrap();
+    assert!(m.contains("\nboot boot-2\n") && m.contains("\nhad nano ") && !m.contains("had tree "), "{m}");
+    assert_eq!(std::fs::read_to_string(&world).unwrap(), "nano\ntree\n");
+    // the power cut: tree's program comes back empty (one inode, in
+    // Programs and in the live tree)
+    let bin = root.join("usr/bin/tree");
+    assert!(bin.metadata().unwrap().len() > 0);
+    std::fs::OpenOptions::new().write(true).open(root.join("Programs/tree/Current/usr/bin/tree")).unwrap().set_len(0).unwrap();
+    assert_eq!(bin.metadata().unwrap().len(), 0);
+    let out = oct_real(&root, &boot("boot-3"), &["fix"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("tree-") && text(&out.stdout).contains("removed"), "{}", text(&out.stdout));
+    assert!(!root.join("Programs/tree").exists() && !bin.exists() && !mark.exists());
+    assert_eq!(live_tree(&root), before);
+    assert!(root.join("usr/bin/nano").metadata().unwrap().len() > 0);
+    // the world still names it: adding it again works, and it is whole
+    let out = oct_real(&root, &boot("boot-3"), &["add", "tree"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(bin.metadata().unwrap().len() > 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// An unsynced add killed in its switch, with tree's files placed and its
+/// `Current` not yet set. In the same boot the next run finishes it, as it
+/// would a synced one. After a reboot it is finished only when what it
+/// installs is whole; a short file, or a journal that did not reach the
+/// disk, and it is undone: the placed files go, the tree is as before.
+#[test]
+fn an_unsynced_add_cut_in_its_switch_is_finished_only_when_whole() {
+    if repo().is_none() {
+        return;
+    }
+    for (i, case) in ["same boot", "reboot, whole", "reboot, short", "reboot, journal lost"].into_iter().enumerate() {
+        let root = fresh_root(&format!("cut-switch-{i}"));
+        assert!(oct_real(&root, &[("CATALYST_BOOT_ID", "boot-1")], &["--initdb", "add", "nano"]).status.success());
+        let before = live_tree(&root);
+        let out = oct_real(&root, &[("CATALYST_BOOT_ID", "boot-1"), ("CATALYST_CRASH_AT", "placed:tree")], &["add", "tree"]);
+        assert!(!out.status.success(), "{case}");
+        let journal = root.join("var/lib/catalyst/journal");
+        assert!(std::fs::read_to_string(&journal).unwrap().contains("\nunsynced\n"), "{case}");
+        let bin = root.join("usr/bin/tree");
+        assert!(bin.exists() && !root.join("Programs/tree/Current").exists(), "{case}");
+        match case {
+            "reboot, short" => {
+                let v = std::fs::read_dir(root.join("Programs/tree")).unwrap().flatten().next().unwrap().path();
+                std::fs::OpenOptions::new().write(true).open(v.join("usr/bin/tree")).unwrap().set_len(0).unwrap();
+            }
+            "reboot, journal lost" => std::fs::write(&journal, b"").unwrap(),
+            _ => {}
+        }
+        let next = if case == "same boot" { "boot-1" } else { "boot-2" };
+        let out = oct_real(&root, &[("CATALYST_BOOT_ID", next)], &["fix"]);
+        assert!(out.status.success(), "{case}: {}", text(&out.stderr));
+        assert!(!journal.exists(), "{case}");
+        if case == "same boot" || case == "reboot, whole" {
+            assert!(root.join("Programs/tree/Current").exists() && bin.metadata().unwrap().len() > 0, "{case}");
+            assert!(std::fs::read_to_string(root.join("var/lib/catalyst/world")).unwrap().contains("tree"), "{case}");
+        } else {
+            assert!(text(&out.stdout).contains("cut short"), "{case}: {}", text(&out.stdout));
+            assert!(!root.join("Programs/tree").exists() && !bin.exists(), "{case}");
+            assert_eq!(live_tree(&root), before, "{case}");
+        }
+        // and the root takes changes again
+        let out = oct_real(&root, &[("CATALYST_BOOT_ID", next)], &["add", "tree"]);
+        assert!(out.status.success(), "{case}: {}", text(&out.stderr));
+        assert!(bin.metadata().unwrap().len() > 0, "{case}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// What is synced: an add that has to replace something that is there
+/// (from that point on), and every change that is not an add. The world is
+/// appended to by an unsynced add and written sorted by a synced change.
+#[test]
+fn an_add_is_synced_once_it_replaces_something_and_other_changes_always() {
+    if repo().is_none() {
+        return;
+    }
+    let root = fresh_root("sync-rule");
+    let env = [("CATALYST_BOOT_ID", "boot-1"), ("CATALYST_PROF", "1")];
+    let world = root.join("var/lib/catalyst/world");
+    let out = oct_real(&root, &env, &["--initdb", "add", "tree"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("this add is not synced") && !text(&out.stderr).contains("syncfs"));
+    let out = oct_real(&root, &env, &["add", "nano"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("this add is not synced") && !text(&out.stderr).contains("syncfs"));
+    assert_eq!(std::fs::read_to_string(&world).unwrap(), "tree\nnano\n", "appended");
+    // something is where the package puts a file: synced before it is
+    // replaced, and a synced switch from there on (the world is rewritten)
+    std::fs::write(root.join("usr/bin/less"), b"mine").unwrap();
+    let out = oct_real(&root, &env, &["add", "less"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("this add is not synced") && text(&out.stderr).contains("switch: final syncfs"));
+    assert!(root.join("usr/bin/less").metadata().unwrap().len() > 4);
+    assert_eq!(std::fs::read_to_string(&world).unwrap(), "less\nnano\ntree\n");
+    let out = oct_real(&root, &env, &["del", "tree"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("this change is synced") && text(&out.stderr).contains("switch: final syncfs"));
+    assert_eq!(std::fs::read_to_string(&world).unwrap(), "less\nnano\n");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -44,6 +44,7 @@ pub mod rootfs;
 pub mod solver;
 pub mod sys;
 pub mod unpack;
+pub mod unsynced;
 pub mod verify;
 pub mod version;
 

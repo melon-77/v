@@ -67,6 +67,10 @@
 #                      symlinks alone, so the switch reads only the records it needs and
 #                      updates the lookup index; the upgrade moves lib64, so it reads every
 #                      record and rebuilds the index.
+#   env KT_JOB=add     instead of the upgrade: add nano less tree htop tmux jq bc file
+#                      (new packages only, under 32 MiB: an add that is not synced,
+#                      src/unsynced.rs). The kill modes that need an upgraded file or a
+#                      script are left out of the default rotation.
 # Exit status 0 when every round passes. Writes only under /root/catalyst-test.
 set -u
 ROUNDS=${1:-80}
@@ -110,7 +114,8 @@ fresh() {  # fresh ROOT: valence-base from the real repository, plus an admin ed
 case ${KT_JOB:-upgrade} in
     upgrade) JOB="upgrade";;
     small) JOB="add -u coreutils util-linux shadow gzip nano";;
-    *) die "KT_JOB is upgrade or small";;
+    add) JOB="add nano less tree htop tmux jq bc file"; : ${KT_MODES:="time journal step+thr step+thr gone step+thr"};;
+    *) die "KT_JOB is upgrade, small or add";;
 esac
 upg() { echo "$V --root $1 --repository $R1 --repository $R3 --keys-dir $KD --plain $JOB"; }
 calc() { awk "BEGIN{printf \"%.4f\", $*}"; }
@@ -228,7 +233,8 @@ for i in $(seq 1 $ROUNDS); do
     [ $rc2 = 0 ] || fail="$fail again-exit-$rc2"
     $CHK final $T $KT/ref.json > $KT/final.out 2>&1 || fail="$fail final-differs"
     cat $KT/final.out >> $L
-    reruns=$(( $(cat $T/var/log/catalyst-kt.log 2>/dev/null | wc -l) - $(wc -l < $KT/ref/var/log/catalyst-kt.log) ))
+    # (the log of the 9999-r0 packages' scripts; a job without them has none)
+    reruns=$(( $(cat $T/var/log/catalyst-kt.log 2>/dev/null | wc -l) - $(cat $KT/ref/var/log/catalyst-kt.log 2>/dev/null | wc -l) ))
     case "$ph" in
         completed) cls=-;;
         journal=1*) cls=switch;;

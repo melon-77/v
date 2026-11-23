@@ -66,6 +66,13 @@ pub struct SwitchOptions {
     pub crash_at: Option<String>,
     /// Print each script's output and the steps.
     pub verbose: bool,
+    /// The journal was put in effect without a `syncfs` (an add that is
+    /// not synced, [`crate::unsynced`]). Such a switch only makes new
+    /// names: before it replaces anything that is there, and before the
+    /// first script runs, it calls `syncfs` and is an ordinary, synced
+    /// switch from there on. One that never needs to ends without a
+    /// `syncfs`.
+    pub unsynced: bool,
 }
 
 #[derive(Debug, Default)]
@@ -148,7 +155,7 @@ pub fn ownership(pkgs: &[PkgState]) -> (Ownership, Vec<String>) {
     (own, conflicts)
 }
 
-fn is_etc(path: &[u8]) -> bool {
+pub(crate) fn is_etc(path: &[u8]) -> bool {
     path.starts_with(b"etc/")
 }
 
@@ -312,6 +319,8 @@ struct Switch<'a> {
     chown: bool,
     dev_checked: bool,
     deferred: Vec<Deferred>,
+    /// Nothing of this switch has been synced so far ([`SwitchOptions::unsynced`]).
+    unsynced: bool,
 }
 
 impl<'a> Switch<'a> {
@@ -569,6 +578,11 @@ impl<'a> Switch<'a> {
         let (dir, _) = rootfs::split_rel(&r.path);
         self.fs.ensure_dir(dir, 0o755, 0, 0)?;
         let dst = self.fs.entry(&r.path)?;
+        // a switch that is not synced only makes new names: before it
+        // replaces anything that is there, it becomes a synced one
+        if self.unsynced && fs::symlink_metadata(&dst.host).is_ok() {
+            self.sync().map_err(|e| other(e.to_string()))?;
+        }
         let src = p.dir.join(OsStr::from_bytes(&r.path));
         match &r.kind {
             RecKind::File(FileKind::Symlink(t)) => self.place_symlink(t, r, old, &dst),
@@ -631,6 +645,14 @@ impl<'a> Switch<'a> {
                     eprintln!("oct: warning: cannot create device nodes in /dev: {e}");
                 }
                 self.fs.forget();
+            }
+            // a script can change anything in the root: a switch that is
+            // not synced becomes a synced one before the first one runs
+            if self.unsynced {
+                if let Err(e) = self.sync() {
+                    self.err(format!("{name}-{version}.{typ}: not run: {e}"));
+                    return;
+                }
             }
             self.rep.scripts += 1;
             if let Err(e) = run_script(&self.root, name, version, typ, &body, args) {
@@ -863,8 +885,11 @@ impl<'a> Switch<'a> {
         self.fs.forget();
     }
 
-    fn sync(&self) -> Result<()> {
+    /// `syncfs`: everything so far is on disk, the journal included, so a
+    /// switch that was not synced is a synced one from here on.
+    fn sync(&mut self) -> Result<()> {
         sys::sync_fs(&File::open(&self.root)?)?;
+        self.unsynced = false;
         Ok(())
     }
 }
@@ -956,6 +981,7 @@ pub fn switch(
         chown: sys::is_root(),
         dev_checked: false,
         deferred: Vec::new(),
+        unsynced: opts.unsynced,
     };
     s.crash("start");
 
@@ -1063,7 +1089,11 @@ pub fn switch(
     // without an fsync of its own: on a big change that would commit the
     // metadata of every entry placed so far, which the final syncfs does
     // anyway; a crash before that redoes this step from the journal
-    db::write_replace(&Db::state(root).join("world"), db::format_world(&world).as_bytes())?;
+    if s.unsynced {
+        db::write_world_unsynced(root, &world)?;
+    } else {
+        db::write_replace(&Db::state(root).join("world"), db::format_world(&world).as_bytes())?;
+    }
     s.crash("world");
 
     // 4. owners once more, now that all files (etc/passwd too) are in place
@@ -1193,9 +1223,14 @@ pub fn switch(
     }
 
     crate::prof::mark("switch: index");
-    // 6. durable, then forget the journal and the old versions
-    s.sync()?;
-    crate::prof::mark("switch: final syncfs");
+    // 6. durable, then forget the journal and the old versions. A switch
+    // that stayed unsynced (it only made new names and ran no script) ends
+    // without a syncfs: what a power cut takes of it, the next run finds
+    // and removes (crate::unsynced)
+    if !s.unsynced {
+        s.sync()?;
+        crate::prof::mark("switch: final syncfs");
+    }
     let Switch { j, rep, .. } = s;
     j.remove(root)?;
     for op in &plan.ops {

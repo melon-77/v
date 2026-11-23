@@ -114,6 +114,7 @@ ROOT/var/lib/catalyst/journal                   the switch in progress
 ROOT/var/lib/catalyst/lock                      held while catalyst (or a script it runs) runs
 ROOT/var/lib/catalyst/indexes/                  what each repository offered last
 ROOT/var/lib/catalyst/index/                    the lookup index of what is installed
+ROOT/var/lib/catalyst/unsynced                  adds since this boot were not synced (see Unsynced adds)
 ROOT/var/cache/catalyst/                        downloaded packages and indexes
 ROOT/var/cache/catalyst/parsed-<16 hex>         a verified repository index, parsed
 ```
@@ -244,7 +245,8 @@ differently with the index than without it.
       written under a temporary name; one `syncfs` puts it on disk
       together with everything unpacked; only then is it renamed into
       place, and its directory fsync'ed. A journal is never there before
-      what it points at.
+      what it points at. (An add that is not synced skips this `syncfs`
+      and fsync, and the final `syncfs` of step 6: see Unsynced adds.)
    2. Per package, dependencies first:
       - the pre-install or pre-upgrade script;
       - its entries placed (see "How entries are placed" below);
@@ -341,6 +343,74 @@ Limits of the recovery:
 - Scripts inherit the lock. A script that outlives a killed catalyst keeps the
   root locked until it ends, and the next catalyst refuses to start beside it
   instead of running the same recovery and script at the same time.
+
+## Unsynced adds
+
+A change that only adds new packages, and unpacks less than 32 MiB, is
+not synced. It skips the `syncfs` before the switch, the fsync that puts
+the journal in effect, and the final `syncfs`. The owner decided this on
+23 November 2026 (ROADMAP, "Decided"): those three flushes were about
+9.5 ms of a 22 ms `add nano`, and what they cover, the power going during
+an install or in the seconds after it, is rare. Every other change is
+synced exactly as described above: an upgrade, a removal, an add that
+upgrades something, an install of 32 MiB or more.
+
+What a power cut can cost is the packages being added, and nothing else:
+- **Only new names.** An unsynced switch creates entries that were not
+  there. Before it replaces anything that is there, and before the first
+  script or trigger runs, it calls `syncfs`. From there on it is an
+  ordinary synced switch, final `syncfs` included.
+- **The world is appended to,** not rewritten, so the entries already in
+  it are never at risk. The file is then not sorted until the next synced
+  change; it is read as a set. If the new world is not the old one plus
+  entries, the new file is fsync'ed before it replaces the old one.
+- **A killed process loses nothing.** Without a power cut the page cache
+  is intact, so the journal works as always: the next run finishes the
+  switch, after a `syncfs`.
+
+Finding out afterwards. Before the first unsynced add after a boot,
+catalyst writes `var/lib/catalyst/unsynced`, with an fsync: the kernel's
+boot id and the packages installed at that moment. A run that finds that
+file with another boot id knows the system went down since adds that may
+not have reached the disk. Before anything else it checks every package
+that is not in that list:
+- A package is whole when its record can be read, every entry of it is
+  there, no file is shorter than recorded and no script is empty. What a
+  power cut takes from unsynced files is their content: they come back
+  short or empty.
+- A package that is not whole is removed, with what it had in the live
+  tree: its hard-linked files (found by inode, not through its record,
+  which may be what was lost), and its symlinks, its untouched or empty
+  copies under `etc/` and its empty directories where no other package
+  has an entry.
+- A journal left by an unsynced add is finished only if everything it
+  installs is whole and nothing had to be removed. Otherwise it is
+  deleted, and the versions it had not made current go the same way.
+- The lookup index is rebuilt unless it has every entry of the recent
+  packages.
+
+After a clean shutdown all of that finds nothing to do; it takes about a
+millisecond per small package added in the earlier boot. catalyst cannot
+tell a clean shutdown from a power cut, which is why it checks after
+every reboot that follows an unsynced add.
+
+What is left to the user after a power cut:
+- a removed package that the world still names is installed again by the
+  next change, or by `oct add` at once;
+- a whole package whose world entry did not reach the disk is removed by
+  the next change, like any package nothing asks for.
+
+Limits:
+- This relies on the file system committing metadata in order, as ext4,
+  XFS, btrfs and f2fs do: if a later step of a switch is on disk, the
+  earlier ones are.
+- A file of a recently added package that someone shortened by hand
+  before a reboot looks like one a power cut shortened: the package is
+  removed, and installed again by the next change.
+- Where the boot id can't be read (`/proc` not mounted), nothing is left
+  unsynced.
+- `CATALYST_BOOT_ID` replaces the boot id; the tests use it to play a
+  reboot.
 
 ## Trust and limits
 
@@ -578,51 +648,58 @@ It gives a verdict only when both of these hold:
   below 0.95 (faster) or above 1.05 (slower).
 
 Anything else is "no clear difference". "+ sync" adds a `sync -f` to both
-tools, since apk leaves writeback to the kernel. 23 November 2026, the
-39-package and the 244-package system, `--no-scripts`:
+tools. 23 November 2026, the 39-package and the 244-package system,
+`--no-scripts`. `add nano` is an add that is not synced (see Unsynced
+adds), as apk's never are; the Cataclysm install is over 32 MiB, so
+catalyst syncs it:
 
 | system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | + sync: apk, catalyst | ratio (95% CI) | verdict |
 |---|---|---|---|---|---|---|---|---|---|
-| 39 | Cataclysm | warm | 1.60 s | 964 ms | 0.60 (0.58-0.63) | **faster** | 2.15 s, 968 ms | 0.45 (0.43-0.48) | **faster** |
-| 39 | Cataclysm | cold | 1.96 s | 1.31 s | 0.67 (0.61-0.71) | **faster** | 2.47 s, 1.31 s | 0.53 (0.48-0.57) | **faster** |
-| 244 | Cataclysm | warm | 958 ms | 939 ms | 0.98 (0.93-1.08) | no clear difference | 1.55 s, 942 ms | 0.61 (0.56-0.71) | **faster** |
-| 244 | Cataclysm | cold | 1.12 s | 1.10 s | 0.98 (0.93-1.04) | no clear difference | 1.48 s, 1.11 s | 0.75 (0.66-0.79) | **faster** |
-| 39 | nano | warm | 13 ms | 23 ms | 1.70 (1.67-1.77) | slower | 20 ms, 26 ms | 1.28 (1.23-1.37) | slower |
-| 39 | nano | cold | 47 ms | 60 ms | 1.28 (1.27-1.34) | slower | 55 ms, 66 ms | 1.21 (1.17-1.24) | slower |
-| 244 | nano | warm | 34 ms | 27 ms | 0.81 (0.78-0.85) | **faster** | 42 ms, 30 ms | 0.72 (0.69-0.77) | **faster** |
-| 244 | nano | cold | 72 ms | 84 ms | 1.16 (1.14-1.22) | slower | 84 ms, 89 ms | 1.06 (1.01-1.10) | no clear difference |
+| 39 | nano | warm | 13 ms | 11 ms | 0.80 (0.79-0.85) | **faster** | 20 ms, 18 ms | 0.89 (0.86-0.92) | **faster** |
+| 39 | nano | cold | 46 ms | 48 ms | 1.05 (1.01-1.10) | no clear difference | 54 ms, 58 ms | 1.06 (1.02-1.10) | no clear difference |
+| 244 | nano | warm | 32 ms | 16 ms | 0.48 (0.45-0.49) | **faster** | 44 ms, 23 ms | 0.52 (0.48-0.55) | **faster** |
+| 244 | nano | cold | 69 ms | 77 ms | 1.11 (1.01-1.17) | no clear difference | 82 ms, 86 ms | 1.04 (0.95-1.11) | no clear difference |
+| 39 | Cataclysm | warm | 1.58 s | 1.07 s | 0.68 (0.65-0.79) | **faster** | 2.35 s, 1.07 s | 0.46 (0.41-0.55) | **faster** |
+| 39 | Cataclysm | cold | 1.97 s | 1.29 s | 0.65 (0.62-0.70) | **faster** | 2.43 s, 1.30 s | 0.53 (0.50-0.56) | **faster** |
+| 244 | Cataclysm | warm | 944 ms | 913 ms | 0.97 (0.92-1.02) | no clear difference | 1.45 s, 916 ms | 0.63 (0.56-0.68) | **faster** |
+| 244 | Cataclysm | cold | 1.08 s | 1.07 s | 0.99 (0.92-1.02) | no clear difference | 1.44 s, 1.08 s | 0.75 (0.71-0.78) | **faster** |
 
 `add nano`, warm, over the rounds of this work (medians of 15):
 
-| system | first strict run | round two | round three | apk |
-|---|---|---|---|---|
-| 39 packages | 32 ms | 29 ms | 23 ms | 13 ms |
-| 244 packages | 44 ms | 37 ms | 27 ms | 34 ms |
+| system | first strict run | round two | round three | adds not synced | apk |
+|---|---|---|---|---|---|
+| 39 packages | 32 ms | 29 ms | 23 ms | 11 ms | 13 ms |
+| 244 packages | 44 ms | 37 ms | 27 ms | 16 ms | 32 ms |
 
-Where a one-package install on the small system spends its 22 ms now:
-- three device flushes (the `syncfs` before the switch, the journal put
-  in effect, the final `syncfs`): about 9.5 ms. apk does none of them;
+Where a one-package install on the small system spends its 11 ms:
 - starting and ending the process: about 5 ms, the same for apk here;
 - unpacking: about 3.5 ms, mostly inflating and hashing;
 - the repository index, from its cache: about 1.5 ms;
-- everything else: about 2 ms.
+- everything else: about 1.5 ms.
 
-So catalyst's own work is about what apk's is (about 7 ms each), and the
-gap on a small system is the flushes. On the big system apk reads and
-rewrites its whole installed database, and catalyst's lookup index does
-not, which is worth more than the flushes cost.
+Until round three it also spent about 9.5 ms in three device flushes.
+Upgrades, removals and installs of 32 MiB or more still do: about 4% of
+the Cataclysm install. On the big system apk reads and rewrites its whole
+installed database and catalyst's lookup index does not, which is why the
+gap is wider there. Cold, a small add is level with apk: most of its time
+is reading files from the disk.
 
 `CATALYST_PROF=1` prints, on stderr, how long each step of a run took.
 
 ## Tests
 
-- **`cargo test`:** 42 unit tests, 11 command tests and 13 tests over the
+- **`cargo test`:** 43 unit tests, 11 command tests and 16 tests over the
   real repository:
   - every package verified against the index;
   - tampering of every kind is rejected;
   - damaged input never panics;
   - a verified index comes back from its cache unchanged, a damaged cache
     file is not used, and other keys verify from scratch;
+  - an add that is not synced, with a power cut played by damaging files
+    and changing the boot id: a package left short is removed after the
+    reboot and the rest of the tree is as it was; an add cut in its switch
+    is finished only when what it installs is whole; an add that has to
+    replace something is synced from there on;
   - a broken record stops only the changes that need it, and `oct fix`
     rebuilds it from the signed package;
   - the lookup index knows the tree's directory symlinks and, after a
@@ -649,12 +726,15 @@ not, which is worth more than the flushes cost.
 
   With `KT_JOB=small` the job is four of those upgrades and a new package
   instead: a change that leaves the directory symlinks alone, so the
-  switch goes through the lookup index.
+  switch goes through the lookup index. With `KT_JOB=add` it adds eight
+  new packages (14 with their dependencies, 16.6 MiB): an add that is not
+  synced.
 
   Results on stage 1's code: 310 rounds, 298 of them killed while
   running and 82 with a package half placed. There were 0 failures. With
   the lookup index: 80 rounds of the upgrade and 80 of `KT_JOB=small`,
-  0 failures. One
+  0 failures. With unsynced adds: 80 rounds each of the upgrade,
+  `KT_JOB=small` and `KT_JOB=add`, 0 failures. One
   earlier failure, a directory left 0700 by a kill between `mkdir` and
   `chmod`, led to the atomic directory creation described under The
   transaction.
