@@ -59,11 +59,17 @@ pub struct Options {
     /// name is fsync'ed and the switch ends with a syncfs), as every change
     /// but an add was before 23 November 2026.
     pub sync: bool,
+    /// `--clean-later` / `--clean-now`: whether the old versions of a big
+    /// change are deleted by a process of its own after the command has
+    /// returned ([`crate::trash`]). `None`: later when the root is `/`,
+    /// now under `--root` (whoever set that root up may unmount it next).
+    /// `--sync` means now.
+    pub clean_later: Option<bool>,
 }
 
 impl Options {
     fn switch_opts(&self) -> SwitchOptions {
-        SwitchOptions { no_scripts: self.no_scripts, crash_at: self.crash_at.clone(), verbose: false, light: false }
+        SwitchOptions { no_scripts: self.no_scripts, crash_at: self.crash_at.clone(), verbose: false, light: false, clean_later: false }
     }
     fn fancy(&self) -> bool {
         !self.plain && sys::is_tty(1)
@@ -198,6 +204,11 @@ fn settle(o: &Options, db: &mut Db) -> Result<usize> {
     // what an interrupted rebuild of the index left behind, and a journal
     // written but never put in effect (a crash before the switch)
     crate::index::clean_leftovers(&root);
+    // old versions that an earlier run left to be deleted later and that
+    // nobody is deleting (its process died)
+    if let Err(e) = crate::trash::empty(&root) {
+        eprintln!("oct: warning: the trash of old versions: {e}");
+    }
     let _ = fs::remove_file(Db::journal_pending_path(&root));
     let _ = fs::remove_file(Db::world_pending_path(&root));
     for t in stray_temporaries(&root) {
@@ -737,6 +748,10 @@ fn transact_at(
     // script puts the journal's name on disk first and syncs after it
     // (`Switch::harden`).
     let light = !o.sync;
+    // Old versions of a big change are deleted after the command has
+    // returned where someone waits for it on the installed system; anywhere
+    // else only when asked for.
+    let clean_later = !o.sync && o.clean_later.unwrap_or_else(|| later_by_default(&root));
 
     // fetch and unpack; the dirty mark makes the next run clean up after a
     // crash before the journal exists
@@ -935,24 +950,43 @@ fn transact_at(
         &root,
         &db.installed,
         jf,
-        &SwitchOptions { light, ..o.switch_opts() },
+        &SwitchOptions { light, clean_later, ..o.switch_opts() },
         db.index.as_ref(),
         pool,
         staged,
     );
-    if run_hooks {
+    if run_hooks && light && !commit::discover_commit_hooks(&root).is_empty() {
         // A hook may write, and sync, what it likes (a snapshot, a note of
         // the change): like a script it must not get ahead of the change.
         // So when there are hooks the change is put on disk before they
         // run, also after a switch that failed and left its journal.
-        if light && !commit::discover_commit_hooks(&root).is_empty() {
-            if let Err(e) = commit::sync_root(&root) {
-                eprintln!("oct: warning: syncfs before the post-commit hooks: {e}");
-            }
+        if let Err(e) = commit::sync_root(&root) {
+            eprintln!("oct: warning: syncfs before the post-commit hooks: {e}");
         }
+    }
+    // Old versions that wait in the trash: from here on a process of its own
+    // deletes them, or this one does where none comes to run. Before the
+    // post-commit hooks, which may take their time, and so that a hook finds
+    // as little of the old versions as can be (one that takes a snapshot
+    // would keep what it finds; `--clean-now` is for such a system).
+    if switch_res.as_ref().map_or(false, |r| r.trash) {
+        if o.crash_at.as_deref() == Some("trash") {
+            eprintln!("oct: CATALYST_CRASH_AT=trash: killed (test hook)");
+            sys::kill_self();
+        }
+        if crate::trash::empty_later(&root) {
+            crate::prof::mark("old versions left to a process of its own");
+        } else {
+            if let Err(e) = crate::trash::empty(&root) {
+                eprintln!("oct: warning: deleting the old versions: {e}");
+            }
+            crate::prof::mark("old versions deleted here (no process came to run)");
+        }
+    }
+    if run_hooks {
         let _ = commit::run_commit_hooks(&root, "post-commit");
     }
-    crate::prof::mark("switch: old versions deleted; post-commit hooks");
+    crate::prof::mark("switch: old versions deleted (or left to the trash); post-commit hooks");
     let rep = switch_res?;
     // the database in memory stays the one from before the switch (the
     // process ends here); the count for the summary comes from the plan
@@ -982,6 +1016,23 @@ fn transact_at(
         }
     }
     Ok(ok)
+}
+
+/// Whether the old versions of a big change are deleted after the command
+/// when nothing was said: on the installed system (the root is `/` and is
+/// the root of process 1, not a chroot that may be unmounted next) when the
+/// command writes to a terminal, where someone waits for it. A script, a
+/// build, a container's one command have everything done when the command
+/// returns: nothing may be there to finish the rest.
+fn later_by_default(root: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if root != Path::new("/") || !sys::is_tty(1) {
+        return false;
+    }
+    match (fs::metadata("/"), fs::metadata("/proc/1/root")) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
 }
 
 fn parse_names(names: &[String]) -> Result<Vec<Dependency>> {
@@ -1037,9 +1088,32 @@ pub fn upgrade(o: &Options) -> Result<bool> {
     transact(o, &mut db, world, Mode::Upgrade, HashSet::new(), true)
 }
 
+/// `empty-trash`: deletes the old versions that a change left to be deleted
+/// after it had returned ([`crate::trash`]). oct starts this itself, as a
+/// process of its own; it takes no lock and reads no database.
+pub fn empty_trash(o: &Options) -> Result<bool> {
+    use std::io::Write;
+    let root = abs_root(o, false)?;
+    // as before anything else is deleted: catalyst's own directories must
+    // be real directories
+    for d in Db::own_dirs(&root) {
+        db::real_dir(&d).map_err(Error::Io)?;
+    }
+    if o.simulate {
+        let e = crate::trash::entries(&root);
+        println!("OK: simulated; would delete {} entries of the trash{}{}", e.len(), if e.is_empty() { "" } else { ": " }, e.join(", "));
+        return Ok(true);
+    }
+    // whoever started this waits for this line (trash::empty_later)
+    let mut out = std::io::stdout();
+    let _ = out.write_all(crate::trash::STARTED).and_then(|()| out.flush());
+    crate::trash::empty(&root)?;
+    Ok(true)
+}
+
 /// `recover`: finishes what an interrupted run left behind (a switch whose
 /// journal is there, what a run prepared and never began, an index half
-/// rebuilt) and does nothing else. It is what every other command does
+/// rebuilt, old versions left in the trash) and does nothing else. It is what every other command does
 /// first; as a command of its own it is for the start of the system, so
 /// that a change cut by a power failure is finished before anyone logs in.
 /// When nothing was left, the root is not even locked (it may still be
@@ -1047,7 +1121,7 @@ pub fn upgrade(o: &Options) -> Result<bool> {
 pub fn recover(o: &Options) -> Result<bool> {
     let root = abs_root(o, false)?;
     let state = root.join(db::STATE_DIR);
-    let mut left: Vec<&str> = ["journal", "journal.new", "world.new", "dirty", "index.new", "index.old", "index/next"]
+    let mut left: Vec<&str> = ["journal", "journal.new", "world.new", "dirty", "index.new", "index.old", "index/next", "trash"]
         .into_iter()
         .filter(|n| fs::symlink_metadata(state.join(n)).is_ok())
         .collect();

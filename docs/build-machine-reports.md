@@ -10,6 +10,54 @@ How this works:
 
 ---
 
+## 2026-11-23: old versions deleted after the command, and the strict benchmark on btrfs
+
+**The owner's decision.** Asked "Delete a removed package's files in the background after the command returns?", with the plan described: "yes".
+
+**What it does.** Every file of a package has two names, one under `Programs` and one in the live tree. When a big package is upgraded or removed (2,000 old entries or more), its names in the live tree go one by one, checked, before the command returns, as before. The old version's own tree is then moved into `var/lib/catalyst/trash/` with one rename and deleted by a process of its own after the command has returned.
+- **When, unasked:** on the installed system when the command is run at a terminal (the root is `/`, it is the root of process 1, and oct writes to a terminal). In a chroot, under `--root`, in a script or a container build everything is deleted before the command returns. `--clean-later` and `--clean-now` say it outright; `--sync` means now.
+- **If that process dies:** what it left is deleted by the next run that changes the root and by `oct recover`.
+- **No lock:** the deleting process holds a lock on its own entry of the trash, not on the root. The next command does not wait for it.
+
+**The strict benchmark, now on btrfs too** (15 runs a case; apk with `--sync`, catalyst with `--clean-later`, each as on an installed system; tables in `catalyst/README.md`):
+
+| | cases | faster | no clear difference | slower |
+|---|---|---|---|---|
+| btrfs, when the command returns | 22 | 16 | 4 | 2 |
+| btrfs, until on disk | 22 | 11 | 7 | 4 |
+| ext4, when the command returns | 26 | 15 | 10 | 1 |
+| ext4, until on disk | 26 | 14 | 10 | 2 |
+
+- **Adding Cataclysm on btrfs:** 1.00 s against apk's 2.16 s (warm), 1.23 s against 2.73 s (cold).
+- **Upgrades on btrfs:** faster in all six cases (27 packages: 256 ms against 401 ms).
+- **Removing Cataclysm on ext4:** 109 ms against 138 ms on the small system from a warm cache; level in the other three cases.
+
+**Where catalyst is not ahead.**
+- **Removing a big package on btrfs:** slower from a warm cache (203 ms against 177 ms; 254 ms against 185 ms on the big system), level from a cold one. btrfs unlinks names one after another, apk has the same 8,500 to unlink, and catalyst has its records and index on top.
+- **The same, until all is deleted and on disk:** 1.4 to 2 times apk's time on btrfs; level on ext4. The work is later, not less.
+- **A one-package install from a cold cache on the small system, ext4:** 55 ms against 50 ms, as before.
+- **`oct --sync`:** a small change is 2 to 4 ms slower than apk's (two more flushes); a big removal on btrfs takes about twice apk's time.
+
+**Reviewed before this push.** One independent reviewer, read-only, on the change alone: no defect in the crash and power-cut paths or the locking; 12 findings, 1 medium, all fixed.
+- **The medium one:** a symlink at the trash's place would have been followed and what it pointed to deleted. The trash is used only as a real directory of catalyst's own now (not a link, not a mount point, nobody else may write to it); a link there is removed, never followed.
+- **The default** was "the root is `/`"; a chroot is `/` too, and a container build has nothing left running to finish the work. Hence the rule above.
+- **Starting the process:** catalyst now waits until it says that it runs, and deletes the old versions itself when it does not. It keeps no descriptor of whoever started catalyst.
+- **The benchmark:** the time "until all is deleted" left out the last flush on catalyst's side. Both tools are timed alike now.
+- **My kill-test edit** had made its reference snapshot come from the wrong root (it still passed for the right reasons).
+
+**Tests on this commit.**
+- `cargo test`: 50 unit, 12 command, 25 on the real repository.
+- Kill test with old versions deleted after the command: 240 rounds, 0 failures.
+- Power-cut test: 155 rounds, 115 of them with `--clean-later` on btrfs, ext4 and XFS, 0 failures.
+
+**Next, with the owner's go-ahead ("go ahead with building that"):** directories that belong to a removed package alone leave the live tree with one rename each instead of one unlink per file. It is what would put big removals ahead on btrfs. It gets its own commit, review and tests.
+
+**For the developers.**
+- A system that takes a snapshot in a **post**-commit hook should run changes with `--clean-now`: the hook may find part of the old versions still in the trash, and the snapshot would keep them. Valence's own hook snapshots before the change, so nothing to do there.
+- `oct empty-trash` exists and is started by oct itself. Nothing needs to call it; `oct recover` at boot (still asked for in `/etc/runit/1`) covers what a power cut leaves.
+
+---
+
 ## 2026-11-23: a second review of the one-sync change (22 findings), a kill test that was not killing, and btrfs
 
 **Read this before the entry below: two things in it do not hold as written.**

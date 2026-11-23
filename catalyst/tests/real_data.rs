@@ -1140,6 +1140,75 @@ fn a_change_on_two_file_systems_is_a_full_switch_and_syncs_the_other_one() {
     eprintln!("two file systems: add and del were tested");
 }
 
+/// The old versions of a big change are deleted before the command returns
+/// under `--root`, and after it, by a process of its own, when that is asked
+/// for: the command returns with them out of `Programs`, and the trash is
+/// gone soon after. Where that process dies (here the command is stopped
+/// before it starts it), the next `oct recover` deletes what it left.
+#[test]
+fn the_old_versions_of_a_big_change_are_deleted_after_the_command_when_asked() {
+    if repo().is_none() {
+        return;
+    }
+    let root = fresh_root("clean-later");
+    let trash = root.join("var/lib/catalyst/trash");
+    let big = "cataclysm-dda-tiles";
+    let there = root.join("Programs").join(big);
+    let gone = |what: &str| {
+        for _ in 0..4000 {
+            if !trash.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("{what}: the trash is still there");
+    };
+    let add = || {
+        let out = oct_real(&root, &[], &["add", big]);
+        assert!(out.status.success() && there.join("Current").exists(), "{}", text(&out.stderr));
+    };
+    assert!(oct_real(&root, &[], &["--initdb", "add", "tree"]).status.success());
+    // under --root, unasked: nothing is left for later
+    add();
+    let out = oct_real(&root, &[("CATALYST_PROF", "1")], &["del", big]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("moved to the trash") && !trash.exists() && !there.exists());
+    // asked for
+    add();
+    let out = oct_real(&root, &[("CATALYST_PROF", "1")], &["--clean-later", "del", big]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("old versions moved to the trash"), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("old versions left to a process of its own"), "{}", text(&out.stderr));
+    assert!(!there.exists(), "out of Programs when the command returns");
+    gone("--clean-later");
+    // an entry whose process is dead, with nothing else left behind: it is
+    // reported, `--simulate` deletes nothing, `oct empty-trash` deletes it
+    std::fs::create_dir_all(trash.join("dead-1/0/usr/share")).unwrap();
+    std::fs::write(trash.join("dead-1/0/usr/share/file"), b"old").unwrap();
+    let out = oct_real(&root, &[], &["--simulate", "recover"]);
+    assert!(text(&out.stdout).contains("trash"), "{}", text(&out.stdout));
+    let out = oct_real(&root, &[], &["--simulate", "empty-trash"]);
+    assert!(text(&out.stdout).contains("dead-1") && trash.join("dead-1/0/usr/share/file").exists(), "{}", text(&out.stdout));
+    let out = oct_real(&root, &[], &["empty-trash"]);
+    assert!(out.status.success() && !trash.exists(), "{}", text(&out.stderr));
+    // the process that was to delete them never ran: `oct recover` does it
+    add();
+    let out = oct_real(&root, &[("CATALYST_CRASH_AT", "trash")], &["--clean-later", "del", big]);
+    assert!(!out.status.success());
+    assert_eq!(std::fs::read_dir(&trash).unwrap().count(), 1, "one entry waits");
+    let out = oct_real(&root, &[], &["--simulate", "recover"]);
+    assert!(text(&out.stdout).contains("trash") && trash.exists(), "{}", text(&out.stdout));
+    let out = oct_real(&root, &[], &["recover"]);
+    assert!(out.status.success() && !trash.exists(), "{}", text(&out.stderr));
+    // --sync returns when all of it is done, whatever else is asked
+    add();
+    let out = oct_real(&root, &[], &["--sync", "--clean-later", "del", big]);
+    assert!(out.status.success() && !trash.exists() && !there.exists(), "{}", text(&out.stderr));
+    let out = oct_real(&root, &[], &["fix"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A file the admin already has under etc/ is kept, and the package's
 /// version is put beside it, whole.
 #[test]

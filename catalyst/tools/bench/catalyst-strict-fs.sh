@@ -10,7 +10,8 @@
 #          b   removals and upgrades (catalyst-strict2.sh without the HTTP cases, which measure no file system)
 #          sa  installs on the small system, warm, with catalyst run with --sync
 #          sb  removals and one upgrade on the small system with catalyst run with --sync
-# apk is always run with --sync, as it behaves on an installed system.
+# apk is always run with --sync and catalyst with --clean-later, as each behaves on an installed system
+# (OCTCLEAN= in the environment for catalyst as it behaves under --root).
 # Or, to run something else on such a file system: INNER=script (it gets $MNT) in place of the parts.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -26,7 +27,7 @@ cleanup(){ losetup -d $LOOP 2>/dev/null; rm -f $IMG; rmdir $MNT 2>/dev/null; }
 trap cleanup EXIT
 mkdir -p $MNT
 echo "catalyst $(stat -c %y ${OCT:-${VALENCE:-/root/valence}/catalyst/target/release/oct} | cut -c1-19); $LOOP, direct I/O $(losetup -l -O DIO -n $LOOP | tr -d ' ')"
-export HERE S L PARTS LOOP MNT FS STRICT_OUT=$S INNER=${INNER:-}
+export HERE S L PARTS LOOP MNT FS STRICT_OUT=$S INNER=${INNER:-} OCTCLEAN=${OCTCLEAN---clean-later}
 unshare --mount --propagation private bash -c '
   set -u
   case $FS in
@@ -43,7 +44,7 @@ unshare --mount --propagation private bash -c '
   if [ -n "$INNER" ]; then
     bash "$INNER"
   else
-    export APKSYNC=--sync RUNS=${RUNS:-15}
+    export APKSYNC=--sync OCTCLEAN=${OCTCLEAN---clean-later} RUNS=${RUNS:-15}
     for p in $PARTS; do
       case $p in
         a)  LABEL=$L-a  BDIR=$MNT/benchab  bash $HERE/catalyst-strict.sh > $S/bench-$L-a.log 2>&1;;

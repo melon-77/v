@@ -131,6 +131,8 @@ rm -f $PC/*.img $PC/*.log $PC/*.json $PC/*.out
 FLAGS="--plain"
 [ "${PC_SCRIPTS:-1}" = 0 ] && FLAGS="$FLAGS --no-scripts"
 [ "${PC_SYNC:-0}" = 1 ] && FLAGS="$FLAGS --sync"
+# PC_FLAGS: more options for the change, e.g. --clean-later
+FLAGS="$FLAGS${PC_FLAGS:+ $PC_FLAGS}"
 EIGHT="nano less tree htop tmux jq bc file"
 PREP=""
 case ${PC_JOB:-add} in
@@ -145,6 +147,8 @@ esac
 case ${PC_JOB:-add} in small|upgrade) [ -f $R3 ] || { echo "$R3 is missing (run catalyst-killtest.sh once: it builds it)"; exit 2; };; esac
 REPOS="--repository $R1"; [ -f $R3 ] && REPOS="$REPOS --repository $R3"
 oct() { $V --root $MNT/r $REPOS --keys-dir $KD $FLAGS "$@"; }
+# old versions that a change left to a process of its own (--clean-later): gone before a root is looked at
+wait_trash() { local n=0; while [ -e "$1/var/lib/catalyst/trash" ] && [ $n -lt 6000 ]; do sleep 0.005; n=$((n + 1)); done; }
 rnd() { $PY -c "import random,sys; random.seed(sys.argv[1]); print('%.4f' % random.uniform(float(sys.argv[2]), float(sys.argv[3])))" "$SEED-$1" "$2" "$3"; }
 now() { date +%s.%N; }
 calc() { awk "BEGIN{printf \"%.4f\", $*}"; }
@@ -169,7 +173,7 @@ fi
 echo "# admin was here" >> $MNT/r/etc/fstab
 touch -d @1795000000 $MNT/r/etc/fstab
 sync
-$CHK snap $MNT/r $PC/pre.json > /dev/null || die "snapshot of the base root"
+wait_trash $MNT/r; $CHK snap $MNT/r $PC/pre.json > /dev/null || die "snapshot of the base root"
 detach
 
 # ------------------------------------------------------------ the clean run (and how long its journal lives)
@@ -187,8 +191,8 @@ t1=$(now)
 TREF=$(calc "$t1 - $t0")
 JLIFE=0.002; [ -n "$tj0" ] && JLIFE=$(calc "${tj1:-$t1} - $tj0 + 0.001")
 sync
-$CHK snap $MNT/r $PC/ref.json > /dev/null || die "snapshot of the reference root"
-$CHK final $MNT/r $PC/pre.json > /dev/null 2>&1 && die "the change changes nothing the check sees"
+wait_trash $MNT/r; $CHK snap $MNT/r $PC/ref.json > /dev/null || die "snapshot of the reference root"
+wait_trash $MNT/r; $CHK final $MNT/r $PC/pre.json > /dev/null 2>&1 && die "the change changes nothing the check sees"
 detach
 echo "    clean run: ${TREF}s, its journal there for about ${JLIFE}s; $(grep '^OK:' $PC/ref.log | cut -c1-100)"
 WIN=$(calc "$TREF * 1.1 + 0.005")
@@ -230,6 +234,8 @@ for i in $(seq 1 $ROUNDS); do
     at=$(calc "$(now) - $ts")
     cp --sparse=always $PC/work.img $PC/cut.img
     kill -KILL -- -$JP 2>/dev/null; [ -n "$BG" ] && kill -KILL $BG 2>/dev/null
+    # the process that deletes old versions after the command (--clean-later) is its own group: it ends with the power too
+    pkill -KILL -f -- "--root $MNT/r empty-trash" 2>/dev/null
     dmsetup resume $DM
     wait $JP 2>/dev/null; [ -n "$BG" ] && wait $BG 2>/dev/null; BG=""
     detach
@@ -249,8 +255,8 @@ for i in $(seq 1 $ROUNDS); do
     $V --root $MNT/r --plain --simulate fix > $PC/fix0.log 2>&1 || fail="$fail fix-after-recover-failed"
     grep -q ' 0 would be repaired' $PC/fix0.log || { fail="$fail fix-finds-damage-after-recover"; tail -n 5 $PC/fix0.log >> $L; }
     state=neither
-    if $CHK final $MNT/r $PC/ref.json > $PC/f-ref.out 2>&1; then state=done; NDONE=$((NDONE + 1));
-    elif $CHK final $MNT/r $PC/pre.json > $PC/f-pre.out 2>&1; then state=undone; NUNDONE=$((NUNDONE + 1));
+    if wait_trash $MNT/r; $CHK final $MNT/r $PC/ref.json > $PC/f-ref.out 2>&1; then state=done; NDONE=$((NDONE + 1));
+    elif wait_trash $MNT/r; $CHK final $MNT/r $PC/pre.json > $PC/f-pre.out 2>&1; then state=undone; NUNDONE=$((NUNDONE + 1));
     else fail="$fail neither-before-nor-after"; { echo "--- against the clean run:"; tail -n 12 $PC/f-ref.out; echo "--- against the root before:"; tail -n 12 $PC/f-pre.out; } >> $L; fi
     # a command run with --sync that had returned: its change is on disk
     [ $when = late ] && [ "${PC_SYNC:-0}" = 1 ] && [ $state != done ] && fail="$fail returned-with---sync-but-not-on-disk"
@@ -259,7 +265,7 @@ for i in $(seq 1 $ROUNDS); do
     [ $rc = 0 ] || fail="$fail complete-exit-$rc"
     oct $JOB > $PC/again.log 2>&1 || fail="$fail again-failed"
     grep -q 'nothing to do' $PC/again.log || fail="$fail not-done"
-    $CHK final $MNT/r $PC/ref.json > $PC/final.out 2>&1 || { fail="$fail final-differs"; tail -n 14 $PC/final.out >> $L; }
+    wait_trash $MNT/r; $CHK final $MNT/r $PC/ref.json > $PC/final.out 2>&1 || { fail="$fail final-differs"; tail -n 14 $PC/final.out >> $L; }
     $V --root $MNT/r --plain --simulate fix > $PC/fix.log 2>&1 || fail="$fail fix-failed"
     grep -q ' 0 would be repaired' $PC/fix.log || { fail="$fail fix-finds-damage"; tail -n 5 $PC/fix.log >> $L; }
     detach

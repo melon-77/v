@@ -10,9 +10,14 @@ from collections import defaultdict
 
 rows = list(csv.DictReader(open(sys.argv[1]), delimiter='\t'))
 data = defaultdict(list)
+later = set()   # the cases in which something was left to be deleted after the command
 for r in rows:
-    for metric in ('wall', 'wall_sync'):
-        data[(r['set'], r['job'], r['cache'], metric, r['tool'])].append(float(r[metric]))
+    # wall_done (catalyst-strict2.sh): until old versions left for later are deleted too, and that is on disk
+    for metric in ('wall', 'wall_sync', 'wall_done'):
+        if r.get(metric):
+            data[(r['set'], r['job'], r['cache'], metric, r['tool'])].append(float(r[metric]))
+    if r.get('trash') == '1':
+        later.add((r['set'], r['job'], r['cache']))
 
 def mwu_p(a, b):
     """Two-sided Mann-Whitney U, normal approximation with tie correction."""
@@ -55,8 +60,11 @@ def fmt(v):
 
 print('| system | job | cache | apk | catalyst | catalyst / apk (95% CI) | p | verdict |')
 print('|---|---|---|---|---|---|---|---|')
-keys = sorted({k[:4] for k in data}, key=lambda k: (k[1], k[0], k[2], k[3]))
+ORDER = {'wall': 0, 'wall_sync': 1, 'wall_done': 2}
+keys = sorted({k[:4] for k in data}, key=lambda k: (k[1], k[0], k[2], ORDER[k[3]]))
 for s, job, cache, metric in keys:
+    if metric == 'wall_done' and (s, job, cache) not in later:
+        continue
     a = data[(s, job, cache, metric, 'cat')]
     b = data[(s, job, cache, metric, 'apk')]
     if not a or not b:
@@ -69,5 +77,5 @@ for s, job, cache, metric in keys:
         verdict = '**faster**'
     elif p < 0.01 and lo > 1.05:
         verdict = 'slower'
-    label = cache + (', + sync' if metric == 'wall_sync' else '')
+    label = cache + {'wall': '', 'wall_sync': ', + sync', 'wall_done': ', all deleted'}[metric]
     print(f'| {s} | {job} | {label} | {fmt(st.median(b))} | {fmt(st.median(a))} | {ratio:.2f} ({lo:.2f}-{hi:.2f}) | {p:.1g} | {verdict} |')

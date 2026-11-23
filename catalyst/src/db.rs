@@ -597,7 +597,7 @@ impl Db {
         root.join(STATE_DIR).join("world.new")
     }
 
-    fn own_dirs(root: &Path) -> [PathBuf; 6] {
+    pub fn own_dirs(root: &Path) -> [PathBuf; 6] {
         [
             root.join("var"),
             root.join("var/lib"),

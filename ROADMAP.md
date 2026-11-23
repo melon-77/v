@@ -282,6 +282,20 @@ These are open on purpose. Each gets settled before the phase that needs it.
   2026).
 
 ## Decided
+- **The old versions of a big change are deleted after the command has returned** (23 November 2026). On btrfs, which
+  Valence's root is, removing a big package took catalyst about twice apk's time even once its threads were set right
+  for btrfs: every file has two names, and both were unlinked before the command returned. The owner was asked "Delete a
+  removed package's files in the background after the command returns?", with this described: the old files are moved
+  aside in one step, the command returns, a process of its own deletes them; only on the installed system (the root is
+  `/`), not under `--root`. The owner: "yes". Built with one difference, which the owner was told: the old versions go
+  into a trash folder and the deleting process holds no lock on the root, so the next command does not wait for it.
+  A review narrowed "the installed system": unasked it happens only when the root is `/`, is the root of process 1 and
+  the command is run at a terminal. In a chroot, a script, a build or a container's one command nothing may be left
+  running to finish the work, so there everything is deleted before the command returns unless `--clean-later` is given.
+  **Described then and not built:** moving a removed package's own directories out of the live tree in one step each. It
+  would be the first place where catalyst deletes by directory and not by checked entry (a mount point inside one, a file
+  that appears meanwhile), so it goes back to the owner with what it would gain. See `catalyst/README.md`, "Old versions
+  deleted later".
 - **A change takes one sync, before its switch** (23 November 2026). With the correction below on the table (apk syncs
   once at the end of every change), the owner was asked how an add should end: with no sync, as it then did; with a sync
   at the end, as apk; or with one sync before the switch, so that a power cut leaves the add undone or finished by the

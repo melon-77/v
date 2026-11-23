@@ -8,6 +8,8 @@
 #   APKSYNC=--sync  apk syncs at the end of the change, as it does on an installed system (with --root it
 #                   would not): the comparison in the README is run this way
 #   OCTSYNC=--sync  catalyst too returns only when the change is on disk
+#   OCTCLEAN=--clean-later  catalyst deletes the old versions of a big change after the command has returned,
+#                   as it does on an installed system (under --root it would not)
 #   BDIR            where the roots are made (default /root/catalyst-test/benchab): a directory on the file
 #                   system to measure, see catalyst-strict-fs.sh
 #   STRICT_OUT      where the results go (default /root/catalyst-test/strict)
@@ -31,8 +33,10 @@ BIG="valence-base $(tr '\n' ' ' < /root/catalyst-test/bench2/big-set.txt)"
 run(){ local t=$1 r=$2; shift 2
   case $t in
     apk) $APK --root $r --arch x86_64 --keys-dir $KD --repositories-file /dev/null --repository $R1 --no-cache --no-scripts ${APKSYNC:-} "$@";;
-    cat) $OCT --root $r --repository $R1 --keys-dir $KD --no-scripts --plain ${OCTSYNC:-} "$@";;
+    cat) $OCT --root $r --repository $R1 --keys-dir $KD --no-scripts --plain ${OCTSYNC:-} ${OCTCLEAN:-} "$@";;
   esac; }
+# old versions left to a process of its own: gone before the next run is timed
+wait_trash(){ local n=0; while [ -e "$1/var/lib/catalyst/trash" ]; do sleep 0.002; n=$((n + 1)); [ $n -lt 15000 ] || { echo "  NOT OK: the trash of $1 is still there"; return 1; }; done; }
 has(){ if [ $1 = apk ]; then grep -qx "P:$3" $2/lib/apk/db/installed; else [ -e $2/Programs/$3/Current ]; fi; }
 OUT=$S/benchab-$LABEL.tsv
 printf 'set\tjob\tcache\ttool\trun\twall\twall_sync\n' > $OUT
@@ -53,6 +57,7 @@ for set in $SETS; do
           [ $i -gt 0 ] && printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $set $job $c $t $i \
             $(awk -v a=$t0 -v b=$t1 'BEGIN{printf "%.4f",(b-a)/1e9}') $(awk -v a=$t0 -v b=$t2 'BEGIN{printf "%.4f",(b-a)/1e9}') >> $OUT
           run $t $R del $job > $B/undo.log 2>&1 || { echo "  undo failed: $set $t"; tail -n 2 $B/undo.log; }
+          wait_trash $R
         done
       done
     done

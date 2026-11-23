@@ -136,6 +136,46 @@ pub fn has_default_acl(path: &Path) -> bool {
     !matches!(io::Error::last_os_error().raw_os_error(), Some(libc::ENODATA) | Some(libc::EOPNOTSUPP))
 }
 
+/// Whether `name` in the directory `dir` is a mount point, a bind mount of
+/// the same file system included, where the kernel says (`openat2` with
+/// `RESOLVE_NO_XDEV`, Linux 5.6). `None`: it does not say.
+pub fn is_mount_point(dir: &std::fs::File, name: &std::ffi::CStr) -> Option<bool> {
+    #[repr(C)]
+    struct OpenHow {
+        flags: u64,
+        mode: u64,
+        resolve: u64,
+    }
+    const SYS_OPENAT2: c_long = 437;
+    const RESOLVE_NO_XDEV: u64 = 0x01;
+    let how = OpenHow { flags: (libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64, mode: 0, resolve: RESOLVE_NO_XDEV };
+    let fd = unsafe {
+        libc::syscall(SYS_OPENAT2, dir.as_raw_fd(), name.as_ptr(), &how as *const OpenHow, std::mem::size_of::<OpenHow>())
+    };
+    if fd >= 0 {
+        unsafe { libc::close(fd as c_int) };
+        return Some(false);
+    }
+    match io::Error::last_os_error().raw_os_error() {
+        Some(libc::EXDEV) => Some(true),
+        _ => None,
+    }
+}
+
+/// For a child between fork and exec: every descriptor above `keep` is
+/// closed at the exec. Only async-signal-safe calls.
+pub fn cloexec_above(keep: c_int) {
+    const SYS_CLOSE_RANGE: c_long = 436;
+    const CLOSE_RANGE_CLOEXEC: c_uint = 4;
+    let r = unsafe { libc::syscall(SYS_CLOSE_RANGE, (keep + 1) as c_uint, c_uint::MAX, CLOSE_RANGE_CLOEXEC) };
+    if r != 0 {
+        // a kernel before 5.11: one by one
+        for fd in keep + 1..1024 {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
+}
+
 /// The kind of work [`name_threads`] is asked about.
 #[derive(Clone, Copy)]
 pub enum NameWork {

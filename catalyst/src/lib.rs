@@ -38,6 +38,7 @@ pub mod fetch;
 pub mod idxcache;
 pub mod index;
 pub mod prof;
+pub mod trash;
 pub mod progress;
 pub mod repo;
 pub mod rootfs;

@@ -37,6 +37,12 @@ options:
                          default the change is prepared on disk, then made;
                          a power cut right after it leaves it undone or to
                          be finished by the next run, never half done)
+  --clean-later          delete the old versions of a big change after the
+                         command has returned, in a process of its own (the
+                         default on the installed system at a terminal)
+  --clean-now            delete them before the command returns (the default
+                         anywhere else: --root, a chroot, a script; --sync
+                         implies it)
   --no-scripts           do not run package scripts, triggers or commit hooks
   --no-commit-hooks      do not run commit hooks (pre-commit / post-commit)
   --jobs N               fetch/unpack threads (default: one per CPU, max 16)
@@ -61,6 +67,8 @@ commands:
   fix [NAME...]          verify and repair live-tree files from /Programs
   recover                finish a change that was interrupted (every command
                          does this first; on its own it is for system start)
+  empty-trash            delete old versions that a change left to be deleted
+                         after it returned (oct starts this by itself)
   cache clean            remove downloaded .apk files from the cache
   verify FILE...         check signature and contents; print a summary
   dump-index FILE [--json]
@@ -93,6 +101,7 @@ struct Opts {
     simulate: bool,
     upgrade: bool,
     sync: bool,
+    clean_later: Option<bool>,
     jobs: usize,
     json: bool,
     search: engine::SearchOpts,
@@ -120,6 +129,7 @@ impl Opts {
             jobs: self.jobs,
             crash_at: std::env::var("CATALYST_CRASH_AT").ok().filter(|s| !s.is_empty()),
             sync: self.sync,
+            clean_later: self.clean_later,
         }
     }
 }
@@ -141,6 +151,7 @@ fn parse_args() -> Result<Opts, String> {
         simulate: false,
         upgrade: false,
         sync: false,
+        clean_later: None,
         jobs: 0,
         json: false,
         search: engine::SearchOpts::default(),
@@ -167,6 +178,8 @@ fn parse_args() -> Result<Opts, String> {
             "--simulate" => o.simulate = true,
             "--upgrade" | "-u" => o.upgrade = true,
             "--sync" => o.sync = true,
+            "--clean-later" => o.clean_later = Some(true),
+            "--clean-now" => o.clean_later = Some(false),
             "--jobs" | "-j" => {
                 o.jobs = val("--jobs")?.parse().map_err(|_| "--jobs needs a number".to_string())?
             }
@@ -397,12 +410,13 @@ fn main() -> ExitCode {
         "manifest" => cmd_manifest(&o),
         "add" => engine::add(&o.engine(), &o.args),
         "del" => engine::del(&o.engine(), &o.args),
-        "upgrade" | "list" | "update" | "recover" if !o.args.is_empty() => {
+        "upgrade" | "list" | "update" | "recover" | "empty-trash" if !o.args.is_empty() => {
             eprintln!("oct: '{}' takes no arguments", o.cmd);
             return ExitCode::from(2);
         }
         "upgrade" => engine::upgrade(&o.engine()),
         "recover" => engine::recover(&o.engine()),
+        "empty-trash" => engine::empty_trash(&o.engine()),
         "update" => engine::update(&o.engine()),
         "list" => engine::list(&o.engine()),
         "search" => engine::search(&o.engine(), &o.search, &o.args),

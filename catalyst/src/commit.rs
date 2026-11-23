@@ -72,10 +72,16 @@ pub struct SwitchOptions {
     /// `syncfs`. Before a script runs it fsyncs the journal's directory and
     /// is a full switch from there on (`Switch::harden`).
     pub light: bool,
+    /// The old versions of a big change are not deleted by the switch but
+    /// moved into the trash, for a process of its own to delete after the
+    /// command has returned ([`crate::trash`]).
+    pub clean_later: bool,
 }
 
 #[derive(Debug, Default)]
 pub struct Report {
+    /// Old versions were moved into the trash and wait to be deleted.
+    pub trash: bool,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
     pub placed: u64,
@@ -1652,7 +1658,7 @@ pub fn switch(
         s.sync()?;
         crate::prof::mark("switch: final syncfs");
     }
-    let Switch { j, rep, tree_threads, .. } = s;
+    let Switch { j, mut rep, tree_threads, .. } = s;
     j.remove(root)?;
     let mut trees: Vec<PathBuf> = Vec::new();
     for op in &plan.ops {
@@ -1678,6 +1684,16 @@ pub fn switch(
     }
     // from about 2,000 entries on, directory by directory on several threads
     let big = olds.values().map(|o| o.recs.len()).sum::<usize>() >= 2000;
+    // Where it is asked for, the old versions of a big change are moved
+    // aside, one rename each, and a process of its own deletes them after
+    // this one has returned. What cannot be moved is deleted here.
+    if big && opts.clean_later && !trees.is_empty() {
+        if let Some(mut t) = crate::trash::Entry::new(root) {
+            trees.retain(|d| t.take(d).is_err());
+            rep.trash = !t.is_empty();
+            crate::prof::mark("switch: old versions moved to the trash");
+        }
+    }
     remove_trees(&trees, big, tree_threads)?;
     Ok(rep)
 }
@@ -1698,7 +1714,7 @@ pub fn switch(
 /// `most` is the number of threads the file system makes worthwhile
 /// ([`sys::name_threads`]): with 1, as on Btrfs and XFS, the trees are
 /// deleted one after another on this thread.
-fn remove_trees(roots: &[PathBuf], big: bool, most: usize) -> io::Result<()> {
+pub(crate) fn remove_trees(roots: &[PathBuf], big: bool, most: usize) -> io::Result<()> {
     let cpus = std::thread::available_parallelism().map_or(4, |n| n.get()).min(most);
     if big && cpus >= 2 {
         return remove_trees_by_directory(roots, cpus.min(8));

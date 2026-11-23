@@ -72,6 +72,10 @@
 #                      a script are left out of the default rotation.
 #   env KT_JOB=del     the removal of those eight from a root that has them (the same
 #                      rotation as add)
+#   env KT_JOB=bigdel  the removal of cataclysm-dda-tiles (39 packages, 8,600 files) with
+#                      --clean-later: the old versions go to the trash and a process of
+#                      its own deletes them; a kill of catalyst leaves that process alone,
+#                      as it would be on a real system
 # Exit status 0 when every round passes. Writes only under /root/catalyst-test.
 set -u
 ROUNDS=${1:-80}
@@ -86,6 +90,8 @@ KT=${KT_DIR:-/root/catalyst-test/kt}
 T=$KT/root
 PY="python3 -I"
 CHK="$PY $S/catalyst-kt-check.py"
+# old versions that a change left to a process of its own (--clean-later): gone before a root is looked at
+wait_trash() { local n=0; while [ -e "$1/var/lib/catalyst/trash" ] && [ $n -lt 6000 ]; do sleep 0.005; n=$((n + 1)); done; }
 KILL="$PY $S/catalyst-kt-kill.py"
 
 safe_rm() {
@@ -121,7 +127,8 @@ case ${KT_JOB:-upgrade} in
     small) JOB="add -u coreutils util-linux shadow gzip nano";;
     add) JOB="add nano less tree htop tmux jq bc file"; : ${KT_MODES:="time journal step+thr step+thr gone step+thr"};;
     del) PREP="nano less tree htop tmux jq bc file"; JOB="del $PREP"; : ${KT_MODES:="time journal step+thr step+thr gone step+thr"};;
-    *) die "KT_JOB is upgrade, small, add or del";;
+    bigdel) PREP="cataclysm-dda-tiles"; JOB="--clean-later del $PREP"; : ${KT_MODES:="time journal step+thr gone time gone"};;
+    *) die "KT_JOB is upgrade, small, add, del or bigdel";;
 esac
 upg() { echo "$V --root $1 --repository $R1 --repository $R3 --keys-dir $KD --plain $JOB"; }
 calc() { awk "BEGIN{printf \"%.4f\", $*}"; }
@@ -138,7 +145,7 @@ TOT=(); SW=(); GONE=(); MM=(); SC=()
 for m in 1 2 3; do
     r=$KT/ref; [ $m -gt 1 ] && r=$KT/ref$m
     fresh $r
-    [ $m -eq 1 ] && $CHK snap $r $KT/pre-ref.json
+    [ $m -eq 1 ] && { wait_trash $r; $CHK snap $r $KT/pre-ref.json; }
     res=$($KILL measure - $r $r.upgrade.log -- $(upg $r))
     [ "$(kv "$res" rc)" = 0 ] || die "clean upgrade $m failed: $r.upgrade.log"
     t=$(kv "$res" total); j0=$(kv "$res" tj0); j1=$(kv "$res" tj1)
@@ -147,13 +154,13 @@ for m in 1 2 3; do
     echo "    $(grep '^OK:' $r.upgrade.log)"
 done
 grep -E '^  (upgrade|install|remove) ' $KT/ref.upgrade.log | awk '{print $1}' | sort | uniq -c | sed 's/^/  /'
-$CHK snap $KT/ref $KT/ref.json
+wait_trash $KT/ref; $CHK snap $KT/ref $KT/ref.json
 echo "--- the reference root itself"
 $CHK crit $KT/ref | sed 's/^/  /'
 $CHK crash $KT/ref $KT/pre-ref.json $KT/ref.json > $KT/ref-check.out 2>&1 || { cat $KT/ref-check.out; die "the reference root fails the checks"; }
 grep 'paths checked' $KT/ref-check.out
 echo "--- a second clean upgrade equals the reference (the comparison is deterministic)"
-$CHK final $KT/ref2 $KT/ref.json > $KT/ref2-check.out 2>&1 || { cat $KT/ref2-check.out; die "two clean upgrades differ: the comparison is not usable"; }
+wait_trash $KT/ref2; $CHK final $KT/ref2 $KT/ref.json > $KT/ref2-check.out 2>&1 || { cat $KT/ref2-check.out; die "two clean upgrades differ: the comparison is not usable"; }
 sed 's/^/  /' $KT/ref2-check.out
 safe_rm $KT/ref2; safe_rm $KT/ref3
 med() { printf '%s\n' "$@" | sort -g | sed -n 2p; }   # median of 3
@@ -166,7 +173,7 @@ echo "  kill windows: time [0, $TW]s; journal [0, $SWW]s after it appears; step 
 
 echo "--- checker self-test: damage in a root must be caught"
 fresh $T
-$CHK snap $T $KT/pre.json
+wait_trash $T; $CHK snap $T $KT/pre.json
 cp -p $T/usr/bin/ls $T/usr/bin/.ls.x && mv $T/usr/bin/.ls.x $T/usr/bin/ls   # same content, another inode
 : > $T/usr/bin/bash                                                          # truncated
 rm $T/usr/lib/libc.so.6                                                      # missing
@@ -179,7 +186,7 @@ for w in 'neither old nor new: /usr/bin/ls$' 'neither old nor new: /usr/bin/bash
          'critical: /usr/lib/libc.so.6' 'critical: chroot /bin/sh -c echo ok failed'; do
     grep -q "$w" $KT/selftest.out || { cat $KT/selftest.out; die "checker self-test: '$w' not reported"; }
 done
-$CHK final $T $KT/ref.json > /dev/null 2>&1 && die "checker self-test: final check passed a root that was not upgraded"
+wait_trash $T; $CHK final $T $KT/ref.json > /dev/null 2>&1 && die "checker self-test: final check passed a root that was not upgraded"
 echo "  ok: $(grep -c VIOLATION $KT/selftest.out) violations reported for 6 kinds of damage, chroot failures seen; final check rejects it"
 safe_rm $T
 T_START=$(date +%s)
@@ -202,7 +209,7 @@ for i in $(seq 1 $ROUNDS); do
     esac
     L=$KT/round.log; : > $L
     fresh $T
-    $CHK snap $T $KT/pre.json
+    wait_trash $T; $CHK snap $T $KT/pre.json
     res=$($KILL $km $p $T $KT/run1.log -- $(upg $T))
     killed=$(kv "$res" killed)
     [ "$killed" = 1 ] && NKILLED=$((NKILLED + 1))
@@ -240,7 +247,7 @@ for i in $(seq 1 $ROUNDS); do
     $(upg $T) > $KT/again.log 2>&1; rc2=$?
     grep -q 'nothing to do' $KT/again.log || { fail="$fail not-done"; sed 's/^/    | /' $KT/again.log >> $L; }
     [ $rc2 = 0 ] || fail="$fail again-exit-$rc2"
-    $CHK final $T $KT/ref.json > $KT/final.out 2>&1 || fail="$fail final-differs"
+    wait_trash $T; $CHK final $T $KT/ref.json > $KT/final.out 2>&1 || fail="$fail final-differs"
     cat $KT/final.out >> $L
     # (the log of the 9999-r0 packages' scripts; a job without them has none)
     reruns=$(( $(cat $T/var/log/catalyst-kt.log 2>/dev/null | wc -l) - $(cat $KT/ref/var/log/catalyst-kt.log 2>/dev/null | wc -l) ))
