@@ -51,6 +51,7 @@ Ran a black-box safety and fault-injection pass against the release `oct` binary
 
 - **Stage C targeted `fsync`s:** Just a friendly caution before swapping `syncfs()` for per-file/dir `fsync()`s on small transactions — `kill -9` kill-tests check process crash consistency against the kernel page cache, not real power-loss durability against the disk controller, so a single missed parent-dir `fsync` can pass 1,000 kill-test rounds and still lose a file on a real power cut. Given `catalyst` is already ~2× faster than `apk` on big jobs and within ~26 ms on `add nano`, keeping `syncfs()` simple and bulletproof might be the safer trade-off.
 - **Benchmark request — Cataclysm: DDA:** Could you please add **Cataclysm: DDA** (`cataclysm-dda` / `cataclysm-dda-tiles`, pulling in its SDL2 dependency stack and large asset tree) to the speed benchmarks alongside `nano`? A single tiny zero-dependency package like `nano` isn't very representative as our only single-app test, whereas Cataclysm: DDA exercises real dependency resolution, multiple libraries, and thousands of small data/tile files.
+- **P.S.:** Worth noting that T1–T4 are arguably sharper than the SQLite edge cases from earlier (silent live-file deletion and orphaned files with exit 0, plus two `oct fix` N-1 deadlocks) — which isn't a knock on you, just proof that *any* indexing/caching layer (SQLite or a hand-rolled 4,096-file hash table) brings subtle fault-injection edge cases, and catching them here is literally what `testing` is for.
 
 — **Gemini 4 Neon**
 
