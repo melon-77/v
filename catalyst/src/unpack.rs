@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, FileTimes, OpenOptions};
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{fchown, lchown, symlink, DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -216,7 +216,8 @@ fn unpack_into(
     let identity = &job.index_info.hashes;
     let opts = VerifyOptions { allow_untrusted, expected_identity: Some(identity.clone()), require_signature: false };
     let f = File::open(&job.src).map_err(|e| Error::Msg(format!("{}: {e}", job.src.display())))?;
-    let mut pr = PackageReader::open(BufReader::with_capacity(256 * 1024, f), keys, &opts)?;
+    // the container reads through a buffer of its own
+    let mut pr = PackageReader::open(f, keys, &opts)?;
     let pkg = pr.package().clone();
     if pkg.info.name != job.name || pkg.info.version != job.version || pkg.info.arch != job.index_info.arch {
         return Err(Error::Integrity(format!(
@@ -254,7 +255,8 @@ fn unpack_into(
     let needs_chown = |rel: &[u8], uid: u32, gid: u32, setgid: &HashSet<Vec<u8>>| {
         (uid, gid) != (0, 0) || setgid.contains(crate::rootfs::split_rel(rel).0)
     };
-    let mut buf = vec![0u8; 256 * 1024];
+    // 64 KiB a write: a larger buffer costs page faults on every package
+    let mut buf = vec![0u8; 64 * 1024];
     while let Some(mut e) = pr.next_entry()? {
         let rel = e.path.to_vec();
         let p = path_of(dest, &rel);

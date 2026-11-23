@@ -721,3 +721,37 @@ fn a_killed_switch_is_finished_without_the_records_it_did_not_read() {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+#[test]
+fn a_verified_index_comes_back_from_the_cache_unchanged() {
+    let Some(repo) = repo() else { return };
+    let keys = keys();
+    let dir = std::env::temp_dir().join(format!("catalyst-idxcache-real-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let spec = repo.join("Packages.adb").to_string_lossy().into_owned();
+    let fresh = catalyst::repo::Freshness::default();
+    let opts = VerifyOptions::default();
+    let load = || catalyst::repo::load(&spec, "x86_64", &keys, &opts, None, &dir, &fresh, None).unwrap();
+    let a = load();
+    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let written = std::fs::read(&files[0]).unwrap();
+    let b = load();
+    assert_eq!(a.index, b.index);
+    assert_eq!(a.index, index(&repo, &keys), "the same as reading the index itself");
+    assert_eq!(a.offer, b.offer);
+    assert_eq!(format!("{:?}", a.trust), format!("{:?}", b.trust));
+    assert!(a.trust.signer.is_some());
+    // a damaged file is not used, and is replaced
+    let mut bad = written.clone();
+    let n = bad.len();
+    bad[n / 2] ^= 1;
+    std::fs::write(&files[0], &bad).unwrap();
+    assert_eq!(load().index, a.index);
+    assert_eq!(std::fs::read(&files[0]).unwrap(), written);
+    // other keys: verified again (here: refused, nothing trusts it)
+    let none = catalyst::verify::TrustedKeys::new();
+    assert!(catalyst::repo::load(&spec, "x86_64", &none, &opts, None, &dir, &fresh, None).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

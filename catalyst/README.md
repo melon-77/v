@@ -115,6 +115,7 @@ ROOT/var/lib/catalyst/lock                      held while catalyst (or a script
 ROOT/var/lib/catalyst/indexes/                  what each repository offered last
 ROOT/var/lib/catalyst/index/                    the lookup index of what is installed
 ROOT/var/cache/catalyst/                        downloaded packages and indexes
+ROOT/var/cache/catalyst/parsed-<16 hex>         a verified repository index, parsed
 ```
 
 The usual tree is made from those folders:
@@ -141,7 +142,8 @@ The folders are the record of what is installed. `var/lib/catalyst/index/`
 is a copy of what they say, so that a change doesn't have to read the
 record of every installed package:
 - `meta` holds every installed package's `info`, so opening a root reads
-  one file instead of one per package.
+  one file instead of one per package. It is in a compact binary form,
+  which reads back in about a fifth of the time the text records take.
 - `files/XXX` (4096 buckets by a hash of the path) say which packages have
   an entry at each path, files apart from directories.
 - `aliases` lists the entries that reach another place through a directory
@@ -180,6 +182,13 @@ written on several threads. A bucket file that exists is rewritten in
 place rather than through a temporary name: creating and renaming files in
 one directory would make the threads wait for each other. Nothing reads
 the index while it is written, and every bucket has its checksum.
+
+Threads are started only when they pay. Starting them costs about 1.4 ms,
+so work that would take less than about 3 ms on one thread stays there:
+on a warm cache, the 244 `Current` links of a big system take 0.8 ms on
+one thread and 1.5 ms on sixteen. A cold cache, where every read waits
+for the disk, and the thousands of buckets of a big install go to the
+threads. The time the first items took tells which it is.
 
 Inside a switch the index is updated before the final `syncfs`. The
 journal names the records the switch reads and the index it was planned
@@ -340,9 +349,18 @@ Trust works as in apk v3:
   SHA-512, `hash_alg` 3/4/5).
 - A package is trusted when its identity matches the signed index: the
   SHA-256 or SHA-512 of its ADB block. Failing that, its own signature
-  must verify.
+  must verify. When the identity matches, the package's signature blocks
+  are not checked: they add nothing to it (apk does not check them
+  either), and checking one costs an RSA verification on every package.
 - An identity mismatch is fatal, even with `--allow-untrusted`.
 - Name, version and arch must equal the index entry.
+- An index that was verified is kept parsed in
+  `var/cache/catalyst/parsed-<16 hex>` and taken from there while nothing
+  changed. That file's key is the SHA-256 of the index file, its location,
+  the trusted keys and the verify options, so another index, another set
+  of keys or a changed file is verified from scratch; the file has a
+  checksum, and a damaged one is ignored and replaced. The rollback check
+  below is not cached: it runs on every load.
 
 What an untrusted file or a hostile mirror can make catalyst do is bounded:
 - **Metadata size:**
@@ -549,15 +567,62 @@ cataclysm-dda-tiles` (the game with graphics and sound; 7,929 data files),
 | 244 packages | warm | 8 | 0.93 s | 0.94 s | 1.50 s, 0.95 s |
 | 244 packages | cold | 8 | 1.07 s | 1.09 s | 1.38 s, 1.10 s |
 
+### The strict comparison
+
+The tables above are medians of 5 or 7 runs. To call something faster or
+slower as a fact, not as one lucky run, the strict benchmark runs every
+case 15 times per tool, alternating in ABBA order, and keeps every run.
+It gives a verdict only when both of these hold:
+- a Mann-Whitney U test with p < 0.01;
+- a 95% bootstrap interval of the ratio of the medians that lies entirely
+  below 0.95 (faster) or above 1.05 (slower).
+
+Anything else is "no clear difference". "+ sync" adds a `sync -f` to both
+tools, since apk leaves writeback to the kernel. 23 November 2026, the
+39-package and the 244-package system, `--no-scripts`:
+
+| system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | + sync: apk, catalyst | ratio (95% CI) | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| 39 | Cataclysm | warm | 1.60 s | 964 ms | 0.60 (0.58-0.63) | **faster** | 2.15 s, 968 ms | 0.45 (0.43-0.48) | **faster** |
+| 39 | Cataclysm | cold | 1.96 s | 1.31 s | 0.67 (0.61-0.71) | **faster** | 2.47 s, 1.31 s | 0.53 (0.48-0.57) | **faster** |
+| 244 | Cataclysm | warm | 958 ms | 939 ms | 0.98 (0.93-1.08) | no clear difference | 1.55 s, 942 ms | 0.61 (0.56-0.71) | **faster** |
+| 244 | Cataclysm | cold | 1.12 s | 1.10 s | 0.98 (0.93-1.04) | no clear difference | 1.48 s, 1.11 s | 0.75 (0.66-0.79) | **faster** |
+| 39 | nano | warm | 13 ms | 23 ms | 1.70 (1.67-1.77) | slower | 20 ms, 26 ms | 1.28 (1.23-1.37) | slower |
+| 39 | nano | cold | 47 ms | 60 ms | 1.28 (1.27-1.34) | slower | 55 ms, 66 ms | 1.21 (1.17-1.24) | slower |
+| 244 | nano | warm | 34 ms | 27 ms | 0.81 (0.78-0.85) | **faster** | 42 ms, 30 ms | 0.72 (0.69-0.77) | **faster** |
+| 244 | nano | cold | 72 ms | 84 ms | 1.16 (1.14-1.22) | slower | 84 ms, 89 ms | 1.06 (1.01-1.10) | no clear difference |
+
+`add nano`, warm, over the rounds of this work (medians of 15):
+
+| system | first strict run | round two | round three | apk |
+|---|---|---|---|---|
+| 39 packages | 32 ms | 29 ms | 23 ms | 13 ms |
+| 244 packages | 44 ms | 37 ms | 27 ms | 34 ms |
+
+Where a one-package install on the small system spends its 22 ms now:
+- three device flushes (the `syncfs` before the switch, the journal put
+  in effect, the final `syncfs`): about 9.5 ms. apk does none of them;
+- starting and ending the process: about 5 ms, the same for apk here;
+- unpacking: about 3.5 ms, mostly inflating and hashing;
+- the repository index, from its cache: about 1.5 ms;
+- everything else: about 2 ms.
+
+So catalyst's own work is about what apk's is (about 7 ms each), and the
+gap on a small system is the flushes. On the big system apk reads and
+rewrites its whole installed database, and catalyst's lookup index does
+not, which is worth more than the flushes cost.
+
 `CATALYST_PROF=1` prints, on stderr, how long each step of a run took.
 
 ## Tests
 
-- **`cargo test`:** 38 unit tests, 11 command tests and 12 tests over the
+- **`cargo test`:** 42 unit tests, 11 command tests and 13 tests over the
   real repository:
   - every package verified against the index;
   - tampering of every kind is rejected;
   - damaged input never panics;
+  - a verified index comes back from its cache unchanged, a damaged cache
+    file is not used, and other keys verify from scratch;
   - a broken record stops only the changes that need it, and `oct fix`
     rebuilds it from the signed package;
   - the lookup index knows the tree's directory symlinks and, after a

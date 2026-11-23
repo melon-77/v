@@ -38,7 +38,20 @@ pub struct TrustedKey {
     pub name: String,
     pub id: [u8; 16],
     pub bits: u32,
-    key: PKey<Public>,
+    /// The DER `RSAPublicKey` (PKCS#1).
+    pkcs1: Vec<u8>,
+    /// The OpenSSL key, made on first use: starting OpenSSL takes 0.4 ms,
+    /// and an install whose packages are trusted by their index entries,
+    /// with the index verified before, never checks a signature.
+    key: std::sync::OnceLock<Option<PKey<Public>>>,
+}
+
+impl TrustedKey {
+    fn key(&self) -> Option<&PKey<Public>> {
+        self.key
+            .get_or_init(|| Rsa::public_key_from_der_pkcs1(&self.pkcs1).ok().and_then(|r| PKey::from_rsa(r).ok()))
+            .as_ref()
+    }
 }
 
 impl std::fmt::Debug for TrustedKey {
@@ -67,6 +80,12 @@ pub fn key_id(key: &PKey<Public>) -> Result<[u8; 16]> {
 }
 
 fn parse_public_pem(pem: &[u8]) -> Result<PKey<Public>> {
+    if let Some(k) = pkcs1_of_plain_pem(pem)
+        .and_then(|d| Rsa::public_key_from_der_pkcs1(&d).ok())
+        .and_then(|r| PKey::from_rsa(r).ok())
+    {
+        return Ok(k);
+    }
     if let Ok(k) = PKey::public_key_from_pem(pem) {
         return Ok(k);
     }
@@ -76,13 +95,167 @@ fn parse_public_pem(pem: &[u8]) -> Result<PKey<Public>> {
     Err(Error::Key("not a PEM public key".into()))
 }
 
+/// The DER `RSAPublicKey` (PKCS#1) of a plain PEM key: one `PUBLIC KEY`
+/// block holding an rsaEncryption SubjectPublicKeyInfo, or one `RSA PUBLIC
+/// KEY` block, in base64 lines. Read without OpenSSL's generic PEM reader,
+/// whose decoder machinery takes 0.3 ms to start (of every run); anything
+/// else (`None`) is left to that reader.
+fn pkcs1_of_plain_pem(pem: &[u8]) -> Option<Vec<u8>> {
+    let t = std::str::from_utf8(pem).ok()?.trim_start();
+    let (label, rest) = if let Some(r) = t.strip_prefix("-----BEGIN PUBLIC KEY-----") {
+        ("PUBLIC KEY", r)
+    } else {
+        ("RSA PUBLIC KEY", t.strip_prefix("-----BEGIN RSA PUBLIC KEY-----")?)
+    };
+    let (b64, tail) = rest.split_once(format!("-----END {label}-----").as_str())?;
+    if !tail.trim().is_empty() {
+        return None;
+    }
+    let der = base64_decode(b64)?;
+    if label == "RSA PUBLIC KEY" {
+        return Some(der);
+    }
+    // SEQUENCE { SEQUENCE { OID rsaEncryption, NULL }, BIT STRING { 0, RSAPublicKey } }
+    let (spki, rest) = der_take(&der, 0x30)?;
+    let (alg, rest2) = der_take(spki, 0x30)?;
+    const RSA: &[u8] = &[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+    let alg_ok = alg == RSA || (alg.len() == RSA.len() + 2 && alg.starts_with(RSA) && alg[RSA.len()..] == [0x05, 0x00]);
+    let (bits, rest3) = der_take(rest2, 0x03)?;
+    if !rest.is_empty() || !rest3.is_empty() || !alg_ok {
+        return None;
+    }
+    match bits.split_first()? {
+        (0, key) => Some(key.to_vec()),
+        _ => None,
+    }
+}
+
+/// The key id and size of a DER `RSAPublicKey` in canonical form (minimal
+/// lengths, minimal positive integers): the very bytes OpenSSL writes for
+/// the key, so the id is the one [`key_id`] computes. `None` for anything
+/// else, which is left to OpenSSL.
+fn canonical_rsa_id(der: &[u8]) -> Option<([u8; 16], u32)> {
+    let (seq, rest) = der_take_canonical(der, 0x30)?;
+    let (n, rest2) = der_take_canonical(seq, 0x02)?;
+    let (e, rest3) = der_take_canonical(rest2, 0x02)?;
+    if !rest.is_empty() || !rest3.is_empty() {
+        return None;
+    }
+    for i in [n, e] {
+        match i {
+            [] | [0] => return None,
+            [b, ..] if b & 0x80 != 0 => return None,
+            [0, b, ..] if b & 0x80 == 0 => return None,
+            _ => {}
+        }
+    }
+    let n = if n[0] == 0 { &n[1..] } else { n };
+    let bits = n.len() as u32 * 8 - n[0].leading_zeros();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&digest::sha512(der)[..16]);
+    Some((id, bits))
+}
+
+/// [`der_take`] that also requires the length in its shortest form.
+fn der_take_canonical(b: &[u8], tag: u8) -> Option<(&[u8], &[u8])> {
+    let l = *b.get(1)?;
+    if l & 0x80 != 0 {
+        let n = (l & 0x7f) as usize;
+        let first = *b.get(2)?;
+        if first == 0 || (n == 1 && first < 0x80) {
+            return None;
+        }
+    }
+    der_take(b, tag)
+}
+
+/// One DER element with tag `tag`: (its content, what follows it).
+fn der_take(b: &[u8], tag: u8) -> Option<(&[u8], &[u8])> {
+    let (&t, b) = b.split_first()?;
+    let (&l, b) = b.split_first()?;
+    if t != tag {
+        return None;
+    }
+    let (len, b) = if l < 0x80 {
+        (l as usize, b)
+    } else {
+        let n = (l & 0x7f) as usize;
+        if n == 0 || n > 4 || b.len() < n {
+            return None;
+        }
+        (b[..n].iter().fold(0usize, |a, &x| a << 8 | x as usize), &b[n..])
+    };
+    if b.len() < len {
+        return None;
+    }
+    Some(b.split_at(len))
+}
+
+/// Standard base64 with padding; whitespace between characters is skipped.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let (mut acc, mut n, mut pad) = (0u32, 0u32, 0u32);
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => {
+                pad += 1;
+                continue;
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => continue,
+            _ => return None,
+        };
+        if pad > 0 {
+            return None;
+        }
+        acc = acc << 6 | v as u32;
+        n += 1;
+        if n == 4 {
+            out.extend_from_slice(&[(acc >> 16) as u8, (acc >> 8) as u8, acc as u8]);
+            acc = 0;
+            n = 0;
+        }
+    }
+    match (n, pad) {
+        (0, 0) => {}
+        (2, 2) => out.push((acc >> 4) as u8),
+        (3, 1) => out.extend_from_slice(&[(acc >> 10) as u8, (acc >> 2) as u8]),
+        _ => return None,
+    }
+    Some(out)
+}
+
 impl TrustedKeys {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Identifies the key set (file names, key ids and sizes, in order):
+    /// what an earlier verification with these keys stands for.
+    pub fn fingerprint(&self) -> [u8; 32] {
+        let mut h = openssl::sha::Sha256::new();
+        for k in &self.keys {
+            h.update(&(k.name.len() as u64).to_le_bytes());
+            h.update(k.name.as_bytes());
+            h.update(&k.id);
+            h.update(&k.bits.to_le_bytes());
+        }
+        h.finish()
+    }
+
     /// Adds a PEM public key (`PUBLIC KEY` or `RSA PUBLIC KEY`).
     pub fn add_pem(&mut self, name: &str, pem: &[u8]) -> Result<&TrustedKey> {
+        if let Some(pkcs1) = pkcs1_of_plain_pem(pem) {
+            if let Some((id, bits)) = canonical_rsa_id(&pkcs1) {
+                let key = std::sync::OnceLock::new();
+                self.keys.push(TrustedKey { name: name.to_string(), id, bits, pkcs1, key });
+                return Ok(self.keys.last().unwrap());
+            }
+        }
         let key = parse_public_pem(pem)?;
         self.add_key(name, key)
     }
@@ -91,7 +264,10 @@ impl TrustedKeys {
     pub fn add_key(&mut self, name: &str, key: PKey<Public>) -> Result<&TrustedKey> {
         let id = key_id(&key)?;
         let bits = key.bits();
-        self.keys.push(TrustedKey { name: name.to_string(), id, bits, key });
+        let pkcs1 = key.rsa()?.public_key_to_der_pkcs1()?;
+        let cell = std::sync::OnceLock::new();
+        let _ = cell.set(Some(key));
+        self.keys.push(TrustedKey { name: name.to_string(), id, bits, pkcs1, key: cell });
         Ok(self.keys.last().unwrap())
     }
 
@@ -215,7 +391,8 @@ pub struct SignerInfo {
 /// Why a file is trusted.
 #[derive(Debug, Clone, Default)]
 pub struct TrustInfo {
-    /// The first SIG block that verified, if any.
+    /// The first SIG block that verified, if any. Not looked for when the
+    /// identity matched and no signature is required.
     pub signer: Option<SignerInfo>,
     /// The identity digest algorithm, when the identity was checked and
     /// matched.
@@ -319,7 +496,7 @@ fn verify_sig_block<'k>(
             Some(md) => md,
             None => return Err(format!("unsupported hash algorithm {}", p[1])),
         };
-        if rsa_verify(&k.key, &signed_message(schema, p, &md), &p[18..]) {
+        if k.key().map_or(false, |key| rsa_verify(key, &signed_message(schema, p, &md), &p[18..])) {
             return Ok(k);
         }
     }
@@ -363,6 +540,11 @@ pub fn check_trust(
             info.identity = Some(alg);
         }
     }
+    // a matching identity (the digest a signed index gives) trusts the file
+    // on its own; a signature adds nothing to it unless one is required
+    // (apk does not check it either), and checking one costs an RSA
+    // verification and OpenSSL's start-up on every package
+    let sigs = if info.identity.is_some() && !opts.require_signature { &[][..] } else { sigs };
     for (i, s) in sigs.iter().enumerate() {
         match verify_sig_block(keys, schema, &mut cache, s) {
             Ok(k) => {
@@ -488,6 +670,53 @@ pub fn verify_package_file(path: &Path, keys: &TrustedKeys, expected_identity: O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plain_pem_key_is_read_without_the_generic_reader_and_is_the_same_key() {
+        let rsa = Rsa::generate(2048).unwrap();
+        let spki = rsa.public_key_to_pem().unwrap();
+        let pkcs1 = rsa.public_key_to_pem_pkcs1().unwrap();
+        let slow = PKey::public_key_from_pem(&spki).unwrap();
+        let crlf = String::from_utf8(spki.clone()).unwrap().replace('\n', "\r\n");
+        for pem in [&spki[..], &pkcs1[..], crlf.trim_end().as_bytes()] {
+            let d = pkcs1_of_plain_pem(pem).expect("a plain PEM");
+            let fast = PKey::from_rsa(Rsa::public_key_from_der_pkcs1(&d).unwrap()).unwrap();
+            assert_eq!(key_id(&fast).unwrap(), key_id(&slow).unwrap());
+            assert_eq!(fast.bits(), 2048);
+        }
+        // anything else goes to OpenSSL's reader, which decides as before
+        for bad in [
+            &b"-----BEGIN PUBLIC KEY-----\n!!!!\n-----END PUBLIC KEY-----\n"[..],
+            b"text before\n-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n",
+            b"-----BEGIN PUBLIC KEY-----\nMAA=\n-----END PUBLIC KEY-----\nmore\n",
+        ] {
+            assert!(pkcs1_of_plain_pem(bad).is_none());
+        }
+        let mut k = TrustedKeys::new();
+        assert!(k.add_pem("x", b"-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n").is_err());
+        let id = k.add_pem("k.rsa.pub", &spki).unwrap().id;
+        assert_eq!(id, key_id(&slow).unwrap());
+        // read without OpenSSL, made into an OpenSSL key when first used
+        assert!(k.keys[0].key.get().is_none());
+        assert!(k.keys[0].key().is_some());
+        for bits in [1024, 3072, 4096] {
+            let r = Rsa::generate(bits).unwrap();
+            let d = r.public_key_to_der_pkcs1().unwrap();
+            let p = PKey::from_rsa(Rsa::public_key_from_der_pkcs1(&d).unwrap()).unwrap();
+            assert_eq!(canonical_rsa_id(&d), Some((key_id(&p).unwrap(), bits)));
+        }
+        // not canonical: a long-form length that fits the short form, a
+        // leading zero that is not needed
+        let mut long = vec![0x30, 0x81, 0x06];
+        long.extend_from_slice(&[0x02, 0x01, 0x05, 0x02, 0x01, 0x03]);
+        assert!(der_take(&long, 0x30).is_some() && canonical_rsa_id(&long).is_none());
+        assert!(canonical_rsa_id(&[0x30, 0x07, 0x02, 0x02, 0x00, 0x05, 0x02, 0x01, 0x03]).is_none());
+        assert_eq!(canonical_rsa_id(&[0x30, 0x07, 0x02, 0x02, 0x00, 0x85, 0x02, 0x01, 0x03]).map(|x| x.1), Some(8));
+        assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
+        assert_eq!(base64_decode("TWE=").unwrap(), b"Ma");
+        assert_eq!(base64_decode("TQ==").unwrap(), b"M");
+        assert!(base64_decode("TQ=x").is_none());
+    }
 
     fn test_key() -> PKey<Private> {
         PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap()

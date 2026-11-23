@@ -11,7 +11,8 @@
 //!   the root (one `readlink` per package and per symlink) and refuses an
 //!   index that doesn't match, or that is missing or damaged.
 //! - `meta` holds every package's `info`, so that opening a root reads one
-//!   file instead of one per package.
+//!   file instead of one per package; in binary form ([`crate::codec`]),
+//!   which reads back in a fifth of the time the text records take.
 //! - `files/XXX` (4096 buckets by a hash of the path) hold, per path, the
 //!   packages that have a non-directory entry there and those that have a
 //!   directory there. A change reads and rewrites only the buckets of its
@@ -55,7 +56,8 @@ use crate::error::{Error, Result};
 use crate::rootfs::{self, RootFs};
 
 pub const INDEX_DIR: &str = "var/lib/catalyst/index";
-const HEADER: &str = "catalyst-index 2";
+// 3: `meta` in binary form (an index of an older form is rebuilt)
+const HEADER: &str = "catalyst-index 3";
 /// A bucket file's first line: this, a space, and the SHA-256 of the rest.
 const BUCKET_HEADER: &str = "catalyst-bucket";
 const BUCKETS: u32 = 4096;
@@ -241,11 +243,15 @@ impl Index {
         if st.stamp != stamp(versions) {
             return None;
         }
-        for (p, t) in &st.links {
-            let l = fs::read_link(root.join(std::ffi::OsStr::from_bytes(p))).ok()?;
-            if l.as_os_str().as_bytes() != t.as_slice() {
-                return None;
-            }
+        // a readlink per directory symlink (about 230 on Valence): on a cold
+        // cache each waits for the disk, so they may go to threads
+        let same = on_threads(&st.links, |(p, t)| -> Result<bool> {
+            let l = fs::read_link(root.join(std::ffi::OsStr::from_bytes(p)));
+            Ok(l.map_or(false, |l| l.as_os_str().as_bytes() == t.as_slice()))
+        })
+        .ok()?;
+        if same.contains(&false) {
+            return None;
         }
         Some(Index {
             dir,
@@ -274,7 +280,7 @@ impl Index {
             let ["pkg", name, len] = f.as_slice() else { return Err(Error::Format("index: meta".into())) };
             let len: usize = len.parse().map_err(|_| Error::Format("index: meta".into()))?;
             let body = data.get(nl + 1..nl + 1 + len).ok_or_else(|| Error::Format("index: meta".into()))?;
-            let m = db::parse_info(std::str::from_utf8(body).map_err(|_| Error::Format("index: meta".into()))?)?;
+            let m = crate::codec::decode_meta(body).ok_or_else(|| Error::Format("index: meta".into()))?;
             if m.info.name != *name {
                 return Err(Error::Format("index: meta".into()));
             }
@@ -385,15 +391,35 @@ fn read_bucket(dir: &Path, present: &[u8], b: u32) -> Result<Bucket> {
 /// `f` over `items`: on the calling thread for a few, spread over threads
 /// for many; the results in the order of `items`, or the first error.
 fn on_threads<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
-    if items.len() < 64 {
+    if items.len() < 16 {
         return items.iter().map(&f).collect();
+    }
+    // Starting the threads costs about 1.4 ms. When what is left would take
+    // less than about twice that on this thread, it stays here: on a warm
+    // cache, the 244 Current links of a big system take 0.8 ms here and
+    // 1.5 ms on 16 threads. A cold cache (each item waits for the disk), or
+    // thousands of items (the buckets of a big install), go to the threads.
+    // The time the items so far took tells which.
+    let t0 = std::time::Instant::now();
+    let mut out = Vec::with_capacity(items.len());
+    let mut i = 0;
+    while i < items.len() {
+        out.push(f(&items[i])?);
+        i += 1;
+        let left = items.len() - i;
+        if i >= 8 && left >= 8 && t0.elapsed() * left as u32 / i as u32 > std::time::Duration::from_millis(3) {
+            break;
+        }
+    }
+    let items = &items[i..];
+    if items.is_empty() {
+        return Ok(out);
     }
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 16);
     let per = (items.len() + threads - 1) / threads;
     let f = &f;
     std::thread::scope(|sc| {
         let hs: Vec<_> = items.chunks(per).map(|part| sc.spawn(move || part.iter().map(f).collect::<Result<Vec<R>>>())).collect();
-        let mut out = Vec::with_capacity(items.len());
         for h in hs {
             out.extend(h.join().map_err(|_| Error::Format("index: a worker thread failed".into()))??);
         }
@@ -457,7 +483,10 @@ fn format_aliases(m: &[(Vec<u8>, Vec<u8>, String)]) -> String {
 /// `meta` for `metas`. With `reuse`, a package that is not in its changed
 /// set and whose entry was read is written back as it was (it would format
 /// the same: the index is canonical).
-fn format_meta(metas: &BTreeMap<String, PkgMeta>, reuse: Option<(&HashMap<String, Vec<u8>>, &HashSet<String>)>) -> Vec<u8> {
+fn format_meta<M: std::borrow::Borrow<PkgMeta>>(
+    metas: &BTreeMap<String, M>,
+    reuse: Option<(&HashMap<String, Vec<u8>>, &HashSet<String>)>,
+) -> Vec<u8> {
     let mut out = Vec::new();
     for (n, m) in metas {
         let kept = reuse.and_then(|(raw, changed)| if changed.contains(n) { None } else { raw.get(n) });
@@ -465,8 +494,8 @@ fn format_meta(metas: &BTreeMap<String, PkgMeta>, reuse: Option<(&HashMap<String
         let body: &[u8] = match kept {
             Some(b) => b,
             None => {
-                formatted = db::format_info(m);
-                formatted.as_bytes()
+                formatted = crate::codec::encode_meta(m.borrow());
+                &formatted
             }
         };
         out.extend_from_slice(format!("pkg {n} {}\n", body.len()).as_bytes());
@@ -604,7 +633,7 @@ pub fn update(
     changed: &HashSet<String>,
     olds: &[&PkgState],
     news: &[&PkgState],
-    metas: &BTreeMap<String, PkgMeta>,
+    metas: &BTreeMap<String, &PkgMeta>,
     rfs: &mut RootFs,
 ) -> Result<()> {
     let d = dir(root);

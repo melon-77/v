@@ -10,6 +10,47 @@ How this works:
 
 ---
 
+## 2026-11-23: one-package installs, round three, with a benchmark that gives verdicts
+
+**`add nano` is now faster than apk on the 244-package system, and still slower on the 39-package one.** These come from a stricter benchmark than before: 15 runs per tool in ABBA order, every run kept, and a verdict only when a Mann-Whitney test gives p < 0.01 and the 95% interval of the ratio is entirely below 0.95 or above 1.05.
+
+| system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | both synced to disk |
+|---|---|---|---|---|---|---|---|
+| 244 packages | nano | warm | 34 ms | 27 ms | 0.81 (0.78-0.85) | **faster** | **faster**, 0.72 |
+| 244 packages | nano | cold | 72 ms | 84 ms | 1.16 (1.14-1.22) | slower | no clear difference, 1.06 |
+| 39 packages | nano | warm | 13 ms | 23 ms | 1.70 (1.67-1.77) | slower | slower, 1.28 |
+| 39 packages | nano | cold | 47 ms | 60 ms | 1.28 (1.27-1.34) | slower | slower, 1.21 |
+| 244 packages | Cataclysm | warm | 958 ms | 939 ms | 0.98 (0.93-1.08) | no clear difference | **faster**, 0.61 |
+| 244 packages | Cataclysm | cold | 1.12 s | 1.10 s | 0.98 (0.93-1.04) | no clear difference | **faster**, 0.75 |
+| 39 packages | Cataclysm | warm | 1.60 s | 964 ms | 0.60 (0.58-0.63) | **faster** | **faster**, 0.45 |
+| 39 packages | Cataclysm | cold | 1.96 s | 1.31 s | 0.67 (0.61-0.71) | **faster** | **faster**, 0.53 |
+
+`add nano`, warm, was 32 ms on the small system and 44 ms on the big one when this benchmark first ran; round two brought that to 29 and 37, this round to 23 and 27.
+
+**What changed (found with `CATALYST_PROF=1`):**
+- **The repository index is cached once verified.** The parsed index is kept in `var/cache/catalyst/parsed-â€¦`, under a key made of the index file's SHA-256, its location, the trusted keys and the options. Anything else is verified from scratch, and the rollback check runs every time. 4.3 ms became 1.4 ms.
+- **A package's signature is not checked when its identity already matched the signed index.** It added no trust (apk doesn't check it either) and cost an RSA verification on every package. 0.8 ms became 0.2 ms.
+- **OpenSSL no longer starts up on a cached local install.**
+  - OpenSSL 3's one-shot `SHA256()` goes through its provider machinery, which takes about 0.7 ms to start. Digests now use `SHA256_Init`/`_Update`/`_Final`.
+  - The trusted key is read without OpenSSL and made an OpenSSL key the first time a signature is checked.
+- **Records are borrowed, not copied.** The resolver copied all 1,144 index entries on every run, and the switch copied every installed package's metadata.
+- **Threads start only when they pay.** Work that takes under about 3 ms on one thread stays there; a cold cache and big installs still go to the threads. The index's ~230 directory links are checked on them too.
+- **The lookup index keeps its metadata in binary** (`catalyst-index 3`). An index in the older form is rebuilt once, on the first change.
+
+**Checks:**
+- **Tests:** 66 pass (42 unit, 11 command, 13 over the real repository; 5 are new).
+- **Kill test:** 80/80 of the upgrade (76 killed while running) and 80/80 of `KT_JOB=small` (80), 0 failures.
+- **The first benchmark of this round found a mistake of mine.** Cataclysm on the big system came out 9% slower than apk: the new thread rule kept its ~3,600 bucket reads on one thread. The rule now goes by the work that is left, and the table above is the rerun.
+
+**Why the small system still loses.** A one-package install there takes catalyst about 22 ms:
+- about 9.5 ms in three device flushes, which make an install crash-safe and on disk when the command returns. apk does none;
+- about 5 ms starting and ending the process, the same for apk;
+- about 7 ms of work, which is what apk's work takes too.
+
+**Next, decided by the owner today:** a change that only adds new packages will skip those flushes. Upgrades and removals keep them. That is a separate change with its own tests and benchmark; this commit does not touch the guarantee.
+
+---
+
 ## 2026-11-23: installing Cataclysm on a big system is now as fast as apk
 
 **The gap from this morning's benchmark is closed.** Installing `cataclysm-dda-tiles` on the 244-package system:

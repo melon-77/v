@@ -42,19 +42,22 @@ use crate::error::{Error, Result};
 use crate::repo::Repo;
 use crate::version;
 
+/// A package version the resolution can choose: borrowed from a
+/// repository index or the installed database, not copied (copying all
+/// of an index's entries was most of the time the universe took).
 #[derive(Debug, Clone)]
-pub struct Candidate {
-    pub info: PkgInfo,
+pub struct Candidate<'a> {
+    pub info: &'a PkgInfo,
     /// Repository index, `None` for an installed package no repository
     /// has.
     pub repo: Option<usize>,
     pub installed: bool,
 }
 
-pub struct Universe {
-    pub cands: Vec<Candidate>,
+pub struct Universe<'a> {
+    pub cands: Vec<Candidate<'a>>,
     /// name -> (candidate, provided version)
-    providers: HashMap<String, Vec<(usize, String)>>,
+    providers: HashMap<&'a str, Vec<(usize, &'a str)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,52 +72,52 @@ fn arch_ok(p: &PkgInfo, arches: &[String]) -> bool {
     p.arch.is_empty() || p.arch == "noarch" || arches.iter().any(|a| *a == p.arch)
 }
 
-impl Universe {
-    pub fn new(repos: &[Repo], installed: &BTreeMap<String, Installed>, arch: &str) -> Universe {
+impl<'a> Universe<'a> {
+    pub fn new(repos: &'a [Repo], installed: &'a BTreeMap<String, Installed>, arch: &str) -> Universe<'a> {
         Self::with_arches(repos, installed, &[arch.to_string()])
     }
 
     /// With all the architectures of the root (`etc/apk/arch`, every line).
-    pub fn with_arches(repos: &[Repo], installed: &BTreeMap<String, Installed>, arches: &[String]) -> Universe {
-        let mut cands: Vec<Candidate> = Vec::new();
-        let mut by_nv: HashMap<(String, String), usize> = HashMap::new();
+    pub fn with_arches(repos: &'a [Repo], installed: &'a BTreeMap<String, Installed>, arches: &[String]) -> Universe<'a> {
+        let mut cands: Vec<Candidate<'a>> = Vec::new();
+        let mut by_nv: HashMap<(&'a str, &'a str), usize> = HashMap::new();
         for (ri, r) in repos.iter().enumerate() {
             for p in &r.index.packages {
                 if p.identity().is_none() || !arch_ok(p, arches) {
                     continue;
                 }
                 // first copy wins (§F4.1)
-                let key = (p.name.clone(), p.version.clone());
+                let key = (p.name.as_str(), p.version.as_str());
                 if by_nv.contains_key(&key) {
                     continue;
                 }
                 by_nv.insert(key, cands.len());
-                cands.push(Candidate { info: p.clone(), repo: Some(ri), installed: false });
+                cands.push(Candidate { info: p, repo: Some(ri), installed: false });
             }
         }
         for (name, ip) in installed {
-            let key = (name.clone(), ip.meta.info.version.clone());
+            let key = (name.as_str(), ip.meta.info.version.as_str());
             match by_nv.get(&key) {
                 Some(&i) => cands[i].installed = true,
                 None => {
                     by_nv.insert(key, cands.len());
-                    cands.push(Candidate { info: ip.meta.info.clone(), repo: None, installed: true });
+                    cands.push(Candidate { info: &ip.meta.info, repo: None, installed: true });
                 }
             }
         }
-        let mut providers: HashMap<String, Vec<(usize, String)>> = HashMap::new();
-        for (i, c) in cands.iter().enumerate() {
-            providers.entry(c.info.name.clone()).or_default().push((i, c.info.version.clone()));
+        let mut providers: HashMap<&'a str, Vec<(usize, &'a str)>> = HashMap::new();
+        for (i, info) in cands.iter().map(|c| c.info).enumerate() {
+            providers.entry(info.name.as_str()).or_default().push((i, info.version.as_str()));
             // a provides entry repeating the package's own name is
             // registered too (database.c 602-604)
-            for p in &c.info.provides {
-                providers.entry(p.name.clone()).or_default().push((i, p.version.clone()));
+            for p in &info.provides {
+                providers.entry(p.name.as_str()).or_default().push((i, p.version.as_str()));
             }
         }
         Universe { cands, providers }
     }
 
-    fn providers(&self, name: &str) -> &[(usize, String)] {
+    fn providers(&self, name: &str) -> &[(usize, &'a str)] {
         self.providers.get(name).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
@@ -127,8 +130,8 @@ impl Universe {
 
     /// (name, provided version) of everything candidate `c` provides: its
     /// own name and version, then its provides entries.
-    fn provided(&self, c: usize) -> impl Iterator<Item = (&str, &str)> {
-        let i = &self.cands[c].info;
+    fn provided(&self, c: usize) -> impl Iterator<Item = (&'a str, &'a str)> {
+        let i: &'a PkgInfo = self.cands[c].info;
         std::iter::once((i.name.as_str(), i.version.as_str()))
             .chain(i.provides.iter().map(|p| (p.name.as_str(), p.version.as_str())))
     }
@@ -159,7 +162,7 @@ impl From<Error> for Fail {
 }
 
 struct Solver<'u> {
-    u: &'u Universe,
+    u: &'u Universe<'u>,
     mode: Mode,
     /// names for which the newest version is preferred even in Keep mode
     fresh: &'u HashSet<String>,
@@ -328,7 +331,7 @@ impl<'u> Solver<'u> {
 
     fn matching(&self, dep: &Dependency) -> Vec<(usize, &'u str)> {
         let u = self.u;
-        u.providers(&dep.name).iter().filter(|(_, pv)| Universe::matches(dep, pv)).map(|(c, pv)| (*c, pv.as_str())).collect()
+        u.providers(&dep.name).iter().filter(|(_, pv)| Universe::matches(dep, pv)).map(|(c, pv)| (*c, *pv)).collect()
     }
 
     fn learnable(&self, dep: &Dependency) -> bool {
@@ -594,11 +597,11 @@ mod tests {
         }
     }
 
-    fn universe(pkgs: Vec<PkgInfo>) -> Universe {
+    fn universe(pkgs: Vec<PkgInfo>) -> Universe<'static> {
         universe_with(pkgs, &[])
     }
 
-    fn universe_with(pkgs: Vec<PkgInfo>, installed: &[PkgInfo]) -> Universe {
+    fn universe_with(pkgs: Vec<PkgInfo>, installed: &[PkgInfo]) -> Universe<'static> {
         let repo = Repo {
             name: "t".into(),
             index_url: "t/Packages.adb".into(),
@@ -608,6 +611,7 @@ mod tests {
             index: Index { packages: pkgs, ..Default::default() },
             trust: TrustInfo::default(),
             generation: 0,
+            offer: [0; 32],
             stale: false,
         };
         let inst: BTreeMap<String, Installed> = installed
@@ -617,7 +621,10 @@ mod tests {
                 (i.name.clone(), Installed { meta, dir: std::path::PathBuf::new() })
             })
             .collect();
-        Universe::new(&[repo], &inst, "x86_64")
+        // the universe borrows them; a test can let them live forever
+        let repos: &'static [Repo] = Box::leak(vec![repo].into_boxed_slice());
+        let inst: &'static BTreeMap<String, Installed> = Box::leak(Box::new(inst));
+        Universe::new(repos, inst, "x86_64")
     }
 
     fn names(u: &Universe, s: &Solution) -> Vec<String> {

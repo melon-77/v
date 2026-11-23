@@ -27,6 +27,7 @@
 //!   libc helpers.
 
 pub mod adb;
+pub mod codec;
 pub mod commit;
 pub mod db;
 pub mod digest;
@@ -34,6 +35,7 @@ pub mod dump;
 pub mod engine;
 pub mod error;
 pub mod fetch;
+pub mod idxcache;
 pub mod index;
 pub mod prof;
 pub mod progress;

@@ -73,21 +73,28 @@ impl Hasher {
     }
 }
 
+// The one-shot functions of OpenSSL 3 (`SHA256()` and the like) look the
+// algorithm up through its provider machinery, which on first use starts
+// OpenSSL up: about 0.7 ms of every run. `SHA256_Init`/`_Update`/`_Final`
+// compute the same digest directly, so every digest here goes through them.
+
 /// One-shot digest.
 pub fn digest(alg: Alg, data: &[u8]) -> Vec<u8> {
-    match alg {
-        Alg::Sha1 => openssl::sha::sha1(data).to_vec(),
-        Alg::Sha256 => openssl::sha::sha256(data).to_vec(),
-        Alg::Sha512 => openssl::sha::sha512(data).to_vec(),
-    }
+    let mut h = Hasher::new(alg);
+    h.update(data);
+    h.finish()
 }
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    openssl::sha::sha256(data)
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finish()
 }
 
 pub fn sha512(data: &[u8]) -> [u8; 64] {
-    openssl::sha::sha512(data)
+    let mut h = Sha512::new();
+    h.update(data);
+    h.finish()
 }
 
 /// Lower-case hex.

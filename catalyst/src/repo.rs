@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use crate::adb::{self, Index, PkgInfo};
 use crate::db;
 use crate::digest;
+use crate::idxcache;
 use crate::version;
 use crate::error::{Error, Result};
 use crate::fetch::{self, Http, Limit};
@@ -50,6 +51,9 @@ pub struct Repo {
     pub trust: TrustInfo,
     /// The newest build-time among its packages.
     pub generation: u64,
+    /// The SHA-256 of the freshness record of what the index offers
+    /// ([`Seen`]): equal to the stored record's when nothing changed.
+    pub offer: [u8; 32],
     /// True if a remote refresh failed and the cached index was used.
     pub stale: bool,
 }
@@ -243,9 +247,19 @@ impl Seen {
 /// and whether an older index may be accepted.
 #[derive(Debug, Default, Clone)]
 pub struct Freshness {
-    pub seen: HashMap<String, Seen>,
+    /// The records as read, by location key; one is parsed only when an
+    /// index offers something else than it says.
+    records: HashMap<String, String>,
     pub allow_rollback: bool,
     dir: PathBuf,
+}
+
+/// What `index` offers as its freshness record has it, and the SHA-256 of
+/// that record.
+fn offer_of(index: &Index, index_url: &str) -> (Seen, [u8; 32]) {
+    let now = Seen::of(index);
+    let d = digest::sha256(now.format(index_url).as_bytes());
+    (now, d)
 }
 
 fn url_key(index_url: &str) -> String {
@@ -255,27 +269,41 @@ fn url_key(index_url: &str) -> String {
 impl Freshness {
     pub fn load(root: &Path, allow_rollback: bool) -> Freshness {
         let dir = root.join(db::STATE_DIR).join("indexes");
-        let mut seen = HashMap::new();
+        let mut records = HashMap::new();
         if let Ok(rd) = fs::read_dir(&dir) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
                 if name.len() != 64 || !e.file_type().map_or(false, |t| t.is_file()) {
                     continue;
                 }
-                if let Some(s) = fs::read_to_string(e.path()).ok().and_then(|t| Seen::parse(&t)) {
-                    seen.insert(name, s);
+                if let Ok(t) = fs::read_to_string(e.path()) {
+                    records.insert(name, t);
                 }
             }
         }
-        Freshness { seen, allow_rollback, dir }
+        Freshness { records, allow_rollback, dir }
     }
 
     /// Refuses an index that is older than the one accepted before from
     /// the same location: its newest build-time is older, or it offers a
     /// package name only in a lower version than before.
+    #[cfg(test)]
     fn check(&self, index_url: &str, index: &Index) -> Result<()> {
-        let Some(prev) = self.seen.get(&url_key(index_url)) else { return Ok(()) };
-        let now = Seen::of(index);
+        let (now, offer) = offer_of(index, index_url);
+        self.check_offer(index_url, &offer, index, Some(now))
+    }
+
+    /// [`check`](Self::check) with what the index offers already known:
+    /// `offer` (see [`Repo::offer`]) and, if computed, `now`. An index that
+    /// offers what the record says is not compared further.
+    fn check_offer(&self, index_url: &str, offer: &[u8; 32], index: &Index, now: Option<Seen>) -> Result<()> {
+        let Some(text) = self.records.get(&url_key(index_url)) else { return Ok(()) };
+        if digest::sha256(text.as_bytes()) == *offer {
+            return Ok(());
+        }
+        // a record that cannot be read compares like none
+        let Some(prev) = Seen::parse(text) else { return Ok(()) };
+        let now = now.unwrap_or_else(|| Seen::of(index));
         let mut why = Vec::new();
         if now.generation < prev.generation {
             why.push(format!("newest package build time {} < {}", now.generation, prev.generation));
@@ -310,15 +338,15 @@ impl Freshness {
     pub fn save(&mut self, repos: &[Repo]) -> Result<()> {
         for r in repos {
             let k = url_key(&r.index_url);
-            let now = Seen::of(&r.index);
-            if self.seen.get(&k) == Some(&now) {
+            if self.records.get(&k).map(|t| digest::sha256(t.as_bytes())) == Some(r.offer) {
                 continue;
             }
+            let text = Seen::of(&r.index).format(&r.index_url);
             if !db::real_dir(&self.dir)? {
                 fs::create_dir(&self.dir)?;
             }
-            db::write_atomic(&self.dir.join(&k), now.format(&r.index_url).as_bytes())?;
-            self.seen.insert(k, now);
+            db::write_atomic(&self.dir.join(&k), text.as_bytes())?;
+            self.records.insert(k, text);
         }
         Ok(())
     }
@@ -347,15 +375,36 @@ pub fn load(
 ) -> Result<Repo> {
     let (index_url, base, default_spec) = locate(spec, arch);
     let remote = is_remote(&index_url);
-    let read = |path: &Path| -> Result<(Index, TrustInfo, u64)> {
-        let (index, trust) =
-            adb::read_index_file(path, keys, opts).map_err(|e| prefix(e, &format!("{index_url}: ")))?;
-        fresh.check(&index_url, &index)?;
-        let g = generation(&index);
-        Ok((index, trust, g))
+    let at = |e: Error| prefix(e, &format!("{index_url}: "));
+    let cache_file = idxcache::path(cache_dir, &url_key(&index_url));
+    // verified and parsed, from the cache when this very index was before
+    // (with these keys and options); the freshness check runs either way
+    let read = |path: &Path| -> Result<(Index, TrustInfo, [u8; 32])> {
+        let len = fs::metadata(path).map_err(|e| at(e.into()))?.len();
+        if len > fetch::MAX_INDEX_FILE {
+            let (index, trust) = adb::read_index_file(path, keys, opts).map_err(at)?;
+            let (now, offer) = offer_of(&index, &index_url);
+            fresh.check_offer(&index_url, &offer, &index, Some(now))?;
+            return Ok((index, trust, offer));
+        }
+        let file = fs::read(path).map_err(|e| at(e.into()))?;
+        let key = idxcache::key(&file, &index_url, keys, opts);
+        if let Some(c) = idxcache::load(&cache_file, &key) {
+            crate::prof::mark("  repositories: verified index from the cache");
+            fresh.check_offer(&index_url, &c.offer, &c.index, None)?;
+            crate::prof::mark("  repositories: freshness check");
+            return Ok((c.index, c.trust, c.offer));
+        }
+        let (index, trust) = adb::read_index(&file[..], keys, opts).map_err(at)?;
+        let (now, offer) = offer_of(&index, &index_url);
+        fresh.check_offer(&index_url, &offer, &index, Some(now))?;
+        crate::prof::mark("  repositories: freshness check");
+        idxcache::store(&cache_file, &key, &index, &trust, &offer);
+        crate::prof::mark("  repositories: cache written");
+        Ok((index, trust, offer))
     };
     let mut stale = false;
-    let (index, trust, generation) = if remote {
+    let (index, trust, offer) = if remote {
         let name = format!("Packages.{}.adb", &url_key(&index_url)[..8]);
         let dest = cache_dir.join(name);
         let cache_fresh = cache_max_age.and_then(|max_age| {
@@ -392,6 +441,7 @@ pub fn load(
     } else {
         read(Path::new(local_path(&index_url)))?
     };
+    let generation = generation(&index);
     for s in &index.skipped {
         eprintln!("oct: warning: {index_url}: {s}; skipped");
     }
@@ -405,6 +455,7 @@ pub fn load(
         index,
         trust,
         generation,
+        offer,
         stale,
     })
 }
@@ -509,6 +560,7 @@ mod tests {
                 index: Index::default(),
                 trust: TrustInfo::default(),
                 generation: 0,
+                offer: [0; 32],
                 stale: false,
             }
         };
@@ -528,7 +580,7 @@ mod tests {
         let v2 = idx(&[("hello", "2.0-r0", 100), ("lib", "1-r0", 50)]);
         let mut f = Freshness::default();
         assert!(f.check("u", &v2).is_ok()); // nothing seen yet
-        f.seen.insert(url_key("u"), Seen::of(&v2));
+        f.records.insert(url_key("u"), Seen::of(&v2).format("u"));
         assert_eq!(Seen::parse(&Seen::of(&v2).format("u")), Some(Seen::of(&v2)));
         // same, newer, a new name, a name removed: fine
         assert!(f.check("u", &v2).is_ok());

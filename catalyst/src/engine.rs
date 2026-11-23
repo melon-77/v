@@ -303,9 +303,11 @@ fn load_repos(
     if repos.is_empty() {
         return Err(last_err.unwrap_or_else(|| Error::Msg("no usable repositories".into())));
     }
+    crate::prof::mark("  repositories: loaded and checked against the freshness record");
     if save_freshness {
         fresh.save(&repos)?;
     }
+    crate::prof::mark("  repositories: freshness record compared");
     Ok((repos, http, problems))
 }
 
@@ -478,6 +480,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
     let root = db.root.clone();
     let arches = arches(o, &root);
     let keys = load_keys(o, &root)?;
+    crate::prof::mark("  keys loaded");
     let (repos, http, _) =
         if use_repos { load_repos(o, &root, &arches[0], &keys, !o.simulate, None)? } else { (Vec::new(), None, 0) };
     crate::prof::mark("repositories: read and verified");
@@ -1149,7 +1152,8 @@ pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
             let arches = arches(o, &root);
             match load_repos(o, &root, &arches[0], &keys, false, None) {
                 Ok((repos, http, _)) => {
-                    let u = Universe::with_arches(&repos, &BTreeMap::new(), &arches);
+                    let nothing_installed = BTreeMap::new();
+                    let u = Universe::with_arches(&repos, &nothing_installed, &arches);
                     if run_hooks {
                         commit::run_commit_hooks(&root, "pre-commit")?;
                         hooks_open = true;
