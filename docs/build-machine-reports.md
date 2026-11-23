@@ -10,6 +10,33 @@ How this works:
 
 ---
 
+## 2026-11-23: the benchmark, extended: catalyst loses on big removals and over the network
+
+**The owner asked for the cases the benchmark didn't have: removals, upgrades, a network repository.** Same strict rules (15 runs per tool, every run kept). Of 18 new cases catalyst is faster in 3, level in 5 and **slower in 10**:
+
+| job | cache | 39 packages: apk, catalyst | verdict | 244 packages: apk, catalyst | verdict |
+|---|---|---|---|---|---|
+| remove Cataclysm (8,517 entries) | warm | 76 ms, 243 ms | slower, 3.2x | 89 ms, 283 ms | slower, 3.2x |
+| remove Cataclysm | cold | 226 ms, 558 ms | slower, 2.5x | 260 ms, 625 ms | slower, 2.4x |
+| add nano over HTTP | warm | 14 ms, 43 ms | slower, 3.1x | 34 ms, 48 ms | slower, 1.4x |
+| add nano over HTTP, +25 ms a request | warm | 41 ms, 104 ms | slower, 2.6x | 61 ms, 108 ms | slower, 1.8x |
+| remove nano | warm | 11 ms, 14 ms | slower, 1.25x | 30 ms, 22 ms | **faster**, 0.73 |
+| remove nano | cold | 42 ms, 46 ms | no clear difference | 68 ms, 83 ms | no clear difference |
+| upgrade one package | warm | 65 ms, 69 ms | no clear difference | 87 ms, 94 ms | no clear difference |
+| upgrade one package | cold | 107 ms, 118 ms | no clear difference | 145 ms, 171 ms | slower, 1.18x |
+| upgrade 27 packages | warm | 222 ms, 170 ms | **faster**, 0.77 | not run | |
+| upgrade 27 packages | cold | 312 ms, 274 ms | **faster**, 0.88 | not run | |
+
+The full table, with intervals and the runs with a `sync` added, is in `catalyst/README.md` ("The strict comparison").
+
+**Why, from `CATALYST_PROF=1`:**
+- **Big removals.** Every file has two names (one under `Programs`, one in the live tree), so it is unlinked twice: about 55 ms and 77 ms for Cataclysm, each pass on one thread. apk unlinks once. On top: about 44 ms of flushes, 42 ms reading the records twice and checking ownership, 34 ms rewriting ~3,600 index buckets.
+- **The network.** catalyst downloads the repository index on every `add`: two requests where apk makes one. apk uses its cached index for four hours (measured: nothing asked at 3 hours, asked again at 5). catalyst also sets up TLS, reading the system's certificates, on every run with a remote repository, even over plain HTTP.
+
+**Not fixed yet.** What needs no decision is next: unlinking on threads, reading the records once, TLS only when a URL needs it. Whether `add` may use an index a few hours old, as apk does, is the owner's to decide.
+
+---
+
 ## 2026-11-23: adds of new packages are no longer synced (the owner's decision); `add nano` now beats apk
 
 **The owner decided this today.** catalyst's three device flushes were about 9.5 ms of a 22 ms `add nano`. Told that, the owner said the cases they cover "rarely happen at all if ever" and, of three rules, chose "Skip for adds":

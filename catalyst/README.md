@@ -664,6 +664,51 @@ catalyst syncs it:
 | 244 | Cataclysm | warm | 944 ms | 913 ms | 0.97 (0.92-1.02) | no clear difference | 1.45 s, 916 ms | 0.63 (0.56-0.68) | **faster** |
 | 244 | Cataclysm | cold | 1.08 s | 1.07 s | 0.99 (0.92-1.02) | no clear difference | 1.44 s, 1.08 s | 0.75 (0.71-0.78) | **faster** |
 
+Removals, upgrades and a network repository, by the same rules (23
+November 2026). The upgrades use a second repository with 27 packages of
+valence-base rebuilt as a newer version; the 27-package upgrade starts
+from a fresh root every round, so it was run on the small system only.
+The HTTP server is on the same machine, once as it is and once with
+25 ms added to every request, as a mirror some way off would; apk keeps
+its index cache there, as an installed system does:
+
+| system | job | cache | apk | catalyst | catalyst / apk (95% CI) | verdict | + sync: apk, catalyst | verdict |
+|---|---|---|---|---|---|---|---|---|
+| 39 | remove nano | warm | 11 ms | 14 ms | 1.25 (1.19-1.32) | slower | 15 ms, 18 ms | slower |
+| 39 | remove nano | cold | 42 ms | 46 ms | 1.10 (1.04-1.16) | no clear difference | 48 ms, 51 ms | no clear difference |
+| 244 | remove nano | warm | 30 ms | 22 ms | 0.73 (0.67-0.77) | **faster** | 38 ms, 26 ms | **faster** |
+| 244 | remove nano | cold | 68 ms | 83 ms | 1.22 (1.10-1.30) | no clear difference | 78 ms, 88 ms | no clear difference |
+| 39 | remove Cataclysm | warm | 76 ms | 243 ms | 3.20 (3.05-3.49) | slower | 137 ms, 290 ms | slower |
+| 39 | remove Cataclysm | cold | 226 ms | 558 ms | 2.47 (2.00-6.69) | slower | 244 ms, 570 ms | slower |
+| 244 | remove Cataclysm | warm | 89 ms | 283 ms | 3.17 (2.97-3.27) | slower | 174 ms, 326 ms | slower |
+| 244 | remove Cataclysm | cold | 260 ms | 625 ms | 2.40 (1.92-5.33) | slower | 282 ms, 637 ms | slower |
+| 39 | upgrade one package | warm | 65 ms | 69 ms | 1.06 (1.02-1.20) | no clear difference | 71 ms, 74 ms | no clear difference |
+| 39 | upgrade one package | cold | 107 ms | 118 ms | 1.10 (1.03-1.20) | no clear difference | 115 ms, 124 ms | no clear difference |
+| 244 | upgrade one package | warm | 87 ms | 94 ms | 1.07 (0.93-1.15) | no clear difference | 116 ms, 102 ms | no clear difference |
+| 244 | upgrade one package | cold | 145 ms | 171 ms | 1.18 (1.14-1.32) | slower | 157 ms, 178 ms | slower |
+| 39 | upgrade 27 packages | warm | 222 ms | 170 ms | 0.77 (0.75-0.79) | **faster** | 259 ms, 176 ms | **faster** |
+| 39 | upgrade 27 packages | cold | 312 ms | 274 ms | 0.88 (0.83-0.91) | **faster** | 322 ms, 281 ms | **faster** |
+| 39 | add nano over HTTP | warm | 14 ms | 43 ms | 3.12 (3.07-3.19) | slower | 20 ms, 51 ms | slower |
+| 244 | add nano over HTTP | warm | 34 ms | 48 ms | 1.42 (1.40-1.44) | slower | 44 ms, 56 ms | slower |
+| 39 | add nano over HTTP, +25 ms a request | warm | 41 ms | 104 ms | 2.56 (2.51-2.58) | slower | 48 ms, 112 ms | slower |
+| 244 | add nano over HTTP, +25 ms a request | warm | 61 ms | 108 ms | 1.79 (1.77-1.82) | slower | 71 ms, 117 ms | slower |
+
+Where catalyst loses, and why:
+- **Removing a big package:** every file has two names, one under
+  `Programs` and one in the live tree, so it is unlinked twice (about
+  55 ms and 77 ms for Cataclysm's 8,517 entries), each pass on one thread;
+  apk unlinks once. Then about 44 ms in the three flushes, 42 ms reading
+  the records (twice) and checking ownership, and 34 ms rewriting about
+  3,600 bucket files of the lookup index.
+- **A network repository:** catalyst downloads the index on every `add`
+  and apk does not (it uses its cached index for four hours: with the
+  cached file made 3 hours old it asked for nothing, 5 hours old it asked
+  again). So catalyst makes two requests where apk makes one, and it sets
+  up TLS, reading the system's certificates, on every run with a remote
+  repository, even one over plain HTTP.
+- **Removing one small package on a small system:** the three flushes,
+  which a removal keeps.
+
 `add nano`, warm, over the rounds of this work (medians of 15):
 
 | system | first strict run | round two | round three | adds not synced | apk |
