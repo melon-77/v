@@ -4,7 +4,8 @@ usage:
   octet-kt-check.py snap  ROOT OUT.json
       the state of a root: every live entry (outside Programs, var/lib/octet,
       var/cache/octet) with type, mode, owner, size, mtime, SHA-256, inode and
-      link target; who owns which path; the Programs folders; the world
+      link target; who owns which path; the Programs folders; the world; the
+      files of the lookup index
   octet-kt-check.py crash ROOT PRE.json REF.json
       the state right after a kill: every path is either what it was before
       the upgrade (PRE: same inode for files outside etc/, same content for
@@ -15,7 +16,8 @@ usage:
   octet-kt-check.py final ROOT REF.json
       the state after the completing run equals the clean upgrade REF:
       every entry, the owners, Programs (versions, Current, metadata), the
-      world, the hard links; no journal, temporary or .partial left
+      world, the lookup index (canonical: rebuilt by a recovery, it equals the
+      clean run's), the hard links; no journal, temporary or .partial left
   octet-kt-check.py crit ROOT              only the /bin/sh, libc, loader checks
   octet-kt-check.py phase ROOT             where an upgrade stopped
   octet-kt-check.py pickfile REF.json SEED VERSION
@@ -197,9 +199,23 @@ def read(p):
         return None
 
 
+def index_files(root):
+    """The lookup index (var/lib/octet/index): SHA-256 of every file by its
+    path in the index; None when there is none."""
+    d = os.path.join(root, 'var/lib/octet/index')
+    if not os.path.isdir(d):
+        return None
+    out = {}
+    for dp, dns, fns in os.walk(d):
+        for f in fns:
+            full = os.path.join(dp, f)
+            out[os.path.relpath(full, d)] = sha(full)
+    return out
+
+
 def snap(root):
     return {'entries': walk(root), 'owned': owned(root), 'programs': programs(root),
-            'world': read(os.path.join(root, 'var/lib/octet/world'))}
+            'world': read(os.path.join(root, 'var/lib/octet/world')), 'index': index_files(root)}
 
 
 # ------------------------------------------------------------ critical paths
@@ -385,6 +401,13 @@ def final(root, ref):
             viol.append('Programs/%s differs: %s vs clean %s' % (name, a, b))
     if now['world'] != ref['world']:
         viol.append('world differs: %r vs %r' % (now['world'], ref['world']))
+    a, b = now['index'], ref['index']
+    if a is None:
+        viol.append('no lookup index (var/lib/octet/index)')
+    elif a != b:
+        b = b or {}
+        ks = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+        viol.append('the lookup index differs from the clean run in %d files, e.g. %s' % (len(ks), ', '.join(ks[:5])))
     # hard links
     nlinks = 0
     for p, (name, ver, path, kind) in sorted(now['owned'].items()):
@@ -401,7 +424,7 @@ def final(root, ref):
             nlinks += 1
     st = os.path.join(root, 'var/lib/octet')
     for x in sorted(os.listdir(st)):
-        if x in ('world', 'lock'):
+        if x in ('world', 'lock', 'index'):
             continue
         if x == 'exec' and not os.listdir(os.path.join(st, x)):
             continue

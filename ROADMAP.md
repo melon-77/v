@@ -250,7 +250,8 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   faster than both when installing many packages, slower than apk on one-package jobs, because of a fixed cost per
   run. The rest of phase 10, from the build machine: the record back in the folders (with a damaged record rebuilt
   from the signed package), then the index, then one-package jobs faster than apk, then the "done when" proved
-  and apk taken off installed systems.
+  and apk taken off installed systems. The record and the index are done: adding one package to a system of 244
+  packages went from 0.21 s to 0.05 s (apk 0.03 s).
 
 ## Not decided yet
 

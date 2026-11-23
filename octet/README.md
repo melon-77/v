@@ -112,6 +112,7 @@ ROOT/var/lib/octet/world                     what was asked for
 ROOT/var/lib/octet/journal                   the switch in progress
 ROOT/var/lib/octet/lock                      held while octet (or a script it runs) runs
 ROOT/var/lib/octet/indexes/                  what each repository offered last
+ROOT/var/lib/octet/index/                    the lookup index of what is installed
 ROOT/var/cache/octet/                        downloaded packages and indexes
 ```
 
@@ -133,11 +134,47 @@ The usual tree is made from those folders:
 
 A package is installed if and only if `Programs/<name>/Current` exists.
 
+## The lookup index
+
+The folders are the record of what is installed. `var/lib/octet/index/`
+is a copy of what they say, so that a change doesn't have to read the
+record of every installed package:
+- `meta` holds every installed package's `info`, so opening a root reads
+  one file instead of one per package.
+- `files/XXX` (4096 buckets by a hash of the path) say which packages have
+  an entry at each path, files apart from directories.
+- `aliases` lists the entries that reach another place through a directory
+  symlink, such as `lib64 -> usr/lib`.
+- `state` names every package's version and the tree's directory symlinks
+  as they were when the index was written.
+
+A change reads the records of the packages it changes, of those that
+share a file path with them, and of those with a trigger. A trigger may
+fire for a directory the change modifies, and the index says whether that
+directory is still installed. The change rewrites only the buckets of its
+own paths. Two kinds of change read every record and rebuild the index:
+one that touches a directory symlink, and one that installs a trigger
+with a pattern, since that trigger is given every installed directory that
+matches.
+
+The index is used only when `state` matches the root exactly: the version
+every `Current` names, and every directory symlink's target. Otherwise,
+and always while there is a journal, octet reads the records. A missing or
+outdated index is rebuilt when a root is opened for a change, and `oct fix`
+always rebuilds it. The index is canonical: one updated change by change
+is byte for byte the one a rebuild writes, and the tests compare the two.
+
+Inside a switch the index is updated before the final `syncfs`, so a crash
+leaves the journal, and finishing that switch rebuilds the index. A rebuild
+outside a switch writes the new index beside the old one, syncs it, then
+swaps it in.
+
 ## The transaction
 
 1. **Open.** Take the lock. Finish a leftover journal (see Recovery).
    Delete `.partial` directories, version directories that are not current,
-   and interrupted downloads.
+   and interrupted downloads. Rebuild the lookup index if it is missing or
+   out of date.
 2. **Resolve.** Work out, from the indexes and what is installed, the
    packages the world needs (see Resolution). If nothing changes, stop
    without running commit hooks.
@@ -163,8 +200,10 @@ A package is installed if and only if `Programs/<name>/Current` exists.
      its `syncfs` is cheap anyway.
 5. **Check.** Refuse if two packages claim the same file. The ownership
    rules follow apk: `replaces`, the same origin, or identical content.
-   Every record the switch will read (the other installed packages', the
-   old versions') must be readable, or nothing is changed (see Recovery).
+   Every record the switch will read must be readable, or nothing is
+   changed (see Recovery): the old versions' records and those of the
+   installed packages that share a path with the change, or every
+   installed package's when the lookup index can't be used.
 6. **Switch.** This is the only step that touches the live tree, and it
    comes last.
    1. `syncfs`, so everything unpacked is on disk. Then write the journal
@@ -182,7 +221,8 @@ A package is installed if and only if `Programs/<name>/Current` exists.
       `Current`, then the post-deinstall script.
    4. The world is written.
    5. The triggers of affected packages run.
-   6. `syncfs`. The journal is deleted, then the old versions.
+   6. The lookup index is updated, or rebuilt. `syncfs`. The journal is
+      deleted, then the old versions.
 7. **Post-commit hooks.** Run after the switch (and also if an error occurs
    after `pre-commit` ran). Failures warn and do not abort remaining hooks.
 
@@ -227,6 +267,9 @@ disk. A run that finds a journal finishes it first (roll forward):
 - every step is idempotent;
 - placed packages and scripts that ran are marked in the journal, so they
   are not placed or run again.
+
+Nothing uses the lookup index while there is a journal: finishing the
+switch reads every record and rebuilds the index.
 
 Leftover `.partial` and stale version directories are deleted by the
 next run after an interrupted one: a run that finished a journal, or that
@@ -370,6 +413,12 @@ Live tree:
   one package can still route another package's file onto a third's
   without a conflict being reported. The switch refuses only paths that
   resolve into octet's own directories.
+- The lookup index follows the directory symlinks that packages own. One
+  made by hand or by a script (a directory moved to another disk and
+  linked back) is not tracked until `oct fix` rebuilds the index. If two
+  packages then reach one file through different paths, which is already a
+  conflict octet doesn't report, a change may remove that file where
+  reading every record would keep it.
 - Durability is `syncfs` before the journal and at the end; files copied
   to another file system (`/boot`) are synced together with their
   directory before the old version is removed. Only process kills were
@@ -440,12 +489,29 @@ The next speedups are measured but not done:
 - Placing packages without scripts on several threads.
 - Keeping the file records in memory instead of reading `.octet/files` twice.
 
+One-package jobs (`add nano`, `--no-scripts`, 7 runs each; one root per
+tool, each add undone by an untimed `del`; 23 November 2026). "No index"
+is the committed code before the lookup index; "+ sync" adds a `sync -f`
+after the command, since apk leaves writeback to the kernel:
+
+| set | cache | apk 3.0.8 | octet, no index | octet, index | octet / apk | + sync: apk, octet |
+|---|---|---|---|---|---|---|
+| base | warm | 13 ms | 36 ms | 39 ms | 2.95 | 22 ms, 44 ms |
+| base | cold | 48 ms | 95 ms | 81 ms | 1.67 | 59 ms, 86 ms |
+| big | warm | 32 ms | 214 ms | 51 ms | 1.56 | 44 ms, 56 ms |
+| big | cold | 77 ms | 514 ms | 160 ms | 2.09 | 89 ms, 165 ms |
+
 ## Tests
 
-- **`cargo test`:** 37 unit tests and 8 tests over the real repository:
+- **`cargo test`:** 38 unit tests, 9 command tests and 10 tests over the
+  real repository:
   - every package verified against the index;
   - tampering of every kind is rejected;
-  - damaged input never panics.
+  - damaged input never panics;
+  - a broken record stops only the changes that need it, and `oct fix`
+    rebuilds it from the signed package;
+  - the lookup index knows the tree's directory symlinks and, after a
+    series of changes, equals the one `oct fix` rebuilds.
 - **End-to-end tests (a) to (c),** run by `octet-e2e-all.sh` and the
   scripts it calls (`octet-e2e-a.sh`, `octet-e2e-b.sh`, `octet-e2e-c.sh`).
   These scripts live outside the crate, in the scratchpad folder.
@@ -461,10 +527,16 @@ The next speedups are measured but not done:
   - every path is the old or the new entry;
   - `/bin/sh`, libc and `ld.so` work under chroot;
   - the next run completes the upgrade and leaves a root identical to an
-    uninterrupted one.
+    uninterrupted one, lookup index included.
 
-  Results on the current code: 310 rounds, 298 of them killed while
-  running and 82 with a package half placed. There were 0 failures. One
+  With `KT_JOB=small` the job is four of those upgrades and a new package
+  instead: a change that leaves the directory symlinks alone, so the
+  switch goes through the lookup index.
+
+  Results on stage 1's code: 310 rounds, 298 of them killed while
+  running and 82 with a package half placed. There were 0 failures. With
+  the lookup index: 80 rounds of the upgrade and 80 of `KT_JOB=small`,
+  0 failures. One
   earlier failure, a directory left 0700 by a kill between `mkdir` and
   `chmod`, led to the atomic directory creation described under The
   transaction.

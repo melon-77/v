@@ -88,7 +88,8 @@ pub fn open(o: &Options) -> Result<Db> {
     let mut recovered = false;
     if let Some(j) = JournalFile::open(&root)? {
         println!("oct: finishing an interrupted switch ({} package changes)", j.plan.ops.len());
-        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts())?;
+        // never with the index: a crash may have kept some of its files and not others
+        let rep = commit::switch(&root, &db.installed, j, &o.switch_opts(), None)?;
         println!(
             "oct: switch finished: {} files placed, {} already in place, {} removed",
             rep.placed, rep.unchanged, rep.removed
@@ -103,6 +104,15 @@ pub fn open(o: &Options) -> Result<Db> {
     if recovered || dirty.exists() {
         gc(&root, &db)?;
         let _ = fs::remove_file(&dirty);
+    }
+    // the index, rebuilt from the records when it is missing or out of date
+    if db.index.is_none() && db.broken.is_empty() && !o.simulate {
+        if let Ok(states) = crate::index::load_all(&db.installed) {
+            match crate::index::rebuild(&root, &states, true) {
+                Ok(()) => db.reload()?,
+                Err(e) => eprintln!("oct: warning: the index could not be written: {e}"),
+            }
+        }
     }
     Ok(db)
 }
@@ -545,32 +555,44 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         // is written: a journal whose switch can't load a record would stop
         // every later run (N-1)
         let mut broken: Vec<(String, String)> = Vec::new();
+        let mut olds_st: Vec<PkgState> = Vec::new();
+        for op in &ops {
+            if let Some(v) = op.old_version() {
+                let d = Db::pkg_dir(&root, op.name(), v);
+                if d.join(db::META_DIR).exists() {
+                    match PkgState::load(&d, true) {
+                        Ok(st) => olds_st.push(st),
+                        Err(e) => broken.push((op.name().to_string(), format!("{}-{v}: {e}", op.name()))),
+                    }
+                }
+            }
+        }
+        let mut news_st: Vec<PkgState> = Vec::new();
+        for op in &ops {
+            if let Some(v) = op.new_version() {
+                news_st.push(PkgState::load(&Db::pkg_dir(&root, op.name(), v), true)?);
+            }
+        }
+        // the unchanged packages whose records matter: with a matching index
+        // only those the switch will read (crate::index::wanted, as the switch decides)
+        let wanted: Option<HashSet<String>> = db.index.as_ref().and_then(|ix| {
+            let o: Vec<&PkgState> = olds_st.iter().collect();
+            let n: Vec<&PkgState> = news_st.iter().collect();
+            let names: HashSet<String> = changed.iter().map(|s| s.to_string()).collect();
+            crate::index::wanted(ix, &mut crate::rootfs::RootFs::new(&root), &db.installed, &names, &o, &n)
+        });
         for (name, ip) in &db.installed {
-            if !changed.contains(name.as_str()) {
+            if !changed.contains(name.as_str()) && wanted.as_ref().map_or(true, |w| w.contains(name)) {
                 match PkgState::load(&ip.dir, false) {
                     Ok(st) => finals.push(st),
                     Err(e) => broken.push((name.clone(), format!("{}: {e}", ip.meta.nv()))),
                 }
             }
         }
-        for op in &ops {
-            if let Some(v) = op.old_version() {
-                let d = Db::pkg_dir(&root, op.name(), v);
-                if d.join(db::META_DIR).exists() {
-                    if let Err(e) = PkgState::load(&d, true) {
-                        broken.push((op.name().to_string(), format!("{}-{v}: {e}", op.name())));
-                    }
-                }
-            }
-        }
         if !broken.is_empty() {
             return Err(broken_records(&broken));
         }
-        for op in &ops {
-            if let Some(v) = op.new_version() {
-                finals.push(PkgState::load(&Db::pkg_dir(&root, op.name(), v), true)?);
-            }
-        }
+        finals.extend(news_st);
         let (_, conflicts) = commit::ownership(&finals);
         if !conflicts.is_empty() {
             return Err(Error::Msg(format!("file conflicts:\n  {}", conflicts.join("\n  "))));
@@ -594,7 +616,7 @@ fn transact(o: &Options, db: &mut Db, world: Vec<Dependency>, mode: Mode, fresh:
         eprintln!("oct: OCTET_CRASH_AT=journal: killed (test hook)");
         sys::kill_self();
     }
-    let switch_res = commit::switch(&root, &db.installed, jf, &o.switch_opts());
+    let switch_res = commit::switch(&root, &db.installed, jf, &o.switch_opts(), db.index.as_ref());
     if run_hooks {
         let _ = commit::run_commit_hooks(&root, "post-commit");
     }
@@ -863,23 +885,42 @@ pub fn info(o: &Options, io: &InfoOpts, args: &[String]) -> Result<bool> {
         if args.is_empty() {
             return Err(Error::Msg("info -W needs at least one PATH".into()));
         }
-        let mut pkgs: Vec<PkgState> = Vec::with_capacity(db.installed.len());
-        for ip in db.installed.values() {
-            if let Ok(st) = PkgState::load(&ip.dir, false) {
-                pkgs.push(st);
+        let rfs = crate::rootfs::RootFs::new(&db.root);
+        let rels: Vec<String> = args
+            .iter()
+            .map(|arg| {
+                let abs = if db.root == Path::new("/") && !arg.starts_with('/') {
+                    std::env::current_dir().map(|d| d.join(arg)).unwrap_or_else(|_| PathBuf::from(arg))
+                } else {
+                    PathBuf::from(arg)
+                };
+                abs.to_string_lossy().trim_start_matches('/').to_string()
+            })
+            .collect();
+        // with an index, only the packages that claim one of the paths (as
+        // given, or with its last component followed) are read
+        let wanted: Option<HashSet<String>> = db.index.as_ref().and_then(|ix| {
+            let mut w = HashSet::new();
+            for rel in &rels {
+                w.extend(ix.file_claimants(rel.as_bytes()).ok()?);
+                if let Ok(res) = rfs.resolve(rel.as_bytes(), true) {
+                    w.extend(ix.file_claimants(&res.canon).ok()?);
+                }
+            }
+            Some(w)
+        });
+        let mut pkgs: Vec<PkgState> = Vec::new();
+        for (name, ip) in &db.installed {
+            if wanted.as_ref().map_or(true, |w| w.contains(name)) {
+                if let Ok(st) = PkgState::load(&ip.dir, false) {
+                    pkgs.push(st);
+                }
             }
         }
         let (own, _) = commit::ownership(&pkgs);
-        let rfs = crate::rootfs::RootFs::new(&db.root);
         let mut all_found = true;
-        for arg in args {
-            let abs = if db.root == Path::new("/") && !arg.starts_with('/') {
-                std::env::current_dir().map(|d| d.join(arg)).unwrap_or_else(|_| PathBuf::from(arg))
-            } else {
-                PathBuf::from(arg)
-            };
-            let rel_s = abs.to_string_lossy();
-            let rel = rel_s.trim_start_matches('/');
+        for (arg, rel) in args.iter().zip(rels.iter()) {
+            let rel = rel.as_str();
             let found = own.owner.get(rel.as_bytes()).copied().or_else(|| {
                 // Retry once following the final component if it is a symlink inside ROOT.
                 let res = rfs.resolve(rel.as_bytes(), true).ok()?;
@@ -1086,6 +1127,12 @@ pub fn fix(o: &Options, names: &[String]) -> Result<bool> {
         });
     }
     errors.extend(rep.errors);
+    // the index from the records as they are now: fix is where doubts end
+    if !o.simulate && !blocked {
+        if let Err(e) = crate::index::rebuild(&db.root, &pkgs, true) {
+            errors.push(format!("the index could not be written: {e}"));
+        }
+    }
     let status = if errors.is_empty() { "OK" } else { "ERRORS" };
     println!(
         "{status}: checked {} entries ({} ok, {} {}, {} errors)",

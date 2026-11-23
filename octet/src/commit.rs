@@ -778,17 +778,34 @@ fn final_canon(rfs: &mut RootFs, pkgs: &[PkgState]) -> HashSet<Vec<u8>> {
     keep
 }
 
+/// With the index (and only the packages that share a path with the change
+/// loaded): whether another package of the final set has a directory at
+/// `path` (`dir`), or any entry that is or reaches the canonical `path`. A
+/// lookup that fails keeps the entry.
+fn in_index(lookup: Option<(&crate::index::Index, &HashSet<String>)>, path: &[u8], dir: bool) -> bool {
+    let Some((ix, changed)) = lookup else { return false };
+    let r = if dir { ix.dir_claimants(path) } else { ix.canon_claimants(path) };
+    r.map_or(true, |v| v.iter().any(|n| !changed.contains(n)))
+}
+
 impl<'a> Switch<'a> {
     /// Removes the entries of an old version (or a removed package) that
     /// no package of the final set owns, and only those that are still
     /// what the old version put there (same inode, content or link target);
     /// anything else was changed locally and is kept. Then its directories
     /// that no package has, if empty.
-    fn remove_old(&mut self, o: &PkgState, own: &Ownership, keep: &HashSet<Vec<u8>>, modified: &mut HashSet<Vec<u8>>) {
+    fn remove_old(
+        &mut self,
+        o: &PkgState,
+        own: &Ownership,
+        keep: &HashSet<Vec<u8>>,
+        lookup: Option<(&crate::index::Index, &HashSet<String>)>,
+        modified: &mut HashSet<Vec<u8>>,
+    ) {
         let mut dirs: BTreeSet<(usize, Vec<u8>)> = BTreeSet::new();
         for r in &o.recs {
             if r.is_dir() {
-                if !own.dirs.contains(&r.path) {
+                if !own.dirs.contains(&r.path) && !in_index(lookup, &r.path, true) {
                     dirs.insert((usize::MAX - r.path.len(), r.path.clone()));
                 }
                 continue;
@@ -797,7 +814,7 @@ impl<'a> Switch<'a> {
                 continue;
             }
             let Ok(Some(e)) = self.fs.entry_if_dir_exists(&r.path) else { continue };
-            if keep.contains(&e.canon) {
+            if keep.contains(&e.canon) || in_index(lookup, &e.canon, false) {
                 continue;
             }
             let Ok(m) = fs::symlink_metadata(&e.host) else { continue };
@@ -834,7 +851,7 @@ impl<'a> Switch<'a> {
         }
         for (_, d) in dirs {
             let Ok(Some(e)) = self.fs.entry_if_dir_exists(&d) else { continue };
-            if keep.contains(&e.canon) {
+            if keep.contains(&e.canon) || in_index(lookup, &e.canon, false) {
                 continue;
             }
             if let Ok(m) = fs::symlink_metadata(&e.host) {
@@ -867,22 +884,23 @@ impl<'a> Switch<'a> {
 /// placed this is marked in the journal (`placed:NAME`, made durable with
 /// a syncfs before a post script runs), so that a recovery does not place
 /// them again over what its scripts did; every script run is marked too.
-pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFile, opts: &SwitchOptions) -> Result<Report> {
+pub fn switch(
+    root: &Path,
+    installed: &BTreeMap<String, Installed>,
+    j: JournalFile,
+    opts: &SwitchOptions,
+    index: Option<&crate::index::Index>,
+) -> Result<Report> {
     let plan = j.plan.clone();
     let programs = Db::programs(root);
     let changed: HashMap<&str, &Op> = plan.ops.iter().map(|o| (o.name(), o)).collect();
+    let changed_names: HashSet<String> = changed.keys().map(|s| s.to_string()).collect();
 
-    // the final set: unchanged packages first, then new ones in order
-    let mut pkgs: Vec<PkgState> = Vec::new();
-    for (name, ip) in installed {
-        if !changed.contains_key(name.as_str()) {
-            pkgs.push(PkgState::load(&ip.dir, false)?);
-        }
-    }
-    let first_new = pkgs.len();
+    // new versions, in order
+    let mut news: Vec<PkgState> = Vec::new();
     for op in &plan.ops {
         if let Some(v) = op.new_version() {
-            pkgs.push(PkgState::load(&programs.join(op.name()).join(v), true)?);
+            news.push(PkgState::load(&programs.join(op.name()).join(v), true)?);
         }
     }
     // old versions (absent if already deleted)
@@ -895,6 +913,25 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
             }
         }
     }
+    // the unchanged packages whose records matter: with a matching index
+    // those that share a path with the change and those with a trigger
+    // (crate::index::wanted); otherwise all of them, and the index is
+    // rebuilt at the end
+    let wanted: Option<HashSet<String>> = index.and_then(|ix| {
+        let o: Vec<&PkgState> = olds.values().collect();
+        let n: Vec<&PkgState> = news.iter().collect();
+        crate::index::wanted(ix, &mut RootFs::new(root), installed, &changed_names, &o, &n)
+    });
+    let full = wanted.is_none();
+    // the final set: unchanged packages first, then new ones in order
+    let mut pkgs: Vec<PkgState> = Vec::new();
+    for (name, ip) in installed {
+        if !changed.contains_key(name.as_str()) && wanted.as_ref().map_or(true, |w| w.contains(name)) {
+            pkgs.push(PkgState::load(&ip.dir, false)?);
+        }
+    }
+    let first_new = pkgs.len();
+    pkgs.extend(news);
     let (own, conflicts) = ownership(&pkgs);
     for c in conflicts {
         eprintln!("oct: warning: {c}");
@@ -923,7 +960,10 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
             modified.insert(if r.is_dir() { r.path.clone() } else { parent_dir(&r.path) });
         }
     }
+    // the canonical places of the final set's entries (all of them; with
+    // the index, the new versions' only, the rest is looked up)
     let mut keep: Option<HashSet<Vec<u8>>> = None;
+    let lookup = if full { None } else { index.map(|ix| (ix, &changed_names)) };
 
     // 1. installed and upgraded packages, dependencies first
     for (i, p) in pkgs.iter().enumerate().skip(first_new) {
@@ -953,9 +993,9 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
             s.crash(&format!("placed:{name}"));
             if let Some(o) = olds.get(&name) {
                 if keep.is_none() {
-                    keep = Some(final_canon(&mut s.fs, &pkgs));
+                    keep = Some(final_canon(&mut s.fs, if full { &pkgs[..] } else { &pkgs[first_new..] }));
                 }
-                s.remove_old(o, &own, keep.as_ref().unwrap(), &mut modified);
+                s.remove_old(o, &own, keep.as_ref().unwrap(), lookup, &mut modified);
             }
             db::set_current(root, &name, p.meta.version())?;
             let runs_post = !opts.no_scripts && !s.j.is_done(&post_key) && db::read_script(&p.dir, post).is_some();
@@ -984,9 +1024,9 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
             if let Some(o) = o {
                 s.script(&format!("pre-deinstall:{name}"), o, "pre-deinstall", &[old.clone()]);
                 if keep.is_none() {
-                    keep = Some(final_canon(&mut s.fs, &pkgs));
+                    keep = Some(final_canon(&mut s.fs, if full { &pkgs[..] } else { &pkgs[first_new..] }));
                 }
-                s.remove_old(o, &own, keep.as_ref().unwrap(), &mut modified);
+                s.remove_old(o, &own, keep.as_ref().unwrap(), lookup, &mut modified);
             }
             match fs::remove_file(programs.join(name).join(db::CURRENT)) {
                 Ok(()) => {}
@@ -1056,6 +1096,26 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
     for c in &s.fs.created_dirs {
         modified.insert(parent_dir(c));
     }
+    // with the index not every package of the final set is loaded: a
+    // directory the change modified, or that a new version's trigger names,
+    // is an installed directory too when the index has another package of
+    // the final set with a directory there (a package lists every directory
+    // of its entries)
+    if let Some((ix, chg)) = lookup {
+        let mut more: Vec<Vec<u8>> = modified.iter().cloned().collect();
+        for p in pkgs.iter().skip(first_new) {
+            for t in &p.meta.triggers {
+                more.push(t.trim_start_matches('+').trim_matches('/').as_bytes().to_vec());
+            }
+        }
+        for d in more {
+            if !installed_dirs.contains(&d)
+                && ix.dir_claimants(&d).map_or(true, |v| v.iter().any(|n| !chg.contains(n)))
+            {
+                installed_dirs.insert(d);
+            }
+        }
+    }
     for p in &pkgs {
         if p.meta.triggers.is_empty() || db::read_script(&p.dir, "trigger").is_none() {
             continue;
@@ -1089,6 +1149,32 @@ pub fn switch(root: &Path, installed: &BTreeMap<String, Installed>, j: JournalFi
         }
     }
     s.crash("triggers");
+
+    // the index: the changed packages' entries replaced (before the final
+    // syncfs, so a crash is covered by the journal), or all of it rebuilt
+    // from the records when it couldn't be used
+    {
+        let mut metas: BTreeMap<String, PkgMeta> = installed
+            .iter()
+            .filter(|(n, _)| !changed.contains_key(n.as_str()))
+            .map(|(n, ip)| (n.clone(), ip.meta.clone()))
+            .collect();
+        for p in &pkgs[first_new..] {
+            metas.insert(p.meta.name().to_string(), p.meta.clone());
+        }
+        let res = match index {
+            Some(ix) if !full => {
+                let o: Vec<&PkgState> = olds.values().collect();
+                let n: Vec<&PkgState> = pkgs[first_new..].iter().collect();
+                crate::index::update(root, ix, &changed_names, &o, &n, &metas, &mut s.fs)
+            }
+            _ => crate::index::rebuild(root, &pkgs, false),
+        };
+        if let Err(e) = res {
+            eprintln!("oct: warning: index: {e}; the next run rebuilds it");
+            crate::index::invalidate(root);
+        }
+    }
 
     // 6. durable, then forget the journal and the old versions
     s.sync()?;

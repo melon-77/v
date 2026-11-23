@@ -595,7 +595,10 @@ fn fix_rebuilds_a_garbled_record_from_the_signed_package() {
     let files = root.join("Programs/zstd-libs").join(&cur).join(".octet/files");
     let good = std::fs::read(&files).unwrap();
     std::fs::write(&files, b"\x00garbled\n").unwrap();
-    let out = octet(&["add", "xz-libs"]);
+    // a change that shares no file with zstd-libs doesn't read its record (the index says who has which path)
+    assert!(octet(&["add", "xz-libs"]).status.success());
+    // one that needs it stops before any journal is written
+    let out = octet(&["del", "zstd-libs"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("oct fix zstd-libs"));
     assert!(!root.join("var/lib/octet/journal").exists());
@@ -603,6 +606,46 @@ fn fix_rebuilds_a_garbled_record_from_the_signed_package() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("rebuilt the record of zstd-libs"));
     assert_eq!(std::fs::read(&files).unwrap(), good);
-    assert!(octet(&["add", "xz-libs"]).status.success());
+    assert!(octet(&["del", "zstd-libs"]).status.success());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Stage B: an install that makes the tree's directory symlinks
+/// (`lib64 -> usr/lib`) leaves them in the lookup index, and after a series of
+/// changes the index is byte for byte the one `oct fix` rebuilds from the records.
+#[test]
+fn lookup_index_knows_the_directory_symlinks_and_equals_a_rebuild() {
+    let Some(repo) = repo() else { return };
+    let keys = std::env::var("OCTET_KEYS").unwrap_or_else(|_| "/root/valence/keys/trusted".into());
+    let root = std::env::temp_dir().join(format!("octet-rd-index-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let index = repo.join("Packages.adb");
+    let ok = |args: &[&str]| {
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_oct"));
+        c.args(["--root", root.to_str().unwrap(), "--repository", index.to_str().unwrap(), "--keys-dir", &keys, "--no-scripts", "--plain"]);
+        let out = c.args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    ok(&["--initdb", "add", "valence-base"]);
+    let ix = root.join("var/lib/octet/index");
+    let state = std::fs::read_to_string(ix.join("state")).unwrap();
+    assert!(state.contains("link\tlib64\tusr/lib\n"), "{state}");
+    ok(&["add", "nano", "htop"]);
+    ok(&["del", "nano"]);
+    let snap = || {
+        let mut m = std::collections::BTreeMap::new();
+        for e in std::fs::read_dir(ix.join("files")).unwrap() {
+            let e = e.unwrap();
+            m.insert(format!("files/{}", e.file_name().to_string_lossy()), std::fs::read(e.path()).unwrap());
+        }
+        for f in ["aliases", "meta", "state"] {
+            m.insert(f.to_string(), std::fs::read(ix.join(f)).unwrap());
+        }
+        m
+    };
+    let updated = snap();
+    ok(&["fix"]);
+    assert!(updated == snap(), "the updated index differs from the one rebuilt by oct fix");
     let _ = std::fs::remove_dir_all(&root);
 }

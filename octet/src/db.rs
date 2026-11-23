@@ -521,6 +521,9 @@ pub struct Db {
     /// record there can't be read: (name, version, why). Nothing is changed
     /// while there are any; `oct fix` rebuilds them from the signed packages.
     pub broken: Vec<(String, String, String)>,
+    /// The lookup index, when it matched every installed version at the
+    /// last (re)load.
+    pub index: Option<crate::index::Index>,
     _lock: Option<File>,
 }
 
@@ -588,7 +591,7 @@ impl Db {
             use std::os::unix::io::AsRawFd;
             sys::set_lock_fd(lock.as_raw_fd());
         }
-        let mut db = Db { root: root.to_path_buf(), installed: BTreeMap::new(), broken: Vec::new(), world: Vec::new(), _lock: Some(lock) };
+        let mut db = Db { root: root.to_path_buf(), installed: BTreeMap::new(), broken: Vec::new(), index: None, world: Vec::new(), _lock: Some(lock) };
         db.reload()?;
         Ok(db)
     }
@@ -603,14 +606,14 @@ impl Db {
         }
         if !state.join("world").exists() {
             if allow_missing {
-                return Ok(Db { root: root.to_path_buf(), installed: BTreeMap::new(), broken: Vec::new(), world: Vec::new(), _lock: None });
+                return Ok(Db { root: root.to_path_buf(), installed: BTreeMap::new(), broken: Vec::new(), index: None, world: Vec::new(), _lock: None });
             }
             return Err(Error::Msg(format!(
                 "{} has no octet database (create one with --initdb)",
                 root.display()
             )));
         }
-        let mut db = Db { root: root.to_path_buf(), installed: BTreeMap::new(), broken: Vec::new(), world: Vec::new(), _lock: None };
+        let mut db = Db { root: root.to_path_buf(), installed: BTreeMap::new(), broken: Vec::new(), index: None, world: Vec::new(), _lock: None };
         db.reload()?;
         Ok(db)
     }
@@ -623,6 +626,29 @@ impl Db {
     pub fn reload(&mut self) -> Result<()> {
         self.installed.clear();
         self.broken.clear();
+        self.index = None;
+        // with an index that matches every Current exactly, the packages'
+        // metadata comes from it instead of one info file per package; never
+        // while there is a journal (a switch running, or interrupted)
+        let journal = Self::journal_path(&self.root).exists();
+        if let Some(Ok((versions, false))) = (!journal).then(|| crate::index::installed_versions(&self.root)) {
+            if let Some(ix) = crate::index::Index::open(&self.root, &versions) {
+                if let Ok(metas) = ix.metas() {
+                    let same = metas.len() == versions.len()
+                        && metas.iter().all(|(n, m)| versions.get(n).map(String::as_str) == Some(m.info.version.as_str()));
+                    if same {
+                        let programs = self.root.join(PROGRAMS);
+                        for (n, m) in metas {
+                            let dir = programs.join(&n).join(&m.info.version);
+                            self.installed.insert(n, Installed { meta: m, dir });
+                        }
+                        self.index = Some(ix);
+                        self.world = read_world(&self.root)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
         let programs = self.root.join(PROGRAMS);
         if programs.exists() {
             let mut names: Vec<_> = fs::read_dir(&programs)?.collect::<io::Result<Vec<_>>>()?;

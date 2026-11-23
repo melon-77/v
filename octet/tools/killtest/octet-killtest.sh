@@ -26,8 +26,8 @@
 # left), a further one must have nothing to do, and the root must equal one
 # upgraded without interruption (octet-kt-check.py final: every entry with
 # type, mode, owner, size, mtime, content, link target; owners; Programs
-# versions, Current and metadata; world; hard links; no journal,
-# temporaries or .partial left).
+# versions, Current and metadata; world; the lookup index; hard links; no
+# journal, temporaries or .partial left).
 #
 # Kill moments, in rotation (octet-kt-kill.py; SIGKILL to the process group):
 #   time      uniform over [0, 1.1 x the median clean upgrade]: resolve,
@@ -61,6 +61,12 @@
 #   env KT_OCT=PATH    the octet binary (default /root/octet-target/release/oct)
 #   env KT_DIR=DIR     work directory under /root/octet-test (default /root/octet-test/kt)
 #   env KT_MODES="..." the rotation of kill modes (default: all of the above)
+#   env KT_JOB=small   instead of the upgrade: add -u coreutils util-linux shadow gzip nano
+#                      (four of the 9999-r0 upgrades with their scripts, gzip's zcmp that
+#                      becomes a symlink, and a new package). It leaves the directory
+#                      symlinks alone, so the switch reads only the records it needs and
+#                      updates the lookup index; the upgrade moves lib64, so it reads every
+#                      record and rebuilds the index.
 # Exit status 0 when every round passes. Writes only under /root/octet-test.
 set -u
 ROUNDS=${1:-80}
@@ -101,13 +107,18 @@ fresh() {  # fresh ROOT: valence-base from the real repository, plus an admin ed
     echo "# admin was here" >> $1/etc/fstab
     touch -d @1795000000 $1/etc/fstab   # a fixed mtime, so roots compare equal
 }
-upg() { echo "$V --root $1 --repository $R1 --repository $R3 --keys-dir $KD --plain upgrade"; }
+case ${KT_JOB:-upgrade} in
+    upgrade) JOB="upgrade";;
+    small) JOB="add -u coreutils util-linux shadow gzip nano";;
+    *) die "KT_JOB is upgrade or small";;
+esac
+upg() { echo "$V --root $1 --repository $R1 --repository $R3 --keys-dir $KD --plain $JOB"; }
 calc() { awk "BEGIN{printf \"%.4f\", $*}"; }
 kv() { echo "$1" | tr ' ' '\n' | sed -n "s/^$2=//p"; }
 rnd() { $PY -c "import random,sys; random.seed(sys.argv[1]); print('%.4f' % random.uniform(0, float(sys.argv[2])))" "$SEED-$1" "$2"; }
 rndi() { $PY -c "import random,sys; random.seed(sys.argv[1]); print(random.randint(0, int(sys.argv[2])))" "$SEED-$1" "$2"; }
 
-echo "=== octet kill test: $ROUNDS rounds, seed $SEED, $(date)"
+echo "=== octet kill test: $ROUNDS rounds of '$JOB', seed $SEED, $(date)"
 echo "    octet binary of $(ls -l --time-style=+%F.%T $V | awk '{print $6}'), $(nproc) CPUs"
 
 # ------------------------------------------------------------ reference

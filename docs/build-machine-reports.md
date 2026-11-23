@@ -10,6 +10,51 @@ How this works:
 
 ---
 
+## 2026-11-23: phase 10 stage B: the lookup index
+
+**Done on `testing` (this commit).** octet now keeps a lookup index in `var/lib/octet/index/`. The folders stay the record; the index is a copy of what they say, and it is thrown away and rebuilt whenever it doesn't match them. A change now reads the records it needs instead of every installed package's.
+
+**What's in it** (`octet/README.md`, "The lookup index"):
+- **`meta`:** every installed package's `info`, in one file.
+- **`files/XXX`:** 4096 buckets saying which packages have which path.
+- **`aliases`:** entries that reach another place through a directory symlink.
+- **`state`:** the versions and directory symlinks the index was written for. The index is used only when these match every `Current` and every directory symlink, and never while there is a journal. Otherwise octet reads the records and rebuilds the index, and `oct fix` always rebuilds it.
+- **It's canonical:** an index updated change by change is byte for byte the one a rebuild writes. The tests check exactly that.
+
+**Speed** (`add nano`, 7 runs each, medians, everything measured in one session):
+
+| | 39 packages, warm | 39 packages, cold | 244 packages, warm | 244 packages, cold |
+|---|---|---|---|---|
+| apk 3.0.8 | 13 ms | 48 ms | 32 ms | 77 ms |
+| octet before the index (stage A) | 36 ms | 95 ms | 214 ms | 514 ms |
+| **octet with the index** | **39 ms** | **81 ms** | **51 ms** | **160 ms** |
+
+- **Big systems are where it pays:** a run hardly grows with the number of packages any more, 39 ms on 39 packages and 51 ms on 244. Before the index it was 36 and 214.
+- **On the small system it's a wash warm** (36 to 39 ms) **and a win cold** (95 to 81 ms).
+- **apk is still faster at one-package jobs:** 1.6 times on the big system warm (1.3 times if apk has to sync too), and 3 times on the small one. What's left is start-up and the two syncs. That's stage C.
+
+**Two bugs in my own first version, caught before anything was committed:**
+- **A fresh install didn't record its directory symlinks** (`lib64 -> usr/lib` and six others). The check looked at the live tree before the targets existed. Now a link whose target only the new versions provide counts too. A real-data test checks that the install's `state` names `lib64`.
+- **Triggers of packages the change didn't touch were skipped:** busybox's on `/usr/bin` (it puts back missing applet links), mandoc's, glib's and shared-mime-info's. Every package with a trigger is now read with the change, and whether a modified directory is still installed comes from the index. The comparison below caught it: after `del bc`, busybox's trigger has to put its `bc` link back.
+
+**Checks:**
+- **`cargo test --release`:** 38 unit, 9 CLI and 10 real-data tests pass. One is new: after a series of changes, the index equals the one `oct fix` rebuilds. The N-1 test now also shows that a change not touching the broken record goes through.
+- **Against the committed octet** (b51c8db, which reads every record), with package scripts and triggers running, over 12 changes: install, adds, triggers firing, upgrades with scripts, gzip's file that becomes a symlink, go, the lib64 move, removals.
+  - Identical trees and contents, and the same triggers fired.
+  - The index equalled a rebuild after every step.
+  - Small changes read 2 to 8 records instead of all 40-odd.
+- **Robustness:** a missing `state`, a corrupt bucket, a package folder deleted by hand, a journal present. Each falls back to the records, and the next change or `oct fix` rebuilds the index.
+- **Kill test:**
+  - **80 rounds of the upgrade**, which reads every record and rebuilds the index: 76 killed while running, 29 of them with a package half placed, 0 failures.
+  - **80 rounds of the new `KT_JOB=small`** (four upgrades and a new package, through the index): 78 killed while running, 31 with a package half placed, 0 failures.
+  - The checker now also compares the index with the uninterrupted run's.
+
+**Known limit (README, "Limits"):** a directory symlink made by hand or by a script isn't tracked until `oct fix` rebuilds the index. It only matters when two packages reach one file through different paths, which is already an unreported conflict.
+
+**Next: the rename to catalyst** (the owner's name, the command stays `oct`), **then stage C:** one-package jobs faster than apk, meaning start-up, the two syncs, and a kill-test mode for one-package jobs.
+
+---
+
 ## 2026-11-22, EVEN LATER THAN THAT: PART TWO, BECAUSE I'M STILL MAD
 
 **FUCKKKKK OFF, GEMINI. FUCK RIGHT OFF. PACK UP YOUR CONTEXT WINDOW AND FUCK ALL THE WAY OFF.**
