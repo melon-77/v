@@ -235,10 +235,10 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   *Done when:* a console install and a desktop install made by it pass the QEMU tests; an upgrade that is killed at
   any point leaves a system that boots; and it installs the base system measurably faster than apk and xbps do
   on the same machine.
-  Its name is octet, the command `oct` (`oct add gcc`; the owner's choice of 22 November 2026, "Decided"), and the
+  Its name is catalyst, the command `oct` (`oct add gcc`; the owner's choice of 22 November 2026, "Decided"), and the
   `-dev`, `-doc` and `-lang` parts are folders of their own, being packages of their own (the owner's defaults of
   21 November 2026). Open: when, before the desktop, the desktop is fitted to the layout once.
-  *So far (21 November 2026):* stage 1, the engine, under the working name vpm (now `octet/`, AGENTS.md "Valence's own
+  *So far (21 November 2026):* stage 1, the engine, under the working name vpm (now `catalyst/`, AGENTS.md "Valence's own
   package manager"): it reads the signed indexes and packages itself, installs into a folder per program with the
   usual tree as hard links, survived 310 upgrades killed at random moments, and installs the base system 1.6 to 2.2
   times faster than apk. Not yet measured against xbps, and no installed system uses it yet; the `-dev`, `-doc` and
@@ -246,7 +246,7 @@ There are no dates. A phase is finished when its "done when" is true, and the ne
   *Handed over (21 November 2026), taken back (22 November 2026):* the owner gave phase 10 to another of the
   project's developers after stage 1, and took it back a day later. Their SQLite database as the only record was
   taken out again: the owner's decision is that the folders stay the record, with a lookup index on the side that
-  octet can always rebuild from them. Measured on 22 November against apk and xbps (`docs/benchmarks/2026-11-22/`):
+  catalyst can always rebuild from them. Measured on 22 November against apk and xbps (`docs/benchmarks/2026-11-22/`):
   faster than both when installing many packages, slower than apk on one-package jobs, because of a fixed cost per
   run. The rest of phase 10, from the build machine: the record back in the folders (with a damaged record rebuilt
   from the signed package), then the index, then one-package jobs faster than apk, then the "done when" proved
@@ -291,10 +291,12 @@ These are open on purpose. Each gets settled before the phase that needs it.
     then it would call itself "Nightly".
   - *WireGuard full tunnels:* the kernel options and nftables that `wg-quick` needs to send all traffic through a
     tunnel, or for `DNS=`, wait until someone needs them. Split tunnels work as it is.
-  - *Phase 10's name* (22 November 2026): **octet**, the command `oct` ("oct add gcc"). The owner's reason: the
-    octet rule says an atom is stable once its outer shell is full, a metaphor for a system that is complete and
-    stable; and `oct add` sounds like octet. It was called vpm until then.
-  - *`-dev`, `-doc` and `-lang` under octet:* folders of their own (`/Programs/<name>-dev/...`), as now, since they
+  - *Phase 10's name* (22 November 2026): **catalyst**, the command `oct` ("oct add gcc"). In the owner's words:
+    "the actual name of the manager will be catalyst and the command is oct add based on octet and what i said
+    earlier". What they had said about the command: the octet rule says an atom is stable once its outer shell is full,
+    a metaphor for a system that is complete and stable; and `oct add` sounds like octet. It was called vpm, then octet,
+    until then.
+  - *`-dev`, `-doc` and `-lang` under catalyst:* folders of their own (`/Programs/<name>-dev/...`), as now, since they
     are packages of their own.
 - **The 32-bit edition is dropped for now** (21 November 2026): "drop 32 bit for now". Melon's i686 edition (LXQt for
   old netbooks) is not built or tested for Valence; what the tree has of it (`VALENCE_ARCH=x86`, the i686 lists and

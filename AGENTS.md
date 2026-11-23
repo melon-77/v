@@ -809,11 +809,11 @@ is for the person writing the card.
   (the Foundation's NVRAM files for the brcmfmac chips are not packaged); a desktop; mandoc and the other recipes for
   aarch64.
 
-## Valence's own package manager: octet (phase 10)
+## Valence's own package manager: catalyst (phase 10)
 
-ROADMAP.md, phase 10. The source is `octet/` (Rust; `octet/README.md` is its manual: commands, layout, transaction
-and recovery, trust), the package `recipes/octet` (built from that folder; Valence's libzstd and OpenSSL, rule 46),
-the command `oct` (`oct add gcc`). The name is the owner's of 22 November 2026; it was called vpm before. Stage 1, "the engine first ... next to apk and measured against apk", is done:
+ROADMAP.md, phase 10. The source is `catalyst/` (Rust; `catalyst/README.md` is its manual: commands, layout, transaction
+and recovery, trust), the package `recipes/catalyst` (built from that folder; Valence's libzstd and OpenSSL, rule 46),
+the command `oct` (`oct add gcc`). The name is the owner's of 22 November 2026; it was called vpm, then octet. Stage 1, "the engine first ... next to apk and measured against apk", is done:
 
 - It reads apk-tools 3's formats itself, written against a specification taken from apk-tools 3.0.8's source
   (compression wrapper, ADB value encoding, signatures and key ids, index and package schemas, versions and
@@ -826,28 +826,28 @@ the command `oct` (`oct add gcc`). The name is the owner's of 22 November 2026; 
 - Checked: the same files as apk for valence-base (799 entries) and after an add and a del; 310 upgrades killed at
   random moments, every file the old or the new version and the next run completing; a security review with a
   malicious mirror and crafted packages (its findings fixed: bounded memory before any trust check, no replay of an
-  older index once a newer was seen, bounded downloads, octet's own directories out of reach); a review against the
+  older index once a newer was seen, bounded downloads, catalyst's own directories out of reach); a review against the
   specification (package choices match apk's on 23 real requests); 1.6 to 2.2 times faster than apk (valence-base
   0.15 to 0.25 s against 0.28 to 0.40 s; 244 packages 5 to 6.5 s against 11 to 12.5 s).
 - Measured on 22 November 2026 against apk and xbps (`docs/benchmarks/2026-11-22/`): installing many packages,
   about twice as fast as apk and 1.2 to 2.2 times xbps's throughput; one-package jobs 1.2 to 4.4 times slower than
   apk, a fixed cost per run (start-up, reading every record, the syncs), which the rest of phase 10 works on.
-- The lookup index (`var/lib/octet/index/`, `octet/README.md` "The lookup index"): a change reads only the records
+- The lookup index (`var/lib/catalyst/index/`, `catalyst/README.md` "The lookup index"): a change reads only the records
   it needs, not every installed package's; the folders stay the record, and the index is rebuilt from them whenever
   it doesn't match. Adding one package to 244 installed went from 0.21 s to 0.05 s (apk 0.03 s);
   start-up and the syncs are next.
 - A record that can't be read stops every change before anything is unpacked; `oct fix` rebuilds it from the
-  signed package (`octet/README.md`, "Recovery").
+  signed package (`catalyst/README.md`, "Recovery").
 - Not yet: installed systems using it (the installers, snapshots before changes, a running system's upgrades, apk
   leaving); a signed timestamp in the index, without which a root that never saw the repository accepts a replayed
   old index.
 
-Its tests: `cargo test --release` in `octet/` (the real-data tests read `repo/x86_64`), `octet/tools/killtest/` and
-`octet/tools/bench/` (`octet/tools/README.md`).
+Its tests: `cargo test --release` in `catalyst/` (the real-data tests read `repo/x86_64`), `catalyst/tools/killtest/` and
+`catalyst/tools/bench/` (`catalyst/tools/README.md`).
 
 **Phase 10 is back with the owner and the build machine since 22 November 2026.** Another developer had it from
 21 November; their SQLite database as the only record was taken out again, on the owner's decision that the folders
-stay the record. Changes to `octet/` and `recipes/octet` come from the build machine; ideas and bug reports go in
+stay the record. Changes to `catalyst/` and `recipes/catalyst` come from the build machine; ideas and bug reports go in
 `docs/build-machine-handoff.md`.
 
 ## Testing (required before you commit a change that affects boot or install)

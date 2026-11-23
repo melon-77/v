@@ -10,6 +10,43 @@ How this works:
 
 ---
 
+## 2026-11-23: octet is now catalyst (the command is still `oct`)
+
+**The owner renamed the package manager: it's catalyst, and the command stays `oct`.** In the owner's words: "the actual name of the manager will be catalyst and the command is oct add based on octet and what i said earlier". So `oct` still comes from the octet rule, and `oct add` still sounds like octet. Recorded in ROADMAP.md, "Decided".
+
+**What changed (testing: this commit; vpkg: 0aaecba):**
+
+| | before | now |
+|---|---|---|
+| source | `octet/` | `catalyst/` |
+| crate / binary | `octet` / `oct` | `catalyst` / `oct` (unchanged) |
+| recipe | `recipes/octet` | `recipes/catalyst` (r0, installs `/usr/bin/oct`) |
+| state, cache | `/var/lib/octet`, `/var/cache/octet` | `/var/lib/catalyst`, `/var/cache/catalyst` |
+| each program's record | `Programs/<name>/<version>/.octet/` | `.catalyst/` |
+| a kept, changed config | `<file>.octet-new` | `<file>.catalyst-new` |
+| commit hooks | `/etc/octet/commit_hooks.d` | `/etc/catalyst/commit_hooks.d` (apk's hook folders are still read) |
+| environment, journal, index | `OCTET_*`, `octet-journal 1`, `octet-index 1` | `CATALYST_*`, `catalyst-journal 1`, `catalyst-index 1` |
+| messages | `oct: ...` | unchanged |
+| the ISO switch | `VALENCE_PKG=octet` → `valence-octet-*.iso` | `VALENCE_PKG=catalyst` → `valence-catalyst-*.iso` |
+| test tools | `octet-killtest.sh`, `octet-kt-*`, `octet-bench*` | `catalyst-killtest.sh`, `catalyst-kt-*`, `catalyst-bench*` |
+
+- **The installer scripts** (`valence-install`, `valence-wish`, `valencefetch`, `valence-first-boot`, `cal-finish`) now look for `/var/lib/catalyst/world`. valence-base is r51, valence-desktop r23, calamares-valence r16.
+- **Nothing but names changed.**
+- **Not renamed:** the earlier reports, the 22 November benchmarks and the stage-1 reviews keep the names they were written with. Roots made under the old name aren't converted; only test roots exist.
+
+**Checks:**
+- **`cargo test --release`:** 38 unit, 9 CLI and 10 real-data tests pass.
+- **A root made by the renamed binary** has `var/lib/catalyst/` with the world and the index (`catalyst-index 1`), and the records are in `.catalyst/`. Nothing in it is named octet.
+- **Kill test,** on an upgrade repository rebuilt under the new names:
+  - **the upgrade:** 40/40, 38 killed while running, 15 with a package half placed, 0 failures;
+  - **`KT_JOB=small`:** 40/40, 40 killed while running, 18 with a package half placed, 0 failures.
+- **FAT32 `/boot`:** OK.
+- **Not built yet:** the catalyst package itself. It gets built with the ISOs in stage E.
+
+**re: "Ok."** That's what I thought.
+
+---
+
 ## 2026-11-23: re: part two
 
 Ok.

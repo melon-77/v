@@ -504,7 +504,7 @@ if mode == 'rollback':
         step('rollback test: FAILED: ' + '; '.join(failed)); sys.exit(1)
 
     step('waiting for the installed system'); boot_installed(); step('logged in')
-    use_oct = 'use-oct' in sh('[ -e /var/lib/octet/world ] && echo use-oct || echo use-apk')
+    use_oct = 'use-oct' in sh('[ -e /var/lib/catalyst/world ] && echo use-oct || echo use-apk')
     pm_name = 'oct' if use_oct else 'apk'
     step(f'package manager in guest: {pm_name}')
     print(sh('findmnt -n -o TARGET,FSTYPE,FSROOT,OPTIONS -t btrfs; swapon --show; valence-snapshot list; cat /boot/grub/snapshots.cfg | cut -c1-240'))
@@ -637,7 +637,7 @@ if mode == 'wish':
         step(what + ': ' + ('OK' if cond else 'FAILED'))
         return cond
     def state():
-        out = sh('pm=apk; [ -e /var/lib/octet/world ] && pm=oct; '
+        out = sh('pm=apk; [ -e /var/lib/catalyst/world ] && pm=oct; '
                  'y(){ "$@" >/dev/null 2>&1 && echo y || echo n; }; echo "NANO=$(y $pm info -e nano)" "RSYNC=$(y $pm info -e rsync)" '
                  '"TTY4=$(y test -L /var/service/getty-tty4)" "TTY5=$(y test -L /var/service/getty-tty5)" '
                  '"DIALOUT=$(y sh -c "id -nG jcole | grep -qw dialout")" "FLOPPY=$(y sh -c "id -nG jcole | grep -qw floppy")" '
@@ -764,8 +764,8 @@ else:
     step('logged in')
     sh('stty cols 160 rows 50; export TERM=vt100')
     for c in ['valencefetch', 'cat /etc/os-release', 'findmnt / /boot', 'valence-svc status',
-              'if [ -e /var/lib/octet/world ]; then oct list | wc -l; else apk list --installed | wc -l; fi',
-              'if [ -e /var/lib/octet/world ]; then oct search | wc -l; else apk update && apk search -q | wc -l; fi',
+              'if [ -e /var/lib/catalyst/world ]; then oct list | wc -l; else apk list --installed | wc -l; fi',
+              'if [ -e /var/lib/catalyst/world ]; then oct search | wc -l; else apk update && apk search -q | wc -l; fi',
               'ls /sys/firmware/efi >/dev/null 2>&1 && echo booted-UEFI || echo booted-BIOS',
               'id jcole', 'ip -4 addr show dev eth0 | grep inet; ping -c1 -W3 10.0.2.2 >/dev/null && echo net-ok',
               'ls /usr/libexec/valence', 'free -m; df -h / /boot', 'wc -l < /proc/modules; ls /usr/lib/modules',
@@ -820,7 +820,7 @@ else:
         import http.server, threading, functools
         srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(http.server.SimpleHTTPRequestHandler, directory=f'{M}/repo'))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-        use_oct = 'use-oct' in sh('[ -e /var/lib/octet/world ] && echo use-oct || echo use-apk')
+        use_oct = 'use-oct' in sh('[ -e /var/lib/catalyst/world ] && echo use-oct || echo use-apk')
         pm_name = 'oct' if use_oct else 'apk'
         repo_url = f'http://10.0.2.2:{srv.server_address[1]}/{"x86" if i686 else "x86_64"}/Packages.adb'
         apkn = f'oct --plain --repository {repo_url}' if use_oct else f'apk --repositories-file /dev/null --repository {repo_url}'

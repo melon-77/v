@@ -1,0 +1,43 @@
+[package]
+name = "catalyst"
+version = "0.1.0"
+edition = "2021"
+description = "Valence package manager: reads signed apk v3 indexes and packages"
+license = "GPL-2.0-only"
+publish = false
+
+[lib]
+name = "catalyst"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oct"
+path = "src/main.rs"
+
+[dependencies]
+# raw RFC 1951 inflate (apk's "ADBd" / "ADBc" alg 1); the zlib-rs backend
+# (pure Rust) inflates faster than the default miniz_oxide
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+# zstd frames (apk's "ADBc" alg 2)
+zstd = "0.13"
+# SHA-1/256/512, RSA PKCS#1 v1.5 verification; links the system libssl/libcrypto
+openssl = "0.10"
+# blocking HTTP/HTTPS client for remote repositories; TLS through native-tls,
+# i.e. the same system OpenSSL (no rustls/ring)
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
+# O_NOFOLLOW/O_DIRECTORY flags, fcntl, kill (already in the tree through openssl)
+libc = "0.2"
+
+[profile.release]
+# a small binary (no debug info: less to read from disk at every start) and
+# thin LTO
+strip = "symbols"
+lto = "thin"
+
+# `cargo build --profile profiling`: the release build with line tables, for
+# perf and strace
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = "none"
