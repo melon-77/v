@@ -462,6 +462,11 @@ struct Switch<'a> {
     split: bool,
     /// The usual mounts under `boot` were noted for the scripts.
     boot_noted: bool,
+    /// The entry of the trash this switch fills (`clean_later`): whole
+    /// directories moved out of the live tree, and at the end the old
+    /// versions. Made when first needed; `trash_tried` when that failed.
+    trash: Option<crate::trash::Entry>,
+    trash_tried: bool,
     /// For `CATALYST_PROF`: the time old entries took, to decide which may
     /// go and to remove them; and new ones, to work out their places (and
     /// make their directories), to link them, and for the rest of a package.
@@ -976,6 +981,15 @@ fn in_index(lookup: Option<(&crate::index::Index, &HashSet<String>)>, path: &[u8
 }
 
 impl<'a> Switch<'a> {
+    /// The entry of the trash this switch fills, made when first asked for.
+    fn trash_entry(&mut self) -> Option<&mut crate::trash::Entry> {
+        if self.trash.is_none() && !self.trash_tried {
+            self.trash_tried = true;
+            self.trash = crate::trash::Entry::new(&self.root);
+        }
+        self.trash.as_mut()
+    }
+
     /// Removes the entries of an old version (or a removed package) that
     /// no package of the final set owns, and only those that are still
     /// what the old version put there (same inode, content or link target);
@@ -993,9 +1007,16 @@ impl<'a> Switch<'a> {
         let mut dirs: BTreeSet<(usize, Vec<u8>)> = BTreeSet::new();
         // Which entries may go is decided here, on this thread (the lookups
         // share their caches). What follows for each of them, two lstat and
-        // an unlink, runs on several threads when the package is big:
-        // removing Cataclysm's 8,517 entries one after another took 55 ms.
+        // an unlink, runs on several threads when the package is big and the
+        // file system gains from that: removing Cataclysm's 8,517 entries
+        // one after another took 55 ms on ext4.
         let mut may_go: Vec<(&FileRec, PathBuf)> = Vec::new();
+        // Where unlinks gain nothing from threads (btrfs) and the old
+        // versions are left to the trash anyway, whole directories of a big
+        // old version leave the live tree with one rename each
+        // (move_whole_dirs): the canonical places are kept for that.
+        let whole_dirs = self.opts.clean_later && self.unlink_threads <= 1;
+        let mut canons: Vec<Vec<u8>> = Vec::new();
         for r in &o.recs {
             if r.is_dir() {
                 if !own.dirs.contains(&r.path) && !in_index(lookup, &r.path, true) {
@@ -1010,15 +1031,10 @@ impl<'a> Switch<'a> {
             if keep.contains(&e.canon) || in_index(lookup, &e.canon, false) {
                 continue;
             }
+            if whole_dirs {
+                canons.push(e.canon);
+            }
             may_go.push((r, e.host));
-        }
-        enum Gone {
-            Removed,
-            /// changed locally: kept, and said so
-            Kept,
-            /// not there any more, or a directory now
-            Nothing,
-            Failed(io::Error),
         }
         if let Err(e) = self.off_device_guard() {
             self.err(format!("{}: its entries are left: {e}", o.meta.nv()));
@@ -1027,43 +1043,33 @@ impl<'a> Switch<'a> {
         self.t_decide += t_start.elapsed();
         let t_start = std::time::Instant::now();
         let odir = &o.dir;
-        let one = |(r, host): &(&FileRec, PathBuf)| -> Result<Gone> {
-            let Ok(m) = fs::symlink_metadata(host) else { return Ok(Gone::Nothing) };
-            let ours = match &r.kind {
-                _ if m.is_dir() => false,
-                RecKind::File(FileKind::Symlink(t)) => {
-                    m.file_type().is_symlink()
-                        && fs::read_link(host).map_or(false, |l| l.as_os_str().as_bytes() == &t[..])
-                }
-                _ if m.file_type().is_symlink() => false,
-                RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if m.is_file() => {
-                    let same_inode = !is_etc(&r.path)
-                        && fs::symlink_metadata(odir.join(OsStr::from_bytes(&r.path)))
-                            .map_or(false, |pm| pm.dev() == m.dev() && pm.ino() == m.ino());
-                    same_inode
-                        || Alg::from_len(r.hash.len())
-                            .map_or(false, |a| hash_file(host, a).map_or(false, |h| h == r.hash))
-                }
-                RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) => false,
-                _ => !m.is_file(), // device node or fifo
-            };
-            if !ours {
-                return Ok(if m.is_dir() { Gone::Nothing } else { Gone::Kept });
-            }
-            Ok(match fs::remove_file(host) {
-                Ok(()) => Gone::Removed,
-                Err(err) if err.kind() == io::ErrorKind::NotFound => Gone::Nothing,
-                Err(err) => Gone::Failed(err),
+        // the entries that left with a directory moved out whole
+        let mut left: Vec<bool> = Vec::new();
+        if whole_dirs && may_go.len() >= 2000 {
+            left = self.move_whole_dirs(o, &may_go, &canons, &dirs, keep, lookup, modified);
+        }
+        let rest: Vec<&(&FileRec, PathBuf)> =
+            may_go.iter().enumerate().filter(|(i, _)| !left.get(*i).copied().unwrap_or(false)).map(|(_, x)| x).collect();
+        let one = |x: &&(&FileRec, PathBuf)| -> Result<Gone> {
+            let (r, host) = *x;
+            Ok(match still_ours(r, host, odir) {
+                Still::Absent => Gone::Nothing,
+                Still::Changed => Gone::Kept,
+                Still::Ours => match fs::remove_file(host) {
+                    Ok(()) => Gone::Removed,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => Gone::Nothing,
+                    Err(err) => Gone::Failed(err),
+                },
             })
         };
-        let done = match crate::index::on_threads_most(&may_go, self.unlink_threads, one) {
+        let done = match crate::index::on_threads_most(&rest, self.unlink_threads, one) {
             Ok(d) => d,
             Err(e) => {
                 self.err(format!("{}: removing its entries: {e}", o.meta.nv()));
                 Vec::new()
             }
         };
-        for (g, (r, _)) in done.into_iter().zip(&may_go) {
+        for (g, (r, _)) in done.into_iter().zip(rest.iter().copied()) {
             match g {
                 Gone::Removed => self.rep.removed += 1,
                 Gone::Kept => {
@@ -1091,6 +1097,195 @@ impl<'a> Switch<'a> {
         }
         self.fs.forget();
         self.t_unlink += t_start.elapsed();
+    }
+
+    /// Moves out of the live tree, with one rename each, the directories of
+    /// the old version `o` that hold nothing but its own entries, into this
+    /// switch's entry of the trash, where they are deleted after the
+    /// command (crate::trash). On btrfs, where names are unlinked one after
+    /// another whatever a program does, that is what takes a big removal
+    /// from 8,500 unlinks to a few renames. Which of `may_go` left this way
+    /// is returned; everything else is removed entry by entry as always.
+    ///
+    /// A directory is moved only when all of this holds:
+    /// - it is one the old version listed and no package of the final set
+    ///   has (the same test as for removing it when empty);
+    /// - every entry in it, at any depth, was looked at: a file or link is
+    ///   one that may go and is still what the old version put there, a
+    ///   directory is again such a directory. Anything else in it (a file
+    ///   someone made there, a changed file, another package's entry) and
+    ///   the directory is left to the entry-by-entry way, which keeps it;
+    /// - nothing is mounted on it or anywhere in it, a single file
+    ///   included. Where the mounts cannot be read (no `/proc`), or the
+    ///   kernel cannot say whether a name is a mount point (`openat2`),
+    ///   nothing is moved at all.
+    ///
+    /// The rename puts the directory into the trash as *unchecked*, with a
+    /// note of where it was. Nobody can reach it by its path any more, and
+    /// it is looked through a second time: it must be the directory that
+    /// was looked at, nothing may be mounted in it, and every entry in it
+    /// must be one that was seen and still the old version's own. Only then
+    /// may it be deleted. On anything else (an entry appeared or was
+    /// replaced between the look and the rename, or it could not be listed)
+    /// the whole directory is renamed back to where it was, replacing
+    /// nothing, and its entries go the entry-by-entry way. If it cannot be
+    /// put back it stays in the trash as *stuck*, which nothing deletes,
+    /// and the error says where. A run that dies in between leaves it
+    /// unchecked: the run that finishes its journal puts it back first
+    /// (`trash::settle_unchecked`).
+    ///
+    /// What this cannot see: a program that still has the directory, or one
+    /// in it, open or as its working directory, or that reaches it through
+    /// a mount of the directory itself that this process cannot see (in
+    /// another mount namespace, such as a container's volume, or made
+    /// outside the root this process is confined to), can make a file there
+    /// after the second look. It
+    /// is deleted with the directory. Entry by entry, such a file would
+    /// have kept its directory.
+    #[allow(clippy::too_many_arguments)]
+    fn move_whole_dirs(
+        &mut self,
+        o: &PkgState,
+        may_go: &[(&FileRec, PathBuf)],
+        canons: &[Vec<u8>],
+        dirs: &BTreeSet<(usize, Vec<u8>)>,
+        keep: &HashSet<Vec<u8>>,
+        lookup: Option<(&crate::index::Index, &HashSet<String>)>,
+        modified: &mut HashSet<Vec<u8>>,
+    ) -> Vec<bool> {
+        let mut left = vec![false; may_go.len()];
+        // where the mounts are, and whether the kernel can say it of a name
+        let (Ok(root), Some(mounts)) = (fs::canonicalize(&self.root), sys::mounts()) else { return left };
+        let programs = std::ffi::CString::new("Programs").unwrap_or_default();
+        match File::open(&self.root) {
+            Ok(r) if sys::is_mount_point(&r, &programs).is_some() => {}
+            _ => return left,
+        }
+        let odir = &o.dir;
+        // 1. what each entry is now. One that is marked immutable or
+        // append-only cannot be removed: the entry-by-entry way says so
+        // and leaves it where it is, so its directory is not moved.
+        let Ok(still) = crate::index::on_threads(may_go, |(r, host)| {
+            Ok(match still_ours(r, host, odir) {
+                Still::Ours if sys::is_protected(host) => Still::Changed,
+                s => s,
+            })
+        }) else {
+            return left;
+        };
+        let at: HashMap<&[u8], usize> = canons.iter().enumerate().map(|(i, c)| (c.as_slice(), i)).collect();
+        // 2. the directories that would be removed if empty: canonical
+        // place -> (host path, path as the record has it)
+        let mut cand: HashMap<Vec<u8>, (PathBuf, &[u8])> = HashMap::new();
+        for (_, d) in dirs {
+            let Ok(Some(e)) = self.fs.entry_if_dir_exists(d) else { continue };
+            if e.canon.is_empty() || keep.contains(&e.canon) || in_index(lookup, &e.canon, false) {
+                continue;
+            }
+            cand.insert(e.canon, (e.host, d.as_slice()));
+        }
+        // 3. the whole ones, the shallowest first; one that is inside a
+        // moved one went with it
+        let mut order: Vec<&Vec<u8>> = cand.keys().collect();
+        order.sort_by(|a, b| a.len().cmp(&b.len()).then(a.cmp(b)));
+        let mut memo: HashMap<Vec<u8>, Option<Vec<usize>>> = HashMap::new();
+        let mut done: Vec<&Vec<u8>> = Vec::new();
+        let mut n_moved = 0;
+        for c in order {
+            if done.iter().any(|m| c.len() > m.len() && c.starts_with(m) && c[m.len()] == b'/') {
+                continue;
+            }
+            let Some(inside) = whole_dir(c, &cand, &at, &still, &mut memo) else { continue };
+            let (host, literal) = &cand[c];
+            // nothing is mounted on it or in it, a single file included, and
+            // neither it nor a directory in it is mounted somewhere else
+            let abs = root.join(OsStr::from_bytes(c));
+            if sys::mounted_in_or_from(&mounts, &abs) || sys::is_protected(host) {
+                continue;
+            }
+            let name = host.file_name().and_then(|n| std::ffi::CString::new(n.as_bytes()).ok());
+            let above = host.parent().and_then(|p| File::open(p).ok());
+            match (above, name) {
+                (Some(a), Some(n)) if sys::is_mount_point(&a, &n) == Some(false) => {}
+                _ => continue,
+            }
+            // the directory that will be moved
+            let Ok(before) = fs::symlink_metadata(host) else { continue };
+            if !before.is_dir() {
+                continue;
+            }
+            let Some(t) = self.trash_entry() else { return left };
+            // another file system, or busy: the entry-by-entry way
+            let Ok(to) = t.take_unchecked(host, c) else { continue };
+            match self.opts.crash_at.as_deref() {
+                Some("moved") => {
+                    eprintln!("oct: CATALYST_CRASH_AT=moved: killed (test hook)");
+                    sys::kill_self();
+                }
+                // test hook: something appears in the directory between the look and the rename
+                Some(hook) if hook.starts_with("appears:") => {
+                    let _ = fs::write(to.join(&hook["appears:".len()..]), b"not the package's");
+                }
+                _ => {}
+            }
+            // The second look. It is the directory that was looked at;
+            // nothing is mounted in it now; and all that is in it was seen
+            // and is still the old version's own.
+            let expected: HashSet<usize> = inside.iter().copied().collect();
+            let mut found: Vec<(PathBuf, Vec<u8>, bool)> = Vec::new();
+            let good = fs::symlink_metadata(&to).map_or(false, |m| m.is_dir() && m.dev() == before.dev() && m.ino() == before.ino())
+                && list_moved(&to, c, &mut found)
+                && match (fs::canonicalize(&to), sys::mounts()) {
+                    (Ok(now), Some(ms)) => !sys::mounted_in_or_from(&ms, &now),
+                    _ => false,
+                }
+                && crate::index::on_threads(&found, |(p, canon, is_dir)| {
+                    Ok(if *is_dir {
+                        cand.contains_key(canon.as_slice())
+                    } else {
+                        match at.get(canon.as_slice()) {
+                            Some(&i) if expected.contains(&i) => matches!(still_ours(may_go[i].0, p, odir), Still::Ours),
+                            _ => false,
+                        }
+                    })
+                })
+                .map_or(false, |ok| ok.iter().all(|&x| x));
+            let accepted = good && self.trash.as_mut().map_or(false, |t| t.accept(&to).is_ok());
+            if accepted {
+                for &i in &inside {
+                    left[i] = true;
+                    self.rep.removed += 1;
+                }
+                modified.insert(parent_dir(literal));
+                done.push(c);
+                n_moved += 1;
+                continue;
+            }
+            // Something in it is not what was seen: the whole directory goes
+            // back where it was, and its entries are removed one by one
+            // (which keeps what is not the package's, and says so).
+            match sys::rename_noreplace(&to, host) {
+                Ok(()) => {
+                    if let Some(t) = self.trash.as_mut() {
+                        t.gave_back(&to);
+                    }
+                }
+                Err(e) => {
+                    let now = self.trash.as_mut().map_or_else(|| to.clone(), |t| t.stuck(&to));
+                    self.err(format!(
+                        "{}: /{} was moved aside to be removed, did not pass the second look, and could not be put back ({e}); it is not deleted: look at {}",
+                        o.meta.nv(),
+                        String::from_utf8_lossy(c),
+                        now.display()
+                    ));
+                }
+            }
+            // no directory inside it is tried by itself: what made this one
+            // fail may be anywhere in it
+            done.push(c);
+        }
+        crate::prof::mark(&format!("      old entries: {n_moved} directories moved out whole"));
+        left
     }
 
     /// `syncfs`: everything so far is on disk, the journal and its name
@@ -1285,6 +1480,8 @@ pub fn switch(
         tree_threads: sys::name_threads(&Db::programs(root), sys::NameWork::Trees),
         split: false,
         boot_noted: false,
+        trash: None,
+        trash_tried: false,
         t_decide: Default::default(),
         t_unlink: Default::default(),
         t_places: Default::default(),
@@ -1658,7 +1855,7 @@ pub fn switch(
         s.sync()?;
         crate::prof::mark("switch: final syncfs");
     }
-    let Switch { j, mut rep, tree_threads, .. } = s;
+    let Switch { j, mut rep, tree_threads, mut trash, trash_tried, .. } = s;
     j.remove(root)?;
     let mut trees: Vec<PathBuf> = Vec::new();
     for op in &plan.ops {
@@ -1688,12 +1885,17 @@ pub fn switch(
     // aside, one rename each, and a process of its own deletes them after
     // this one has returned. What cannot be moved is deleted here.
     if big && opts.clean_later && !trees.is_empty() {
-        if let Some(mut t) = crate::trash::Entry::new(root) {
+        if trash.is_none() && !trash_tried {
+            trash = crate::trash::Entry::new(root);
+        }
+        if let Some(t) = trash.as_mut() {
             trees.retain(|d| t.take(d).is_err());
-            rep.trash = !t.is_empty();
             crate::prof::mark("switch: old versions moved to the trash");
         }
     }
+    // also what remove_old moved out of the live tree
+    rep.trash = trash.as_ref().map_or(false, |t| !t.is_empty());
+    drop(trash);
     remove_trees(&trees, big, tree_threads)?;
     Ok(rep)
 }
@@ -1853,6 +2055,117 @@ fn open_version(dir: &Path) {
     if let Ok(d) = sys::open_dir_nofollow(dir) {
         let _ = d.set_permissions(fs::Permissions::from_mode(0o755));
     }
+}
+
+/// What became of an old entry that may go.
+enum Gone {
+    Removed,
+    /// changed locally: kept, and said so
+    Kept,
+    /// not there any more, or a directory now
+    Nothing,
+    Failed(io::Error),
+}
+
+/// What is at the place of an old version's entry.
+#[derive(Clone, Copy)]
+enum Still {
+    /// what the old version put there: the same inode, content or target
+    Ours,
+    /// something else: changed locally
+    Changed,
+    /// nothing, or a directory
+    Absent,
+}
+
+/// Whether the entry at `host` is still what record `r` of the old version
+/// in `odir` put there.
+fn still_ours(r: &FileRec, host: &Path, odir: &Path) -> Still {
+    let Ok(m) = fs::symlink_metadata(host) else { return Still::Absent };
+    let ours = match &r.kind {
+        _ if m.is_dir() => false,
+        RecKind::File(FileKind::Symlink(t)) => {
+            m.file_type().is_symlink() && fs::read_link(host).map_or(false, |l| l.as_os_str().as_bytes() == &t[..])
+        }
+        _ if m.file_type().is_symlink() => false,
+        RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) if m.is_file() => {
+            let same_inode = !is_etc(&r.path)
+                && fs::symlink_metadata(odir.join(OsStr::from_bytes(&r.path)))
+                    .map_or(false, |pm| pm.dev() == m.dev() && pm.ino() == m.ino());
+            same_inode || Alg::from_len(r.hash.len()).map_or(false, |a| hash_file(host, a).map_or(false, |h| h == r.hash))
+        }
+        RecKind::File(FileKind::Regular) | RecKind::File(FileKind::Hardlink(_)) => false,
+        _ => !m.is_file(), // device node or fifo
+    };
+    if ours {
+        Still::Ours
+    } else if m.is_dir() {
+        Still::Absent
+    } else {
+        Still::Changed
+    }
+}
+
+/// The entries (as indices into the list of those that may go) in the
+/// directory at canonical place `c`, at any depth, if it holds nothing
+/// else: every file or link in it is one of them and still the old
+/// version's own, every directory in it is one that would be removed when
+/// empty, is no mount point, and is whole itself. `None` otherwise.
+fn whole_dir(
+    c: &[u8],
+    cand: &HashMap<Vec<u8>, (PathBuf, &[u8])>,
+    at: &HashMap<&[u8], usize>,
+    still: &[Still],
+    memo: &mut HashMap<Vec<u8>, Option<Vec<usize>>>,
+) -> Option<Vec<usize>> {
+    if let Some(known) = memo.get(c) {
+        return known.clone();
+    }
+    let found = (|| {
+        let (host, _) = cand.get(c)?;
+        let dir = sys::open_dir_nofollow(host).ok()?;
+        let mut inside = Vec::new();
+        for e in fs::read_dir(host).ok()? {
+            let e = e.ok()?;
+            let name = e.file_name();
+            let child = rootfs::join_rel(c, name.as_bytes());
+            if e.file_type().ok()?.is_dir() {
+                let cname = std::ffi::CString::new(name.as_bytes()).ok()?;
+                if sys::is_mount_point(&dir, &cname) != Some(false) || sys::is_protected(&e.path()) {
+                    return None;
+                }
+                inside.extend(whole_dir(&child, cand, at, still, memo)?);
+            } else {
+                let i = *at.get(child.as_slice())?;
+                if !matches!(still[i], Still::Ours) {
+                    return None;
+                }
+                inside.push(i);
+            }
+        }
+        Some(inside)
+    })();
+    memo.insert(c.to_vec(), found.clone());
+    found
+}
+
+/// Everything in the directory `dir` (a directory moved out of the live
+/// tree, where its canonical place was `canon`), at any depth: path now,
+/// canonical place before, whether it is a directory. `false` if some of it
+/// could not be listed.
+fn list_moved(dir: &Path, canon: &[u8], found: &mut Vec<(PathBuf, Vec<u8>, bool)>) -> bool {
+    let Ok(rd) = fs::read_dir(dir) else { return false };
+    let mut all = true;
+    for e in rd {
+        let Ok(e) = e else { return false };
+        let (p, c) = (e.path(), rootfs::join_rel(canon, e.file_name().as_bytes()));
+        let is_dir = e.file_type().map_or(false, |t| t.is_dir());
+        found.push((p.clone(), c.clone(), is_dir));
+        if is_dir {
+            all &= list_moved(&p, &c, found);
+        }
+    }
+    all
 }
 
 /// Whether a new version's directory is open to other users already
@@ -2416,5 +2729,3 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
-
-

@@ -156,6 +156,14 @@ fn settle(o: &Options, db: &mut Db) -> Result<usize> {
     legacy_unsynced_notice(&root, db);
     if let Some(j) = JournalFile::open(&root)? {
         println!("oct: finishing an interrupted switch ({} package changes)", j.plan.ops.len());
+        // directories that the interrupted switch had moved out of the live
+        // tree and not yet looked through go back first: their entries are
+        // then removed one by one with everything else
+        crate::trash::settle_unchecked(&root, true).map_err(|e| {
+            Error::Msg(format!(
+                "the trash could not be gone through ({e}): a directory the interrupted switch moved out of the live tree may wait there to be put back, so the switch is not finished now"
+            ))
+        })?;
         // a switch planned with the index is finished with the index as it
         // was before the switch, when that is still intact: then it reads the
         // same records, all checked before the journal was written; otherwise
@@ -204,8 +212,14 @@ fn settle(o: &Options, db: &mut Db) -> Result<usize> {
     // what an interrupted rebuild of the index left behind, and a journal
     // written but never put in effect (a crash before the switch)
     crate::index::clean_leftovers(&root);
-    // old versions that an earlier run left to be deleted later and that
-    // nobody is deleting (its process died)
+    // A directory moved out of the live tree and still unchecked now
+    // belongs to no journal (the one above, if there was one, has put its
+    // own back): it is set aside for good. Then the old versions that an
+    // earlier run left to be deleted later and that nobody is deleting (its
+    // process died).
+    if let Err(e) = crate::trash::settle_unchecked(&root, false) {
+        eprintln!("oct: warning: the trash of old versions: {e}");
+    }
     if let Err(e) = crate::trash::empty(&root) {
         eprintln!("oct: warning: the trash of old versions: {e}");
     }
@@ -1123,6 +1137,7 @@ pub fn recover(o: &Options) -> Result<bool> {
     let state = root.join(db::STATE_DIR);
     let mut left: Vec<&str> = ["journal", "journal.new", "world.new", "dirty", "index.new", "index.old", "index/next", "trash"]
         .into_iter()
+        .filter(|n| *n != "trash" || crate::trash::has_work(&root))
         .filter(|n| fs::symlink_metadata(state.join(n)).is_ok())
         .collect();
     if !stray_temporaries(&root).is_empty() {

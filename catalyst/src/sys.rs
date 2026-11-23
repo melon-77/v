@@ -162,6 +162,154 @@ pub fn is_mount_point(dir: &std::fs::File, name: &std::ffi::CStr) -> Option<bool
     }
 }
 
+/// A mount of this process's mount namespace, as `/proc/self/mountinfo` has
+/// it: its id, the device of its file system, the directory of that file
+/// system that is its root, and where it is mounted.
+#[derive(Debug, PartialEq)]
+pub struct Mount {
+    pub id: u64,
+    pub dev: Vec<u8>,
+    pub root: std::path::PathBuf,
+    pub at: std::path::PathBuf,
+}
+
+/// The mounts of this process's mount namespace, bind mounts of single
+/// files included. `None`: they cannot be read (no `/proc`).
+pub fn mounts() -> Option<Vec<Mount>> {
+    Some(parse_mountinfo(&std::fs::read("/proc/self/mountinfo").ok()?))
+}
+
+/// The first, third, fourth and fifth field of every line of a
+/// `mountinfo`, the octal escapes of the paths undone.
+fn parse_mountinfo(text: &[u8]) -> Vec<Mount> {
+    fn path(p: &[u8]) -> std::path::PathBuf {
+        let mut out = Vec::with_capacity(p.len());
+        let mut i = 0;
+        while i < p.len() {
+            let oct = |d: u8| (b'0'..=b'7').contains(&d);
+            if p[i] == b'\\' && i + 3 < p.len() && oct(p[i + 1]) && oct(p[i + 2]) && oct(p[i + 3]) {
+                out.push(((p[i + 1] - b'0') << 6) | ((p[i + 2] - b'0') << 3) | (p[i + 3] - b'0'));
+                i += 4;
+            } else {
+                out.push(p[i]);
+                i += 1;
+            }
+        }
+        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&out))
+    }
+    let mut v = Vec::new();
+    for line in text.split(|&c| c == b'\n') {
+        let f: Vec<&[u8]> = line.split(|&c| c == b' ').take(5).collect();
+        let id = f.first().and_then(|x| std::str::from_utf8(x).ok()).and_then(|x| x.parse().ok());
+        if let (5, Some(id)) = (f.len(), id) {
+            v.push(Mount { id, dev: f[2].to_vec(), root: path(f[3]), at: path(f[4]) });
+        }
+    }
+    v
+}
+
+/// Whether something is mounted on the directory at `abs` (an absolute,
+/// canonical path of something that is there) or anywhere in it, or the
+/// directory, or one in it, is itself the root of a mount somewhere else (a
+/// bind mount of it): then it is reached by another path than its own, and
+/// must stay where it is. "Cannot tell" counts as yes.
+pub fn mounted_in_or_from(mounts: &[Mount], abs: &Path) -> bool {
+    match mount_id(abs) {
+        Some(id) => in_or_from(mounts, abs, id),
+        None => true,
+    }
+}
+
+/// [`mounted_in_or_from`] for a directory that is in the mount with id `id`
+/// (the kernel says which one that is: the path does not, where a mount is
+/// hidden under a later one on a directory above it).
+fn in_or_from(mounts: &[Mount], abs: &Path, id: u64) -> bool {
+    if mounts.iter().any(|m| m.at.starts_with(abs)) {
+        return true;
+    }
+    let Some(m) = mounts.iter().find(|m| m.id == id) else { return true };
+    // where it is inside its file system
+    let Ok(rest) = abs.strip_prefix(&m.at) else { return true };
+    let inside = m.root.join(rest);
+    mounts.iter().any(|x| x.dev == m.dev && x.id != m.id && x.root.starts_with(&inside))
+}
+
+/// What `statx` gives, as far as it is used here (256 bytes).
+#[repr(C)]
+struct Statx {
+    mask: u32,
+    blksize: u32,
+    attributes: u64,
+    nlink: u32,
+    uid: u32,
+    gid: u32,
+    mode: u16,
+    pad: u16,
+    ino: u64,
+    size: u64,
+    blocks: u64,
+    attributes_mask: u64,
+    times: [u64; 8],
+    rdev: [u32; 2],
+    dev: [u32; 2],
+    mnt_id: u64,
+    rest: [u64; 13],
+}
+
+fn statx(path: &Path, mask: c_uint) -> Option<Statx> {
+    let c = cstr(path).ok()?;
+    let mut st: Statx = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::syscall(libc::SYS_statx, AT_FDCWD, c.as_ptr(), AT_SYMLINK_NOFOLLOW, mask, &mut st as *mut Statx) };
+    (r == 0).then_some(st)
+}
+
+/// The id of the mount that the file or directory at `path` (not followed)
+/// is in, as `mountinfo` numbers them. `None`: the kernel does not say
+/// (before Linux 5.8).
+pub fn mount_id(path: &Path) -> Option<u64> {
+    const STATX_MNT_ID: c_uint = 0x1000;
+    let st = statx(path, STATX_MNT_ID)?;
+    (st.mask & STATX_MNT_ID != 0).then_some(st.mnt_id)
+}
+
+/// Whether the file or directory at `path` (not followed) is marked
+/// immutable or append-only, so that it cannot be removed. "Cannot tell"
+/// counts as yes: no answer, or a file system that does not report these
+/// marks.
+pub fn is_protected(path: &Path) -> bool {
+    const MARKS: u64 = 0x10 | 0x20; // STATX_ATTR_IMMUTABLE, STATX_ATTR_APPEND
+    match statx(path, 0) {
+        Some(st) => st.attributes_mask & MARKS != MARKS || st.attributes & MARKS != 0,
+        None => true,
+    }
+}
+
+/// Takes an exclusive lock, waiting for whoever holds it.
+pub fn lock_wait(f: &std::fs::File) -> io::Result<()> {
+    loop {
+        if unsafe { flock(f.as_raw_fd(), LOCK_EX) } == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// `rename` that fails with `EEXIST` where something is at `to` already,
+/// instead of replacing it (`renameat2` with `RENAME_NOREPLACE`).
+pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    const RENAME_NOREPLACE: c_uint = 1;
+    let (f, t) = (cstr(from)?, cstr(to)?);
+    let r = unsafe { libc::syscall(libc::SYS_renameat2, AT_FDCWD, f.as_ptr(), AT_FDCWD, t.as_ptr(), RENAME_NOREPLACE) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// For a child between fork and exec: every descriptor above `keep` is
 /// closed at the exec. Only async-signal-safe calls.
 pub fn cloexec_above(keep: c_int) {
@@ -342,4 +490,72 @@ pub fn open_dir_nofollow(p: &Path) -> io::Result<std::fs::File> {
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(p)
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::*;
+
+    /// The mounts of a `mountinfo`: id, device, root and mount point, with
+    /// the escapes for space, tab, newline and backslash undone; and what
+    /// that says about a directory.
+    #[test]
+    fn mounts_are_read_from_mountinfo() {
+        let text = b"22 27 0:21 / /proc rw,nosuid shared:13 - proc proc rw\n\
+            35 27 0:30 /@ / rw,noatime shared:1 - btrfs /dev/sda2 rw\n\
+            90 35 0:30 /@/a\\040b /mnt/with\\040space\\011tab\\134x rw - btrfs /dev/sda2 rw\n\
+            91 35 8:1 / /boot rw - vfat /dev/sda1 rw\n\
+            92 35 0:30 /@/usr/share/shared/sub /srv/x rw - btrfs /dev/sda2 rw\n\
+            93 35 0:30 /@/etc/hosts /usr/share/app/hosts rw - btrfs /dev/sda2 rw\n\
+            94 35 0:31 /@/usr/share/other /srv/y rw - btrfs /dev/sdb1 rw\n\
+            95 35 8:3 / /hidden/data rw - ext4 /dev/sdc1 rw\n\
+            96 35 8:4 / /hidden rw - ext4 /dev/sdd1 rw\n\
+            97 35 8:4 /data/pkg/share /mnt/view rw - ext4 /dev/sdd1 rw\n\
+            short line\n";
+        let m = parse_mountinfo(text);
+        assert_eq!(m.len(), 10);
+        assert_eq!(m[2], Mount { id: 90, dev: b"0:30".to_vec(), root: "/@/a b".into(), at: "/mnt/with space\ttab\\x".into() });
+        // in the root mount (35)
+        let no = |p: &str| !in_or_from(&m, Path::new(p), 35);
+        // nothing on it, in it, or from it
+        assert!(no("/usr/share/plain") && no("/usr/share/other"), "another device's root of the same name does not count");
+        // a mount on it, and one in it (a single file)
+        assert!(!no("/boot") && !no("/usr/share/app") && !no("/usr/share"));
+        // it, or a directory in it, is the root of a mount somewhere else
+        assert!(!no("/usr/share/shared/sub") && !no("/usr/share/shared") && no("/usr/share/shared/sub/deeper"));
+        // A mount hidden under a later one on a directory above it (95
+        // under 96): the directory is in 96, whatever the paths look like,
+        // and there it is the root of the mount at /mnt/view.
+        assert!(in_or_from(&m, Path::new("/hidden/data/pkg/share"), 96));
+        assert!(!in_or_from(&m, Path::new("/hidden/data/pkg/share"), 95), "by the path alone it would have passed");
+        assert!(!in_or_from(&m, Path::new("/hidden/data/pkg/other"), 96));
+        // a mount that is not listed: nothing can be said
+        assert!(in_or_from(&m, Path::new("/usr/share/plain"), 1234));
+        // this process: its root is in a mount that is listed
+        if let Some(m) = mounts() {
+            if let Some(id) = mount_id(Path::new("/")) {
+                assert!(m.iter().any(|x| x.id == id && x.at == Path::new("/")));
+            }
+        }
+    }
+
+    /// A file that is not marked is not protected; one marked immutable is
+    /// (where this can be tried: as root, on a file system that has the
+    /// mark); one that cannot be asked about counts as protected.
+    #[test]
+    fn what_is_marked_or_cannot_be_asked_about_counts_as_protected() {
+        let p = std::env::temp_dir().join(format!("catalyst-protected-{}", std::process::id()));
+        std::fs::write(&p, b"").unwrap();
+        let reported = !is_protected(&p);
+        let chattr = |flag: &str| std::process::Command::new("chattr").arg(flag).arg(&p).status().map_or(false, |s| s.success());
+        if reported && chattr("+i") {
+            assert!(is_protected(&p), "an immutable file");
+            assert!(chattr("-i"));
+            assert!(!is_protected(&p));
+        } else {
+            eprintln!("no immutable file could be made here: that part is not tested");
+        }
+        std::fs::remove_file(&p).unwrap();
+        assert!(is_protected(&p), "nothing there to ask about");
+    }
 }

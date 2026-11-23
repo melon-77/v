@@ -292,10 +292,16 @@ These are open on purpose. Each gets settled before the phase that needs it.
   A review narrowed "the installed system": unasked it happens only when the root is `/`, is the root of process 1 and
   the command is run at a terminal. In a chroot, a script, a build or a container's one command nothing may be left
   running to finish the work, so there everything is deleted before the command returns unless `--clean-later` is given.
-  **Described then and not built:** moving a removed package's own directories out of the live tree in one step each. It
-  would be the first place where catalyst deletes by directory and not by checked entry (a mount point inside one, a file
-  that appears meanwhile), so it goes back to the owner with what it would gain. See `catalyst/README.md`, "Old versions
-  deleted later".
+  See `catalyst/README.md`, "Old versions deleted later".
+- **On btrfs, whole directories of a big removed package leave the live tree with one rename each** (23 November 2026).
+  This was part of what the owner had said "yes" to above, and the build machine first held it back: it is the one place
+  where catalyst removes by directory and not by checked entry. Shown that removing a big package on btrfs was still
+  slower than apk (203 ms against 177 ms) because of the 8,500 unlinks apk has too, and what the move would risk (a mount
+  point inside a directory, a file that appears meanwhile), the owner: "go ahead with building that". Built with the
+  fences listed in `catalyst/README.md`, "Whole directories, on btrfs": every entry looked at before and again after the
+  move, nothing mounted in or from the directory, anything unexpected sends the whole directory back, and what could not
+  be looked through or put back is never deleted. Only where unlinks gain nothing from threads; ext4 and XFS are as fast
+  entry by entry.
 - **A change takes one sync, before its switch** (23 November 2026). With the correction below on the table (apk syncs
   once at the end of every change), the owner was asked how an add should end: with no sync, as it then did; with a sync
   at the end, as apk; or with one sync before the switch, so that a power cut leaves the add undone or finished by the

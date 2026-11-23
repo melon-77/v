@@ -1209,6 +1209,219 @@ fn the_old_versions_of_a_big_change_are_deleted_after_the_command_when_asked() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Every entry of the live tree (not catalyst's own directories): its path
+/// and what it is.
+fn live_names(root: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            if rel == "Programs" || rel == "var/lib/catalyst" || rel == "var/cache/catalyst" {
+                continue;
+            }
+            let t = e.file_type().unwrap();
+            out.push(format!("{} {rel}", if t.is_dir() { 'd' } else if t.is_symlink() { 'l' } else { 'f' }));
+            if t.is_dir() {
+                walk(&p, root, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// Where unlinks gain nothing from threads (forced here, as on btrfs) and
+/// old versions are left to the trash, the directories of a big removed
+/// package that hold nothing but its own entries leave the live tree whole,
+/// into the trash. A directory with a file someone else put there, or with
+/// a package file that was changed, does not, and stays with that file. The
+/// live tree comes out exactly as when every entry is removed one by one:
+/// also when something appears in a directory between the look at it and
+/// its move (the whole directory goes back), and when the run is killed
+/// right after a move (the run that finishes the journal puts it back).
+#[test]
+fn whole_directories_of_a_removed_package_are_moved_out_and_nothing_else_is() {
+    if repo().is_none() {
+        return;
+    }
+    let big = "cataclysm-dda-tiles";
+    let one = ("CATALYST_UNLINK_THREADS", "1");
+    let prepare = |name: &str| {
+        let root = fresh_root(name);
+        assert!(oct_real(&root, &[], &["--initdb", "add", "tree"]).status.success());
+        let out = oct_real(&root, &[], &["add", big]);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        // the package's data: a directory of its own with directories in it
+        let data = root.join("usr/share/cataclysm-dda");
+        let mut subs: Vec<std::path::PathBuf> =
+            std::fs::read_dir(&data).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        subs.sort();
+        assert!(subs.len() >= 3, "the test needs this directory");
+        // someone else's file at its top, and one deep in one of its directories
+        std::fs::write(data.join("mine.txt"), b"not the package's").unwrap();
+        std::fs::write(subs[0].join("mine-too.txt"), b"not the package's").unwrap();
+        // a file of the package replaced by the admin, in another one
+        let theirs = std::fs::read_dir(&subs[1]).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_file()).min().expect("a file");
+        std::fs::write(theirs.with_extension("new"), b"changed").unwrap();
+        std::fs::rename(theirs.with_extension("new"), &theirs).unwrap();
+        (root, data, subs)
+    };
+    let gone = |root: &std::path::Path| {
+        let trash = root.join("var/lib/catalyst/trash");
+        for _ in 0..4000 {
+            if !trash.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the trash is still there");
+    };
+    let moved_dirs = |stderr: &str| -> usize {
+        let l = stderr.lines().find(|l| l.contains("directories moved out whole")).unwrap_or_else(|| panic!("no count in\n{stderr}"));
+        l.split_whitespace().rev().nth(4).unwrap().parse().unwrap()
+    };
+    // the usual way, entry by entry, all of it before the command returns
+    let (plain, _, subs) = prepare("whole-dirs-plain");
+    let before = live_names(&plain);
+    let out = oct_real(&plain, &[], &["del", big]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout).matches("was changed locally; kept").count(), 1);
+    let want = live_names(&plain);
+    assert!(subs[0].join("mine-too.txt").exists() && !subs[2].exists(), "what stays and what goes");
+
+    // whole directories; stopped before the trash is emptied, to look at it
+    let (root, data, subs) = prepare("whole-dirs");
+    let out = oct_real(&root, &[one, ("CATALYST_PROF", "1"), ("CATALYST_CRASH_AT", "trash")], &["--clean-later", "del", big]);
+    assert!(!out.status.success());
+    let n = moved_dirs(&text(&out.stderr));
+    assert!(n >= 1, "directories were moved");
+    assert_eq!(text(&out.stdout).matches("was changed locally; kept").count(), 1);
+    let trash = root.join("var/lib/catalyst/trash");
+    let entry = std::fs::read_dir(&trash).unwrap().flatten().next().unwrap().path();
+    let names: Vec<String> = std::fs::read_dir(&entry).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.iter().all(|x| x.parse::<usize>().is_ok()), "all of it looked through and accepted: {names:?}");
+    let old_versions = std::fs::read_dir(plain.join("Programs")).unwrap().count();
+    let still_there = std::fs::read_dir(root.join("Programs")).unwrap().count();
+    assert_eq!(old_versions, still_there, "the same packages are left in both roots");
+    assert!(names.len() > n, "the moved directories and the old versions: {} for {n}", names.len());
+    assert_eq!(live_names(&root), want, "the live tree is as after the usual way");
+    assert_eq!(std::fs::read(data.join("mine.txt")).unwrap(), b"not the package's");
+    assert!(subs[0].join("mine-too.txt").exists() && !subs[2].exists());
+    let out = oct_real(&root, &[], &["recover"]);
+    assert!(out.status.success() && !trash.exists(), "{}", text(&out.stderr));
+    let out = oct_real(&root, &[], &["fix"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(live_names(&root), want);
+    let moved_root = root;
+
+    // Something appears in every directory that is moved (the test hook
+    // writes it right after the rename, as if it had been made just
+    // before): every one of them goes back whole, and all that the removal
+    // leaves more than the usual way is those directories, each with
+    // nothing but that file.
+    let (root, _, _) = prepare("whole-dirs-appears");
+    let out = oct_real(&root, &[one, ("CATALYST_PROF", "1"), ("CATALYST_CRASH_AT", "appears:stray.txt")], &["--clean-later", "del", big]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(moved_dirs(&text(&out.stderr)), 0, "none was accepted");
+    gone(&root);
+    let now = live_names(&root);
+    let more: Vec<&String> = now.iter().filter(|x| !want.contains(x)).collect();
+    let strays: Vec<&String> = more.iter().copied().filter(|x| x.ends_with("/stray.txt")).collect();
+    assert_eq!(strays.len(), n, "one in each directory that was moved before: {strays:?}");
+    for st in &strays {
+        let dir = st[2..].rsplit_once('/').unwrap().0;
+        assert!(before.contains(&format!("d {dir}")), "{dir} is a directory the package had");
+        assert_eq!(std::fs::read_dir(root.join(dir)).unwrap().count(), 1, "{dir} holds nothing else");
+        assert_eq!(std::fs::read(root.join(&st[2..])).unwrap(), b"not the package's");
+    }
+    assert_eq!(more.len(), 2 * n, "only those directories and those files: {more:?}");
+    assert!(want.iter().all(|x| now.contains(x)), "and nothing is missing");
+    let out = oct_real(&root, &[], &["fix"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let stray_root = root;
+
+    // A directory with something mounted in it stays where it is, mount and
+    // all, as when every entry is removed one by one (root only).
+    let mut mounted_root = None;
+    if std::process::Command::new("id").arg("-u").output().map_or(false, |o| o.stdout == b"0\n") {
+        struct Mounted(std::path::PathBuf);
+        impl Drop for Mounted {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("umount").arg("-l").arg(&self.0).status();
+            }
+        }
+        let (root, _, subs) = prepare("whole-dirs-mount");
+        // a directory of the package inside one that is whole but for this:
+        // an empty tmpfs is mounted on it
+        let on = subs[2..]
+            .iter()
+            .flat_map(|d| std::fs::read_dir(d).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir() && !p.is_symlink()).min())
+            .next()
+            .expect("a directory inside one of the package's directories");
+        // and another whole directory of the package is mounted somewhere
+        // else as well (a bind mount of it)
+        let shared = subs[2..].iter().rev().find(|d| !on.starts_with(d)).cloned();
+        let view = root.join("a-view");
+        std::fs::create_dir(&view).unwrap();
+        let mount = |args: &[&str], at: &std::path::Path| {
+            std::process::Command::new("mount").args(args).arg(at).status().map_or(false, |s| s.success())
+        };
+        if mount(&["-t", "tmpfs", "-o", "size=1m", "none"], &on) {
+            use std::os::unix::fs::MetadataExt;
+            let _guard = Mounted(on.clone());
+            let is_mount = |p: &std::path::Path| p.metadata().map_or(false, |m| m.dev() != p.parent().unwrap().metadata().unwrap().dev());
+            assert!(is_mount(&on) && std::fs::read_dir(&on).unwrap().count() == 0, "an empty mount");
+            let bound = shared.as_ref().map_or(false, |d| mount(&["--bind", d.to_str().unwrap()], &view));
+            let _guard2 = bound.then(|| Mounted(view.clone()));
+            // stopped before the trash is emptied
+            let out = oct_real(&root, &[one, ("CATALYST_PROF", "1"), ("CATALYST_CRASH_AT", "trash")], &["--clean-later", "del", big]);
+            assert!(!out.status.success());
+            assert!(moved_dirs(&text(&out.stderr)) >= 1, "other directories were moved");
+            assert!(is_mount(&on), "the mount is where it was");
+            if bound {
+                // The directory was removed entry by entry and is gone:
+                // nothing can be made in it through the other mount. Had it
+                // been moved to the trash, this file would be made there,
+                // and deleted with it.
+                assert!(std::fs::write(view.join("made-through-the-view"), b"x").is_err(), "the directory behind the view is gone, not in the trash");
+            } else {
+                eprintln!("no bind mount could be made here: that part is not tested");
+            }
+            drop(_guard2);
+            let out = oct_real(&root, &[], &["recover"]);
+            assert!(out.status.success(), "{}", text(&out.stderr));
+            gone(&root);
+            let now = live_names(&root);
+            assert!(want.iter().all(|x| now.contains(x)), "nothing else is missing");
+        }
+        mounted_root = Some(root);
+    }
+
+    // Killed right after the first directory was moved, before the second
+    // look: it waits unchecked, nothing deletes it, and the run that
+    // finishes the journal puts it back and removes its entries one by one.
+    let (root, _, _) = prepare("whole-dirs-killed");
+    let out = oct_real(&root, &[one, ("CATALYST_CRASH_AT", "moved")], &["--clean-later", "del", big]);
+    assert!(!out.status.success());
+    let trash = root.join("var/lib/catalyst/trash");
+    let entry = std::fs::read_dir(&trash).unwrap().flatten().next().unwrap().path();
+    assert!(entry.join("0.unchecked").is_dir() && entry.join("0.from").symlink_metadata().is_ok());
+    let out = oct_real(&root, &[], &["empty-trash"]);
+    assert!(out.status.success() && entry.join("0.unchecked").is_dir(), "not deleted: {}", text(&out.stderr));
+    let out = oct_real(&root, &[], &["recover"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("it is back, and its entries are removed one by one"), "{}", text(&out.stderr));
+    assert!(!trash.exists());
+    assert_eq!(live_names(&root), want, "as after the usual way");
+    let out = oct_real(&root, &[], &["fix"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    for r in [&plain, &moved_root, &stray_root, &root].into_iter().chain(mounted_root.as_ref()) {
+        let _ = std::fs::remove_dir_all(r);
+    }
+}
+
 /// A file the admin already has under etc/ is kept, and the package's
 /// version is put beside it, whole.
 #[test]

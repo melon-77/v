@@ -10,6 +10,47 @@ How this works:
 
 ---
 
+## 2026-11-23: on btrfs, whole directories of a removed package leave with one rename; no case slower than apk there
+
+**The owner's go-ahead.** After the entry below, removing a big package on btrfs was still slower than apk (203 ms against 177 ms). I had held back the one thing that would change that, because it is the first place where catalyst removes by directory instead of by checked entry. Shown the numbers and the risk, the owner: "go ahead with building that".
+
+**What it does.** On btrfs, when old versions are left to the trash anyway and the package is big, a directory that holds nothing but the removed package's own entries leaves the live tree with one rename, into the trash, instead of one unlink per file. ext4 and XFS keep the entry-by-entry way (they unlink on several threads, which is as fast).
+
+**The fences** (`catalyst/README.md`, "Whole directories, on btrfs"):
+- Every entry in the directory, at any depth, is looked at before the move: still the package's own file or link, no other package's, nothing someone else put there, nothing marked immutable.
+- Nothing mounted on it or in it, and it is not mounted anywhere else. Without `/proc`, nothing is moved.
+- In the trash it is `N.unchecked` until it has been looked through a second time. Anything unexpected and the whole directory is renamed back, replacing nothing, and removed entry by entry.
+- Nothing deletes what is unchecked. A run that dies in between leaves it, and the run that finishes the journal puts it back first. One that cannot be put back becomes `N.stuck`: never deleted, never put back later, reported by every run.
+- **The limit that remains:** a program that has the directory open, or reaches it through a mount of it that catalyst cannot see (a container's volume), can make a file in it after the second look. That file goes with the directory.
+
+**The strict benchmark on the final source** (15 runs a case, apk with `--sync`, catalyst with `--clean-later`):
+
+| | cases | faster | no clear difference | slower |
+|---|---|---|---|---|
+| btrfs, when the command returns | 22 | 17 | 5 | 0 |
+| btrfs, until on disk | 22 | 12 | 10 | 0 |
+| ext4, when the command returns | 26 | 12 | 13 | 1 |
+| ext4, until on disk | 26 | 12 | 12 | 2 |
+
+- **Removing Cataclysm on btrfs:** 133 ms against apk's 181 ms on the small system (it was 203 against 177), 268 against 391 from a cold cache; on the big system 173 against 188 warm (level) and 327 against 436 cold.
+- **ext4 did not change** (the move is not used there), yet it shows 12 faster where the run two hours earlier showed 15: three cases sit at the line and fall either way. That is the benchmark's own spread, and the README says so.
+
+**Still not ahead.**
+- **Counted to its end**, a big removal on btrfs takes 1.2 to 2 times apk's time (394 ms against 203 ms until everything is deleted and on disk). Later, not less.
+- **A one-package install from a cold cache on the small system, ext4:** 60 ms against 52 ms.
+- **`oct --sync`:** small changes 3 to 5 ms slower than apk from a warm cache and about 10 ms from a cold one; a big removal on btrfs 405 ms against 180 ms.
+
+**Three independent reviews before this push.** The first found the first version failing open after the rename (a listing error, a kill before the second look, a failed put-back could each end with something that is not the package's being deleted): one high, two medium. I rebuilt it around "unchecked until looked through, whole directory back on any surprise". The second and third found no way left to delete or lose anything unverified, and no high finding; they found seven medium ones around recovery and mounts (a trash entry skipped while the emptier held it, an old leftover put back by a later unrelated recovery, a leftover link pinning the trash, immutable files, bind mounts of the directory, a mount hidden under another, an I/O error skipping an entry), all fixed, and tests of mine that could not fail, rewritten.
+
+**Tests on this commit.**
+- `cargo test`: 52 unit, 12 command, 26 on the real repository.
+- Kill test with directories moved: 80 rounds on the big removal, 40 on the upgrade, 40 on the small removal, 0 failures.
+- Power-cut test: 160 rounds on btrfs, ext4 and XFS, 0 failures.
+
+**For the developers.** Nothing to do. If a run ever says a directory is `stuck` under `var/lib/catalyst/trash`, it holds a removed package's files and possibly one that is not the package's: look, take what is yours, delete the rest.
+
+---
+
 ## 2026-11-23: old versions deleted after the command, and the strict benchmark on btrfs
 
 **The owner's decision.** Asked "Delete a removed package's files in the background after the command returns?", with the plan described: "yes".
