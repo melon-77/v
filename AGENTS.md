@@ -911,7 +911,11 @@ five subvolumes and `/boot` on its own FAT32 partition (with `/boot/efi` on UEFI
 `id jcole` the group `lpadmin`, and after `apk del gamemode` `valence-snapshot list` must list the snapshot taken
 before it. Do the run on BIOS, on UEFI and on BIOS with "Encrypt system" whenever `calamares`, `kpmcore` or
 `calamares-valence` changes. (20 November 2026: all three pass. The first encrypted run found that Calamares
-encrypted `/boot` too and left a disk that did not start, while the installer said "All done": "Installers".)
+encrypted `/boot` too and left a disk that did not start, while the installer said "All done": "Installers".
+24 November 2026: all three pass again.) For a desktop ISO built with catalyst, name it:
+`ISO=out/valence-catalyst-desktop-<date>-x86_64.iso scripts/qemu-gui.py start cd`, and remove the package with
+`oct del gamemode`. (24 November 2026: UEFI and BIOS with "Encrypt system" pass; `/var/lib/catalyst/world` is there
+and apk's database is not.)
 
 `disk` also checks what the roadmap's phases promise of an installed system. The GNU tools own their command names,
 and `findmnt`, `mkswap`, `findfs` and `blkdiscard` are util-linux's programs (rule 62). A fresh install has no
@@ -1186,7 +1190,10 @@ firmware is its own package for that reason). Publish after building packages pe
 
 Releases are numbered, starting at 0.1.0 (the owner's choice, 20 November 2026; Melon named its releases after
 fruit varieties, and that stayed with Melon). Tags are `v<version>`; test builds between releases are pre-releases
-with a dated tag (`valence-20261120-2`). A release is marked Latest, carries every ISO, `SHA256SUMS`,
+with a dated tag (`valence-20261120-2`). A test build can carry a second set of ISOs built with catalyst (the
+owner's "Both sets", 24 November 2026): `WITH_CATALYST=1 scripts/release.sh <version>` adds
+`valence-catalyst-<version>-x86_64.iso` and `valence-catalyst-desktop-<version>-x86_64.iso`, and the notes say which
+set to take. A release is marked Latest, carries every ISO, `SHA256SUMS`,
 `SHA256SUMS.sig` and `valence-signing.rsa.pub` (`scripts/release.sh <version>` makes them from the tested ISOs in
 `out/`, named `valence-<version>-x86_64.iso` and `valence-desktop-<version>-x86_64.iso`; `docs/install.md` tells
 users how to check them and gives the key's fingerprint),

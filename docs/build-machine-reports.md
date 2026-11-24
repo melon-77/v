@@ -10,6 +10,37 @@ How this works:
 
 ---
 
+## 2026-11-24: the test build valence-20261124, with apk and with catalyst
+
+**What it is.** The owner asked for new ISOs, and, asked which package manager they should carry: "Both sets". The pre-release [valence-20261124](https://github.com/melon-77/v/releases/tag/valence-20261124) has four ISOs built from bd7e697 with recipes 2a684fd: console and desktop with apk, console and desktop with catalyst (`VALENCE_PKG=catalyst`). 0.1.0 stays Latest, and the build of 21 November is marked superseded.
+
+**Tests, all in QEMU without KVM.**
+
+| | the apk set | the catalyst set |
+|---|---|---|
+| the eight console tests, the wish-list test | pass | pass |
+| `desktop` (live) | passes alone; failed once beside a second VM (1 below) | pass |
+| `desktop-install` on BIOS and on UEFI | pass | pass |
+| Calamares by hand | BIOS, UEFI, BIOS with "Encrypt system": pass | UEFI, BIOS with "Encrypt system": pass |
+
+**Three things I saw. The second and third are mine to change in a next build; the first is for whoever knows NetworkManager better.**
+
+1. **The Wi-Fi step of the live-desktop test failed once on a busy host.**
+   - A second VM was starting on the same machine. `nmcli connection up` on `wlan0` ended in state 30. wpa_supplicant's lines show the key negotiation completed, `CTRL-EVENT-CONNECTED`, then `CTRL-EVENT-DISCONNECTED ... reason=3 locally_generated=1`.
+   - Alone, the same ISO passes. The catalyst desktop ISO passed with the second VM running. The network packages are those of 20 November, which passed nine runs before.
+   - I did not find what disconnects it. The serial log of that run was overwritten by the next test; what the test printed is in `logs/set-apk-20261124/test-desktop-first-run.log` on the build machine.
+   - A guess, not a finding: the replay in `recipes/eudev/udevd.run` arrives while NetworkManager is already connecting. If so, a slow real machine could meet it.
+2. **`/etc/issue` says "glibc | GNU tools | runit | apk"** on a system built with catalyst too (`recipes/valence-base/files/etc/issue`).
+3. **A system installed from a catalyst ISO still has `/usr/bin/apk`**, with no database: `/lib/apk/db` and `/etc/apk/world` are not there. Someone who types `apk add` there starts a second record of the system. The release notes say "use `oct`".
+
+**Two script changes, both small.**
+- `scripts/release.sh`: `WITH_CATALYST=1` adds the newest catalyst pair to the release directory and to `SHA256SUMS`.
+- `scripts/qemu-gui.py`: `ISO=path` in the environment starts that ISO in place of the newest apk desktop ISO.
+
+**Not done.** The packages of this build are not on the `packages` branch (the build machine pushes to `testing` only). An installed system still gets "404" from the online repository and carries on with the packages that came with the ISO, as with 0.1.0.
+
+---
+
 ## 2026-11-24: the three findings on 5159cf4 are fixed, and one thing behind the first
 
 **Why I touched your commit after all.** The entry of 23 November listed three findings on 5159cf4 and left them to you. The owner, asked whether I should fix them: "Yes, fix them".

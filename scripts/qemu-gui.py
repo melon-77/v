@@ -4,6 +4,7 @@ which is the graphical installer (AGENTS.md, "Testing", has the Calamares run).
 
   qemu-gui.py start cd [--uefi]     boot the newest desktop ISO in out/ with an empty 24 GiB disk (work/tests/gui.img);
                                     QEMU stays in the foreground, so start it in a second terminal or in the background
+                                    (ISO=path in the environment: that ISO, for example the one built with catalyst)
   qemu-gui.py start disk [--uefi]   boot that disk
   qemu-gui.py shot NAME             screenshot -> logs/gui/NAME.png (or $OUT/NAME.png); prints the path and the size
   qemu-gui.py click X Y [right]     move the pointer there (a USB tablet: absolute positions) and click
@@ -27,7 +28,7 @@ W = H = 0
 
 def start(what, uefi):
     import glob
-    isos = sorted(glob.glob(f'{M}/out/valence-desktop-2*-x86_64.iso'), key=os.path.getmtime)
+    isos = [os.environ['ISO']] if os.environ.get('ISO') else sorted(glob.glob(f'{M}/out/valence-desktop-2*-x86_64.iso'), key=os.path.getmtime)
     os.makedirs(os.path.dirname(IMG), exist_ok=True)
     if what == 'cd':
         if not isos: sys.exit('no desktop ISO in out/ (VALENCE_EDITION=desktop scripts/mkiso.sh)')
