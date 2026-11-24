@@ -550,6 +550,13 @@ fn recover_retires_legacy_unsynced_simulate_empty_trash_is_readonly_and_unchecke
     fs::remove_dir_all(root.join("usr/share")).unwrap();
     symlink(&outside, root.join("usr/share")).unwrap();
     fs::write(root.join("var/lib/catalyst/journal"), "catalyst-journal 1\nend\n").unwrap();
+    // the trash as catalyst makes it, root's alone, whatever the umask the
+    // test runs under (one that others may write to is not used at all)
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new().mode(0o700).create(&trash).unwrap();
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let entry = trash.join("99999-1");
     fs::create_dir_all(entry.join("0.unchecked")).unwrap();
     fs::write(entry.join("0.unchecked/payload"), b"stay").unwrap();
@@ -559,6 +566,7 @@ fn recover_retires_legacy_unsynced_simulate_empty_trash_is_readonly_and_unchecke
     assert!(!outside.join("escaped").exists(), "unchecked restore escaped --root via symlink");
     assert!(entry.join("0.stuck/payload").exists(), "unrestorable dir must be marked stuck");
     let _ = fs::remove_dir_all(&outside);
+    let _ = fs::remove_dir_all(&root);
 }
 
 /// A removal fetches nothing and verifies nothing, so it reads no keys: it
@@ -581,4 +589,90 @@ fn a_removal_reads_no_keys() {
     assert!(!root.join("Programs/hello/Current").exists());
     assert!(!root.join("usr/bin/hello").exists());
     let _ = fs::remove_dir_all(&root);
+}
+
+/// A root given as a symlink is the directory it leads to. A big removed
+/// package's directory at the top of the root leaves the live tree whole
+/// there as it does under the root's own name: as one directory, not as
+/// each of the directories in it.
+#[test]
+fn a_whole_directory_at_the_top_of_a_root_given_as_a_link() {
+    for through_link in [false, true] {
+        let root = temp_root(if through_link { "top-dir-link" } else { "top-dir" });
+        for d in ["var/lib/catalyst", "var/cache/catalyst", "etc/apk"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        fs::write(root.join("etc/apk/arch"), "x86_64\n").unwrap();
+        fs::write(root.join("var/lib/catalyst/world"), "bulk\n").unwrap();
+        // one package with 2,100 files in 21 directories under /opt-bulk
+        let ver = root.join("Programs/bulk/1.0-r0");
+        fs::create_dir_all(ver.join(".catalyst")).unwrap();
+        let mut records = String::from("d\t0755\troot\troot\t0\t0\t-\t-\t-\topt-bulk\n");
+        for i in 0..21 {
+            let dir = format!("opt-bulk/d{i:02}");
+            fs::create_dir_all(ver.join(&dir)).unwrap();
+            fs::create_dir_all(root.join(&dir)).unwrap();
+            records += &format!("d\t0755\troot\troot\t0\t0\t-\t-\t-\t{dir}\n");
+            for j in 0..100 {
+                let f = format!("{dir}/f{j:03}");
+                let body = format!("{i} {j}\n");
+                fs::write(ver.join(&f), &body).unwrap();
+                fs::hard_link(ver.join(&f), root.join(&f)).unwrap();
+                records += &format!("f\t0644\troot\troot\t{}\t0\t{}\t-\t-\t{f}\n", body.len(), sha256_hex(body.as_bytes()));
+            }
+        }
+        fs::write(
+            ver.join(".catalyst/info"),
+            "name: bulk\nversion: 1.0-r0\narch: x86_64\norigin: bulk\nlicense: MIT\ndescription: test\nurl: https://example.org\ninstalled-size: 4096\n",
+        )
+        .unwrap();
+        fs::write(ver.join(".catalyst/files"), records).unwrap();
+        symlink("1.0-r0", root.join("Programs/bulk/Current")).unwrap();
+        let given = if through_link {
+            let link = root.with_extension("the-link");
+            let _ = fs::remove_file(&link);
+            symlink(&root, &link).unwrap();
+            link
+        } else {
+            root.clone()
+        };
+        let out = oct_at(&given, &["fix"]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new(oct_bin())
+            .arg("--root")
+            .arg(&given)
+            .args(["--plain", "--clean-later", "del", "bulk"])
+            .env("CATALYST_UNLINK_THREADS", "1")
+            .env("CATALYST_PROF", "1")
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{err}");
+        let line = err.lines().find(|l| l.contains("directories moved out whole"));
+        let moved: Option<usize> = line.map(|l| l.split_whitespace().rev().nth(4).unwrap().parse().unwrap());
+        // the process that empties the trash ends, and nothing is left of it
+        let trash = root.join("var/lib/catalyst/trash");
+        for _ in 0..4000 {
+            if !trash.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!trash.exists(), "the trash is still there");
+        if !through_link && matches!(moved, None | Some(0)) {
+            // Under the root's own name nothing was moved whole either: this
+            // kernel does not say what a mount point is (no openat2, no
+            // /proc), or this file system does not report the marks that
+            // forbid a removal. Then there is nothing to compare.
+            eprintln!("SKIPPED: no directory is moved whole here ({line:?})");
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        assert_eq!(moved, Some(1), "the directory at the top went as one (through a link: {through_link}): {line:?}");
+        assert!(!root.join("opt-bulk").exists() && !root.join("Programs/bulk/Current").exists());
+        if through_link {
+            let _ = fs::remove_file(&given);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 }

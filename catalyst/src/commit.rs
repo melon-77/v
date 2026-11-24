@@ -1206,9 +1206,15 @@ impl<'a> Switch<'a> {
             let Some(name) = host.file_name().and_then(|n| std::ffi::CString::new(n.as_bytes()).ok()) else {
                 continue;
             };
-            let Some(above) = host.parent().and_then(|p| sys::open_dir_nofollow(p).ok()) else {
-                continue;
+            // The directory above it, by a descriptor and through no link,
+            // except that the root itself is whatever it was given as (a
+            // directory at the top of a root given as a symlink).
+            let above = match host.parent() {
+                Some(p) if p == self.root => sys::open_dir(p),
+                Some(p) => sys::open_dir_nofollow(p),
+                None => continue,
             };
+            let Ok(above) = above else { continue };
             if sys::is_mount_point(&above, &name) != Some(false) {
                 continue;
             }

@@ -10,6 +10,42 @@ How this works:
 
 ---
 
+## 2026-11-24: the three findings on 5159cf4 are fixed, and one thing behind the first
+
+**Why I touched your commit after all.** The entry of 23 November listed three findings on 5159cf4 and left them to you. The owner, asked whether I should fix them: "Yes, fix them".
+
+**1. The trash on a kernel before 5.6** (`trash.rs`, `sys.rs`).
+- Your fallback asked `sys::mounted_in_or_from`, which needs the mount id from `statx` (Linux 5.8). Without `openat2` (before 5.6) it could never answer, the trash counted as mounted, and recovery finished a journal without putting an unchecked directory back.
+- Now `sys::mounted_in` tells from the mounts' own paths in `mountinfo`, which every kernel has. Only where `mountinfo` gives no answer either is the trash not used.
+- A trash that was made for the asking and then refused is removed again (it used to stay, and every later run warned about it).
+- **What was behind it, found by the reviewer in my first version of this fix:** a trash that is there and is not used for any reason (others may write to it, another owner, a mount on it) still let recovery finish the journal with a directory missing from the live tree, with a warning. Now the run that would finish the journal stops when an `N.unchecked` is in such a trash, and touches nothing in it. Once the trash is root's alone again, the next run puts the directory back and finishes.
+- **What the run says then, changed after the reviewer's second look:** my text told the administrator to make the trash root's alone and run again, which is the one step that makes catalyst trust what is in it. It now names the first waiting directory and what its link names, says how many wait, and says to look at each and at its link first: a trash that others could change may hold what catalyst did not put there.
+- **Something mounted on the trash** hides what waits in it: the run that would finish a journal stops there too and asks for it to be unmounted. It asks what `base` asks (the kernel, else `mountinfo`), so a trash that is a btrfs subvolume of its own is not taken for a mount.
+- `CATALYST_OLD_KERNEL=1` is a new test hook: `is_mount_point` and `mount_id` answer as on such a kernel. It makes no caller skip a check.
+
+**2. `make_dir_atomic`, the long way** (`rootfs.rs`). Something under the name that is not a directory is an error there too now. Your assertions in the test hold on both ways, and the test no longer depends on the umask (one expectation of my own in it was wrong under umask 027).
+
+**3. A root given as a symlink** (`trash.rs`, `commit.rs`). `restore_confined` opens the root with the new `sys::open_dir`, which follows a link there, as every other step of a run does; below the root nothing is followed, as before. `move_whole_dirs` opens the parent of a directory the same way where that parent is the root itself, so a directory at the top of such a root leaves whole.
+
+**Your test.** `recover_retires_legacy_unsynced_...` makes its trash with mode 0700 now (under umask 002 it was group-writable and not used) and removes its root.
+
+**A limit that is left, low.** Without `openat2`, and with the root given as `/proc/PID/root` of a process in another mount namespace, the fallback compares this namespace's `mountinfo` with a path that may name another place. The device check still refuses any mount of another file system; what is left is a bind mount of the same file system on the trash, on such a kernel, through such a root.
+
+**Review.** Three rounds by the independent reviewer on a copy.
+- The first found findings 2 and 3 closed and no way for the changes to delete or move something unverified, to put something back in a wrong place, or to follow a link they must not. It found finding 1 closed for old kernels only (the fourth bullet under 1 above) and four comments or messages that said more than the code does; all changed.
+- The second found that closed too and no run stopped that should go on. It found the message leading the administrator to trust the trash unseen, and a mount on the trash hiding what waits under it; both changed.
+- The third found nothing serious and four small points in that same path (another device taken for a mount, a mount on the same file system missed without `openat2`, the message naming one waiting directory where the next run puts back all, test notes); all changed. **What I changed after that third look was not looked at again.**
+
+**Tests on this commit.**
+- `cargo test`: 63 unit, 15 command, 29 on the real repository. The unit and command tests also pass under umask 027, 077 and 002.
+- Every fix has a test that fails when the fix is undone (each undone in a copy of the source).
+- Kill test: 180 rounds on the binary of this commit, 169 killed while running, 0 failures. Power-cut test: 135 rounds on btrfs, ext4 and XFS, 0 failures.
+- The two versions before this one, which differ from it only in what a run checks and says when it stops at a trash that is not used: 320 kill rounds and 295 power-cut rounds each, 0 failures, with the extra rounds on the removal of a big package with whole directories moved.
+
+**For the developers.** Nothing to do. If you change `trash.rs`, `commit.rs` or `rootfs.rs` again, say so in the handoff before pushing, and I run the kill and power-cut tests on it: `cargo test` does not reach what these files are for.
+
+---
+
 ## 2026-11-23: three more files asked for ahead; what the cases at the line are
 
 **What changed since the entry below.** Three more hints, the same kind as before (`catalyst/README.md`, "Files asked for ahead"):

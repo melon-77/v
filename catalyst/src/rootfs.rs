@@ -487,8 +487,15 @@ fn make_dir_atomic(host: &Path, mode: u32, uid: u32, gid: u32) -> io::Result<boo
         // mkdir applies the umask; chown clears set-id bits
         d.set_permissions(fs::Permissions::from_mode(mode & 0o7777))?;
         drop(d);
-        if fs::symlink_metadata(host).is_ok() {
-            return Ok(false); // made meanwhile; rename would replace an empty one
+        match fs::symlink_metadata(host) {
+            // made meanwhile; rename would replace an empty one
+            Ok(m) if m.is_dir() => return Ok(false),
+            // something else has taken the name (a file, a symlink): not a
+            // directory to use, as on the short way above
+            Ok(_) => {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} is there and is not a directory", host.display())))
+            }
+            Err(_) => {}
         }
         fs::rename(&tmp, host).map(|_| true)
     })();
@@ -609,9 +616,10 @@ mod tests {
         let exact = |parent: &Path, mode: u32| plain_mkdir_is_exact(&parent.join("new"), mode, uid, gid);
         // under an ordinary directory: when the umask takes no bit of the
         // mode and, for root, the groups agree
-        let plain = sys::umask_at_start() & 0o755 == 0 && (!sys::is_root() || fs::metadata(&base).unwrap().gid() == gid);
+        let groups = !sys::is_root() || fs::metadata(&base).unwrap().gid() == gid;
+        let plain = sys::umask_at_start() & 0o755 == 0 && groups;
         assert_eq!(exact(&base, 0o755), plain);
-        assert_eq!(exact(&base, 0o700), sys::umask_at_start() & 0o700 == 0 && plain);
+        assert_eq!(exact(&base, 0o700), sys::umask_at_start() & 0o700 == 0 && groups);
         // modes a plain mkdir is not trusted with
         assert!(!exact(&base, 0o775) && !exact(&base, 0o757) && !exact(&base, 0o1755) && !exact(&base, 0o2755));
         // a set-group-id directory above: the new one would inherit the bit
@@ -646,6 +654,19 @@ mod tests {
         assert!(make_dir_atomic(&base.join("link-to-dir"), 0o755, uid, gid).is_err());
         // existing real directory still returns Ok(false)
         assert_eq!(make_dir_atomic(&sg, 0o755, uid, gid).unwrap(), false);
+        // The long way gives the same answers. A mode that a plain mkdir is
+        // not trusted with always takes it (the calls above take it too
+        // where the umask or the directory's group sends them there).
+        assert!(!exact(&base, 0o775));
+        assert!(make_dir_atomic(&base.join("file"), 0o775, uid, gid).is_err());
+        assert!(make_dir_atomic(&base.join("link-to-dir"), 0o775, uid, gid).is_err());
+        assert!(base.join("file").symlink_metadata().unwrap().is_file() && base.join("link-to-dir").symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(make_dir_atomic(&sg, 0o775, uid, gid).unwrap(), false);
+        assert_eq!(make_dir_atomic(&base.join("long-way"), 0o775, uid, gid).unwrap(), true);
+        assert_eq!(fs::symlink_metadata(base.join("long-way")).unwrap().mode() & 0o7777, 0o775);
+        // and none of them leaves its temporary name
+        let left: Vec<String> = fs::read_dir(&base).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(".catalyst.")).collect();
+        assert!(left.is_empty(), "{left:?}");
         fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -1419,7 +1419,78 @@ fn whole_directories_of_a_removed_package_are_moved_out_and_nothing_else_is() {
     assert_eq!(live_names(&root), want, "as after the usual way");
     let out = oct_real(&root, &[], &["fix"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    for r in [&plain, &moved_root, &stray_root, &root].into_iter().chain(mounted_root.as_ref()) {
+
+    // The same where the kernel says less (the test hook: no `openat2`, no
+    // mount id, as before Linux 5.6). The run that finishes the journal
+    // still finds the trash to be its own, by `mountinfo`, and puts the
+    // directory back.
+    let old = ("CATALYST_OLD_KERNEL", "1");
+    let (old_root, _, _) = prepare("whole-dirs-old-kernel");
+    let out = oct_real(&old_root, &[one, ("CATALYST_CRASH_AT", "moved")], &["--clean-later", "del", big]);
+    assert!(!out.status.success());
+    let old_trash = old_root.join("var/lib/catalyst/trash");
+    let entry = std::fs::read_dir(&old_trash).unwrap().flatten().next().unwrap().path();
+    assert!(entry.join("0.unchecked").is_dir());
+    let out = oct_real(&old_root, &[old], &["recover"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("it is back, and its entries are removed one by one"), "{}", text(&out.stderr));
+    assert!(!old_trash.exists());
+    assert_eq!(live_names(&old_root), want, "as after the usual way");
+    // And a whole removal there: no directory is moved whole (the kernel
+    // cannot say what is a mount point), the old versions still go through
+    // the trash, and nothing is left of it or said about it.
+    let (old_root_2, _, _) = prepare("whole-dirs-old-kernel-2");
+    let out = oct_real(&old_root_2, &[one, old, ("CATALYST_PROF", "1")], &["--clean-later", "del", big]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("directories moved out whole"), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("old versions left to a process of its own"), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("catalyst's own") && !text(&out.stderr).contains("cannot be told"), "{}", text(&out.stderr));
+    gone(&old_root_2);
+    assert_eq!(live_names(&old_root_2), want);
+
+    // A trash that is not used (here: others may write to it) while a
+    // directory waits in it to be put back: the journal is not finished
+    // past it, nothing in the trash is touched, and once the trash is
+    // root's alone again the next run puts the directory back and finishes.
+    let (shut_root, _, _) = prepare("whole-dirs-shut-trash");
+    let out = oct_real(&shut_root, &[one, ("CATALYST_CRASH_AT", "moved")], &["--clean-later", "del", big]);
+    assert!(!out.status.success());
+    let shut_trash = shut_root.join("var/lib/catalyst/trash");
+    let entry = std::fs::read_dir(&shut_trash).unwrap().flatten().next().unwrap().path();
+    let mode = |m: u32| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shut_trash, std::fs::Permissions::from_mode(m)).unwrap()
+    };
+    mode(0o775);
+    let out = oct_real(&shut_root, &[], &["recover"]);
+    assert!(!out.status.success(), "{}", text(&out.stdout));
+    assert!(text(&out.stderr).contains("0.unchecked waits to be put back") && text(&out.stderr).contains("the switch is not finished now"), "{}", text(&out.stderr));
+    assert!(shut_root.join("var/lib/catalyst/journal").exists() && entry.join("0.unchecked").is_dir() && entry.join("0.from").symlink_metadata().is_ok());
+    mode(0o700);
+    let out = oct_real(&shut_root, &[], &["recover"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("it is back, and its entries are removed one by one"), "{}", text(&out.stderr));
+    assert!(!shut_trash.exists());
+    assert_eq!(live_names(&shut_root), want, "as after the usual way");
+
+    // A root given as a symlink: the directory goes back into it too.
+    let (link_root, _, _) = prepare("whole-dirs-link");
+    let link = link_root.with_extension("the-link");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&link_root, &link).unwrap();
+    let out = oct_real(&link, &[one, ("CATALYST_CRASH_AT", "moved")], &["--clean-later", "del", big]);
+    assert!(!out.status.success());
+    let link_trash = link_root.join("var/lib/catalyst/trash");
+    let entry = std::fs::read_dir(&link_trash).unwrap().flatten().next().unwrap().path();
+    assert!(entry.join("0.unchecked").is_dir());
+    let out = oct_real(&link, &[], &["recover"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("it is back, and its entries are removed one by one"), "{}", text(&out.stderr));
+    assert!(!link_trash.exists());
+    assert_eq!(live_names(&link_root), want, "as after the usual way");
+    let _ = std::fs::remove_file(&link);
+
+    for r in [&plain, &moved_root, &stray_root, &root, &old_root, &old_root_2, &shut_root, &link_root].into_iter().chain(mounted_root.as_ref()) {
         let _ = std::fs::remove_dir_all(r);
     }
 }

@@ -140,6 +140,9 @@ pub fn has_default_acl(path: &Path) -> bool {
 /// the same file system included, where the kernel says (`openat2` with
 /// `RESOLVE_NO_XDEV`, Linux 5.6). `None`: it does not say.
 pub fn is_mount_point(dir: &std::fs::File, name: &std::ffi::CStr) -> Option<bool> {
+    if old_kernel() {
+        return None;
+    }
     #[repr(C)]
     struct OpenHow {
         flags: u64,
@@ -160,6 +163,16 @@ pub fn is_mount_point(dir: &std::fs::File, name: &std::ffi::CStr) -> Option<bool
         Some(libc::EXDEV) => Some(true),
         _ => None,
     }
+}
+
+/// `CATALYST_OLD_KERNEL=1`, a test hook: the answers of a kernel that has
+/// neither `openat2` (before Linux 5.6) nor a mount id in `statx` (before
+/// 5.8). It makes no caller skip a check: whoever asks takes "it does not
+/// say" for the careful answer, or, for the trash, asks `mountinfo`
+/// instead ([`mounted_in`]).
+fn old_kernel() -> bool {
+    static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OLD.get_or_init(|| std::env::var_os("CATALYST_OLD_KERNEL").map_or(false, |v| v == "1"))
 }
 
 /// A mount of this process's mount namespace, as `/proc/self/mountinfo` has
@@ -209,6 +222,15 @@ fn parse_mountinfo(text: &[u8]) -> Vec<Mount> {
 }
 
 /// Whether something is mounted on the directory at `abs` (an absolute,
+/// canonical path) or anywhere in it, told by the mounts' own paths: it
+/// asks nothing of the kernel but `mountinfo`, which every kernel has. A
+/// mount that a later one hides counts as well, which errs on the side of
+/// yes.
+pub fn mounted_in(mounts: &[Mount], abs: &Path) -> bool {
+    mounts.iter().any(|m| m.at.starts_with(abs))
+}
+
+/// Whether something is mounted on the directory at `abs` (an absolute,
 /// canonical path of something that is there) or anywhere in it, or the
 /// directory, or one in it, is itself the root of a mount somewhere else (a
 /// bind mount of it): then it is reached by another path than its own, and
@@ -224,7 +246,7 @@ pub fn mounted_in_or_from(mounts: &[Mount], abs: &Path) -> bool {
 /// (the kernel says which one that is: the path does not, where a mount is
 /// hidden under a later one on a directory above it).
 fn in_or_from(mounts: &[Mount], abs: &Path, id: u64) -> bool {
-    if mounts.iter().any(|m| m.at.starts_with(abs)) {
+    if mounted_in(mounts, abs) {
         return true;
     }
     let Some(m) = mounts.iter().find(|m| m.id == id) else { return true };
@@ -284,6 +306,9 @@ fn statx(path: &Path, mask: c_uint) -> Option<Statx> {
 /// is in, as `mountinfo` numbers them. `None`: the kernel does not say
 /// (before Linux 5.8).
 pub fn mount_id(path: &Path) -> Option<u64> {
+    if old_kernel() {
+        return None;
+    }
     const STATX_MNT_ID: c_uint = 0x1000;
     let st = statx(path, STATX_MNT_ID)?;
     (st.mask & STATX_MNT_ID != 0).then_some(st.mnt_id)
@@ -524,6 +549,13 @@ pub fn open_dir_nofollow(p: &Path) -> io::Result<std::fs::File> {
         .open(p)
 }
 
+/// Opens the directory at `p`, a symlink there followed: for a root, which
+/// is whatever it was given as. Below a root, [`open_dir_nofollow`].
+pub fn open_dir(p: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC).open(p)
+}
+
 /// Opens a direct child directory `name` inside `parent` without following
 /// symlinks (`openat` with `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`).
 pub fn open_dir_at_nofollow(parent: &std::fs::File, name: &std::ffi::CStr) -> io::Result<std::fs::File> {
@@ -577,6 +609,10 @@ mod mount_tests {
         // a mount placed inside an ancestor bind mount (/mnt/parent-view/pkg/nested)
         // sits inside /opt/parent/pkg, while a sibling (/opt/parent/other) has none
         assert!(!no("/opt/parent/pkg") && no("/opt/parent/other"));
+        // by the paths alone, where the kernel gives no mount id: a mount on
+        // it, a mount in it, none
+        assert!(mounted_in(&m, Path::new("/boot")) && mounted_in(&m, Path::new("/mnt")) && mounted_in(&m, Path::new("/mnt/parent-view/pkg")));
+        assert!(!mounted_in(&m, Path::new("/usr/lib")) && !mounted_in(&m, Path::new("/boo")) && !mounted_in(&m, Path::new("/var/lib/catalyst/trash")));
         // A mount hidden under a later one on a directory above it (95
         // under 96): the directory is in 96, whatever the paths look like,
         // and there it is the root of the mount at /mnt/view.

@@ -1241,7 +1241,7 @@ until the command returned and about 250 ms until all was deleted.
 
 ## Tests
 
-- **`cargo test`:** 60 unit tests, 14 command tests and 29 tests over the
+- **`cargo test`:** 63 unit tests, 15 command tests and 29 tests over the
   real repository:
   - every package verified against the index;
   - tampering of every kind is rejected;
@@ -1318,6 +1318,25 @@ until the command returned and about 250 ms until all was deleted.
     is over: then it is kept as stuck and never deleted; a mount table is
     read rightly, also where one mount hides another; a file marked
     immutable counts as one that cannot be removed;
+  - the same on a kernel that says less (no `openat2`, no mount id, as
+    before Linux 5.6; the test hook `CATALYST_OLD_KERNEL=1`): the trash is
+    told to be catalyst's own from `mountinfo`, the run that finishes a
+    journal puts an unchecked directory back, a whole removal moves no
+    directory whole and leaves nothing behind; where nothing tells what
+    is mounted, the trash is not used and one made for the asking is not
+    left there;
+  - a journal is not finished past a directory that waits to be put back
+    in a trash that is not used (others may write to it), nor while
+    something mounted on the trash hides what is in it: the run stops,
+    names the directory and what its link names, says how many wait and
+    to look at them first; nothing in that trash is touched, and once it
+    is root's alone again the next run puts the directory back and
+    finishes;
+  - a root given as a symlink is the directory it leads to: an unchecked
+    directory goes back into it, and a big removed package's directory at
+    the top of it leaves whole, as one;
+  - a directory is not taken for made when a file or a symlink has its
+    name, on the short way of making one and on the long one;
   - big trees are deleted directory by directory on several threads, a
     directory others may write to through descriptors, and no symlink is
     followed in either;
@@ -1393,7 +1412,14 @@ until the command returned and about 250 ms until all was deleted.
   binary of this commit): 180 rounds (`add` 40, `small` 40, the upgrade
   40, `del` 30, `bigdel` with whole directories moved 30), 171 killed
   while running, 0 failures; the same 180 rounds on the binary of the
-  commit before, 0 failures. One earlier failure, a directory left 0700 by a kill
+  commit before, 0 failures. With the fixes to the developers' round-2
+  changes (the trash on any kernel, a root given as a symlink, a journal
+  not finished past a waiting directory): 180 rounds on the binary of this
+  commit, 169 killed while running, 0 failures; and 320 rounds each on the
+  two versions before it, which differ from it only in what a run checks
+  and says when it stops at a trash that is not used, 90 of each 320 on
+  the removal of Cataclysm with whole directories moved, 0 failures.
+  One earlier failure, a directory left 0700 by a kill
   between `mkdir` and `chmod`, led to the atomic directory creation
   described under The transaction.
 - **Power-cut test,** run by `catalyst-powercut.sh` (as root; it needs
@@ -1458,3 +1484,10 @@ until the command returned and about 250 ms until all was deleted.
   with `--clean-later` 20 each, the upgrade on XFS 15, the removal on ext4
   15, the removal of Cataclysm on btrfs with `--clean-later` 20. The same
   135 rounds on the binary of the commit before, 0 failures.
+
+  With the fixes to the developers' round-2 changes: those 135 rounds on
+  the binary of this commit, 0 failures; and 295 rounds each on the two
+  versions before it (see the kill test), 0 failures: the 135, and 160
+  more on the removal of Cataclysm with whole directories moved (btrfs
+  75, ext4 30, XFS 20), the upgrade on btrfs and the small removal on
+  ext4.

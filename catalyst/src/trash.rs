@@ -52,11 +52,25 @@ pub fn dir(root: &Path) -> PathBuf {
 /// removed (false for read-only `--simulate` queries). `None`: there is none,
 /// or it is not to be used.
 fn base(root: &Path, make: bool, clean: bool) -> Option<PathBuf> {
+    base_how(root, make, clean, &sys::is_mount_point, &sys::mounts)
+}
+
+/// [`base`], given the two things it asks of the system (the tests give
+/// other answers): whether the kernel says that a name in a directory is a
+/// mount point, and the mounts.
+fn base_how(
+    root: &Path,
+    make: bool,
+    clean: bool,
+    says: &dyn Fn(&File, &std::ffi::CStr) -> Option<bool>,
+    mounts: &dyn Fn() -> Option<Vec<sys::Mount>>,
+) -> Option<PathBuf> {
     let state = Db::state(root);
     let b = dir(root);
+    let mut made = false;
     if make {
         match fs::DirBuilder::new().mode(0o700).create(&b) {
-            Ok(()) => {}
+            Ok(()) => made = true,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(_) => return None,
         }
@@ -71,21 +85,37 @@ fn base(root: &Path, make: bool, clean: bool) -> Option<PathBuf> {
     }
     let st = fs::symlink_metadata(&state).ok()?;
     let name = std::ffi::CStr::from_bytes_with_nul(b"trash\0").unwrap();
-    let mounted = match File::open(&state).ok().and_then(|d| sys::is_mount_point(&d, name)) {
-        Some(v) => v,
-        // `openat2` unavailable (kernel < 5.6 or seccomp): fall back to
-        // mountinfo, failing closed if that cannot tell either.
-        None => match (fs::canonicalize(&b), sys::mounts()) {
-            (Ok(abs), Some(ms)) => sys::mounted_in_or_from(&ms, &abs),
-            _ => true,
+    // Whether the trash is a mount point. Where the kernel does not say (no
+    // `openat2`: Linux before 5.6, or a filter that forbids the call),
+    // `mountinfo` does, on every kernel: what is mounted on the trash, or
+    // in it, is listed there by its path. Where that gives no answer
+    // either, nothing tells, and the trash is not used.
+    let mounted = match File::open(&state).ok().and_then(|d| says(&d, name)) {
+        Some(v) => Some(v),
+        None => match (fs::canonicalize(&b), mounts()) {
+            (Ok(abs), Some(ms)) => Some(sys::mounted_in(&ms, &abs)),
+            _ => None,
         },
     };
-    let ours = st.is_dir() && st.dev() == m.dev() && !mounted && m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o022 == 0;
+    let ours = st.is_dir() && st.dev() == m.dev() && mounted == Some(false) && m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o022 == 0;
     if !ours {
-        eprintln!(
-            "oct: warning: {} is not a directory of catalyst's own (a mount, another owner, or others may write to it): left alone",
-            b.display()
-        );
+        if made {
+            // made a moment ago for this and not to be used: not left
+            // behind, where every later run would stop at it
+            let _ = fs::remove_dir(&b);
+        }
+        let what = if made { "it is not used" } else { "left alone" };
+        if mounted.is_none() {
+            eprintln!(
+                "oct: warning: whether something is mounted on {} cannot be told here (the kernel does not say, and /proc/self/mountinfo gives no answer): {what}",
+                b.display()
+            );
+        } else {
+            eprintln!(
+                "oct: warning: {} is not a directory of catalyst's own (a mount, another owner, or others may write to it): {what}",
+                b.display()
+            );
+        }
         return None;
     }
     Some(b)
@@ -258,17 +288,46 @@ fn orphan_link(link: &Path) -> bool {
     gone(link.with_extension("unchecked")) && gone(link.with_extension("stuck"))
 }
 
+/// The directories still to be looked through (`N.unchecked`) in the
+/// entries of the trash at `trash`, sorted; none if it is no directory.
+/// Looks only, by name, and follows nothing.
+fn waiting_unchecked(trash: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    match fs::symlink_metadata(trash) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Ok(found),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(found),
+        Err(e) => return Err(e),
+    }
+    for e in fs::read_dir(trash)? {
+        let p = e?.path();
+        if !fs::symlink_metadata(&p).map_or(false, |m| m.is_dir()) {
+            continue;
+        }
+        for t in fs::read_dir(&p)? {
+            let t = t?.path();
+            if t.extension().map_or(false, |x| x == "unchecked") {
+                found.push(t);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 /// Restores `u` to canonical relative path `rel` inside `root` without
 /// following any symlink in any ancestor component (walked with `openat` +
 /// `O_DIRECTORY | O_NOFOLLOW`, then `renameat2(RENAME_NOREPLACE)` into the
 /// opened parent descriptor). Refuses symlinks so recovery can never escape
-/// `root` or redirect into catalyst's own directories.
+/// `root` or redirect into catalyst's own directories. The root itself is
+/// whatever it was given as: a symlink there is followed, as by every
+/// other step of a run.
 fn restore_confined(root: &Path, u: &Path, rel: &[u8]) -> io::Result<()> {
     let parts: Vec<&[u8]> = rel.split(|&c| c == b'/').collect();
     let Some((leaf, parents)) = parts.split_last() else {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty restore path"));
     };
-    let mut dir = sys::open_dir_nofollow(root)?;
+    let mut dir = sys::open_dir(root)?;
     for comp in parents {
         let cname = std::ffi::CString::new(*comp)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in restore path"))?;
@@ -295,12 +354,63 @@ fn restore_confined(root: &Path, u: &Path, rel: &[u8]) -> io::Result<()> {
 /// what is unchecked, and it ends.
 ///
 /// An error means that an entry could not be gone through (not that a
-/// directory could not be put back, which is dealt with here): with
+/// directory could not be put back, which is dealt with here), or, with
+/// `restore`, that a directory waits to be put back in a trash that is not
+/// used, or that something mounted on the trash hides what is in it: with
 /// `restore` the caller must not finish the journal then, or a directory
 /// that was to go back would stay out of the tree.
 pub fn settle_unchecked(root: &Path, restore: bool) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
-    let Some(base) = base(root, false, true) else { return Ok(()) };
+    let Some(base) = base(root, false, true) else {
+        // A trash that is there and is not used (`base` has said why). If a
+        // directory that a stopped run moved out of the live tree waits in
+        // it, that run's journal must not be finished without it: the
+        // directory would stay out of the tree, with whatever is in it.
+        // Looked for by name only: nothing in such a trash is touched.
+        if restore {
+            let t = dir(root);
+            // Something mounted on the trash hides what is in it: whether a
+            // directory waits under the mount cannot be seen. Asked as
+            // `base` asks it: the kernel where it says, else `mountinfo`;
+            // where neither tells, a trash on another device than the state
+            // directory is taken for one. (Where the kernel says that it is
+            // no mount point, another device is no sign of one: a btrfs
+            // subvolume has its own.)
+            let covered = match (fs::symlink_metadata(&t), fs::symlink_metadata(Db::state(root))) {
+                (Ok(m), Ok(st)) if m.is_dir() => {
+                    let name = std::ffi::CStr::from_bytes_with_nul(b"trash\0").unwrap();
+                    match File::open(Db::state(root)).ok().and_then(|d| sys::is_mount_point(&d, name)) {
+                        Some(v) => v,
+                        None => match (fs::canonicalize(&t), sys::mounts()) {
+                            (Ok(abs), Some(ms)) => sys::mounted_in(&ms, &abs),
+                            _ => m.dev() != st.dev(),
+                        },
+                    }
+                }
+                _ => false,
+            };
+            if covered {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("something is mounted on {}, and a directory to be put back may be under it; unmount it and run again", t.display()),
+                ));
+            }
+            let waiting = waiting_unchecked(&t)?;
+            if let Some(u) = waiting.first() {
+                let names = fs::read_link(u.with_extension("from")).map_or_else(|_| "nothing (it has no link)".into(), |f| format!("{:?}", f.display().to_string()));
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "{} waits to be put back (its link names {names}; {} such in all), and the trash it is in is not used (the warning above says why). Look at every *.unchecked directory in the entries of {} and at the link beside it first: a trash that others could change may hold what catalyst did not put there, and the next run puts each of them where its link says. Then put right what the warning names and run again",
+                        u.display(),
+                        waiting.len(),
+                        t.display()
+                    ),
+                ));
+            }
+        }
+        return Ok(());
+    };
     let mut first: Option<io::Error> = None;
     for e in fs::read_dir(&base)?.flatten() {
         let p = e.path();
@@ -677,6 +787,163 @@ mod tests {
             fs::remove_dir_all(u.parent().unwrap()).unwrap();
         }
         fs::remove_dir_all(&outside).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Where the kernel does not say whether the trash is a mount point (no
+    /// `openat2`), `mountinfo` does. Where nothing tells, the trash is not
+    /// used, and one made for the asking is not left behind.
+    #[test]
+    fn the_trash_is_checked_for_mounts_on_any_kernel() {
+        let root = root("any-kernel");
+        let silent = |_: &File, _: &std::ffi::CStr| -> Option<bool> { None };
+        let blind = || -> Option<Vec<sys::Mount>> { None };
+        let mount_at = |rel: &'static str| {
+            let root = root.clone();
+            move || -> Option<Vec<sys::Mount>> {
+                let at = fs::canonicalize(dir(&root)).unwrap().join(rel);
+                Some(vec![
+                    sys::Mount { id: 1, dev: b"8:1".to_vec(), root: "/".into(), at: "/".into() },
+                    sys::Mount { id: 2, dev: b"0:40".to_vec(), root: "/".into(), at },
+                ])
+            }
+        };
+        // the kernel does not say, mountinfo does: used, as where the kernel says
+        if sys::mounts().is_some() {
+            let b = base_how(&root, true, true, &silent, &sys::mounts).expect("the trash, by mountinfo");
+            assert_eq!(b, dir(&root));
+            fs::remove_dir(&b).unwrap();
+        } else {
+            eprintln!("no /proc/self/mountinfo here: that part is not tested");
+        }
+        // mountinfo says that something is mounted on it, or in it
+        for rel in ["", "5-5/0"] {
+            assert!(base_how(&root, true, true, &silent, &mount_at(rel)).is_none(), "a mount at {rel:?}");
+            assert!(fs::symlink_metadata(dir(&root)).is_err(), "made for the asking, refused, and not left behind");
+        }
+        // a mount elsewhere is none of its business
+        let elsewhere = || -> Option<Vec<sys::Mount>> {
+            Some(vec![sys::Mount { id: 2, dev: b"0:40".to_vec(), root: "/".into(), at: "/somewhere/else".into() }])
+        };
+        let b = base_how(&root, true, true, &silent, &elsewhere).expect("the trash");
+        fs::remove_dir(&b).unwrap();
+        // nothing tells
+        assert!(base_how(&root, true, true, &silent, &blind).is_none());
+        assert!(fs::symlink_metadata(dir(&root)).is_err(), "not left behind");
+        // one that was there before stays as it is, with what is in it
+        fs::create_dir_all(dir(&root).join("7-7/0")).unwrap();
+        assert!(base_how(&root, true, true, &silent, &blind).is_none());
+        assert!(base_how(&root, false, true, &silent, &mount_at("")).is_none());
+        assert!(dir(&root).join("7-7/0").is_dir());
+        // and where the kernel says, it is asked alone
+        let says_no = |_: &File, _: &std::ffi::CStr| -> Option<bool> { Some(false) };
+        let says_yes = |_: &File, _: &std::ffi::CStr| -> Option<bool> { Some(true) };
+        fs::remove_dir_all(dir(&root)).unwrap();
+        let b = base_how(&root, true, true, &says_no, &blind).expect("the trash");
+        fs::remove_dir(&b).unwrap();
+        assert!(base_how(&root, true, true, &says_yes, &elsewhere).is_none());
+        assert!(fs::symlink_metadata(dir(&root)).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A root given as a symlink is the directory it leads to: an unchecked
+    /// directory goes back into it. (Below the root no link is followed:
+    /// `settle_unchecked_refuses_symlink_in_parent_path`.)
+    #[test]
+    fn an_unchecked_directory_goes_back_under_a_root_given_as_a_link() {
+        let real = root("root-as-link");
+        let link = real.with_extension("the-link");
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        fs::create_dir_all(real.join("usr/share")).unwrap();
+        let mut e = Entry::new(&link).expect("an entry");
+        let staging = real.join("tmp-src");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("data"), b"keep").unwrap();
+        let u = e.take_unchecked(&staging, b"usr/share/thing").unwrap();
+        drop(e);
+        settle_unchecked(&link, true).unwrap();
+        assert_eq!(fs::read(real.join("usr/share/thing/data")).unwrap(), b"keep");
+        assert!(fs::symlink_metadata(&u).is_err() && fs::symlink_metadata(u.with_extension("stuck")).is_err());
+        fs::remove_file(&link).unwrap();
+        fs::remove_dir_all(&real).unwrap();
+    }
+
+    /// A directory that waits to be put back in a trash that is not used
+    /// (here: others may write to it) stops the run that would finish its
+    /// journal, and nothing in that trash is touched. Any other run goes
+    /// on; and once the trash is root's alone again the directory goes
+    /// back. A trash that is not used and holds nothing unchecked stops
+    /// nobody.
+    #[test]
+    fn a_journal_is_not_finished_past_a_directory_in_a_trash_that_is_not_used() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = root("shut-trash");
+        fs::create_dir_all(root.join("usr/share")).unwrap();
+        let mut e = Entry::new(&root).expect("an entry");
+        let staging = root.join("tmp-src");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("data"), b"keep").unwrap();
+        let u = e.take_unchecked(&staging, b"usr/share/thing").unwrap();
+        drop(e);
+        let shut = |mode: u32| fs::set_permissions(dir(&root), fs::Permissions::from_mode(mode)).unwrap();
+        shut(0o775);
+        let err = settle_unchecked(&root, true).unwrap_err().to_string();
+        // it names the directory and what its link names, says how many
+        // wait, and says to look at all of them first
+        assert!(err.contains("0.unchecked waits to be put back (its link names \"usr/share/thing\"; 1 such in all)"), "{err}");
+        assert!(err.contains("Look at every *.unchecked directory"), "{err}");
+        assert!(u.join("data").exists() && u.with_extension("from").symlink_metadata().is_ok(), "nothing in it was touched");
+        assert!(!root.join("usr/share/thing").exists());
+        // a second one, whose link names a place it would never be put at:
+        // counted, and the first is named as its link has it
+        let entry = u.parent().unwrap().to_path_buf();
+        fs::create_dir(entry.join("5.unchecked")).unwrap();
+        std::os::unix::fs::symlink("../outside", entry.join("5.from")).unwrap();
+        let err = settle_unchecked(&root, true).unwrap_err().to_string();
+        assert!(err.contains("0.unchecked waits to be put back") && err.contains("2 such in all"), "{err}");
+        fs::remove_file(entry.join("5.from")).unwrap();
+        fs::remove_dir(entry.join("5.unchecked")).unwrap();
+        // a run with no journal to finish goes on, and leaves it as it is
+        settle_unchecked(&root, false).unwrap();
+        assert_eq!(empty(&root).unwrap(), 0);
+        assert!(u.join("data").exists());
+        // root's alone again: it goes back
+        shut(0o700);
+        settle_unchecked(&root, true).unwrap();
+        assert_eq!(fs::read(root.join("usr/share/thing/data")).unwrap(), b"keep");
+        assert!(fs::symlink_metadata(&u).is_err());
+        // not used, and nothing unchecked in it: nobody is stopped
+        fs::create_dir_all(dir(&root).join("9-9/0")).unwrap();
+        fs::write(dir(&root).join("9-9/1.stuck"), b"").unwrap();
+        shut(0o775);
+        settle_unchecked(&root, true).unwrap();
+        assert!(dir(&root).join("9-9/0").is_dir());
+        shut(0o700);
+        // Something mounted on the trash hides what waits in it: the run
+        // that would finish a journal stops, whatever the mount holds (as
+        // root, where a tmpfs can be mounted).
+        let again = root.join("tmp-src-2");
+        fs::create_dir_all(&again).unwrap();
+        fs::write(again.join("data"), b"keep too").unwrap();
+        let mut e = Entry::new(&root).expect("an entry");
+        e.take_unchecked(&again, b"usr/share/other").unwrap();
+        drop(e);
+        let mounted = unsafe { libc::geteuid() } == 0
+            && std::process::Command::new("mount").args(["-t", "tmpfs", "-o", "size=1m,mode=0700", "none"]).arg(dir(&root)).status().map_or(false, |s| s.success());
+        if mounted {
+            // (two wait under it now: the message of the look would say so)
+            let err = settle_unchecked(&root, true).map_err(|e| e.to_string());
+            let unmounted = std::process::Command::new("umount").arg(dir(&root)).status().map_or(false, |s| s.success());
+            assert!(unmounted, "the test's own mount on {} is still there", dir(&root).display());
+            assert!(err.as_ref().err().map_or(false, |m| m.contains("mounted on")), "{err:?}");
+            assert!(!root.join("usr/share/other").exists());
+        } else {
+            eprintln!("no tmpfs could be mounted here: that part is not tested");
+        }
+        // and with nothing on it the directory goes back
+        settle_unchecked(&root, true).unwrap();
+        assert_eq!(fs::read(root.join("usr/share/other/data")).unwrap(), b"keep too");
         fs::remove_dir_all(&root).unwrap();
     }
 }
